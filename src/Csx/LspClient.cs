@@ -143,12 +143,19 @@ internal sealed class LspClient : IAsyncDisposable
     /// and readiness would lie again. Matching on <c>containerName</c> would be the obvious
     /// alternative and is wrong — it is localised display text.
     /// </para>
+    /// <para>
+    /// A project that contributed no candidate is not waited on — there is nothing to ask for
+    /// — but it is named on the failure path so its absence from readiness is visible rather
+    /// than silent. <c>Program.InferSentinels</c> guarantees at least one project does
+    /// contribute, so this never degrades to waiting for nothing at all.
+    /// </para>
     /// </summary>
     public async Task WaitReadyAsync(
         IReadOnlyList<Sentinel> sentinels, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
-        var pending = sentinels.ToList();
+        var pending = sentinels.Where(s => s.Candidates.Count > 0).ToList();
+        var unprobed = sentinels.Where(s => s.Candidates.Count == 0).ToList();
 
         while (true)
         {
@@ -163,12 +170,15 @@ internal sealed class LspClient : IAsyncDisposable
 
         var fired = _endpoints.ProjectInitialized.IsCompleted ? "fired" : "never fired";
         var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
-        var projects = string.Join(", ", pending.Select(s => Path.GetFileName(s.Directory.TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
+        // Projects nothing probed are named too: readiness says nothing about them either way,
+        // and leaving them out is the same quiet degradation the per-project set exists to end.
+        var skipped = unprobed.Count == 0
+            ? string.Empty
+            : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.";
         throw new CsxException(
             $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
-            $"returned no symbols for project(s) {projects} " +
-            $"(projectInitializationComplete {fired}).{StderrTail()}");
+            $"returned no symbols for project(s) {Names(pending)} " +
+            $"(projectInitializationComplete {fired}).{skipped}{StderrTail()}");
     }
 
     /// <summary>
@@ -187,6 +197,11 @@ internal sealed class LspClient : IAsyncDisposable
 
         return false;
     }
+
+    private static string Names(IEnumerable<Sentinel> sentinels) => string.Join(
+        ", ",
+        sentinels.Select(s => Path.GetFileName(s.Directory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
 
     private static bool Under(string uri, string directory)
     {

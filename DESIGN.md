@@ -58,6 +58,33 @@ Core (net10.0))"`), which arrives on `workspace/symbol` results and is already p
 through means carrying the resolved symbol's project alongside the URI. Deferred until a
 fixture has two projects consuming one generator; the fixture today has one.
 
+## Readiness
+
+A query fired before the workspace loads answers empty rather than erroring, so every command
+waits first. **Ready means every project loaded**, not merely that the server answered
+something: one sentinel only ever proved *some* project was up, and the window that leaves open
+produced `refs`, `impl` and `sym` answers that were silently incomplete at exit 0. So `csx`
+takes one sentinel per project and requires each to resolve to a location inside that project's
+own directory — never matched by `containerName`, which is localised display text.
+
+Knowing the projects means scanning for `*.csproj` under the root, because **the server cannot
+be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
+project list. The scan is an approximation and it errs deliberately towards over-inclusion — a
+`.csproj` excluded from the solution is waited on needlessly, where the opposite mistake is the
+incomplete-answer bug this exists to close. A root with no `.csproj` at all fails immediately
+instead of timing out; `--sentinel` bypasses the scan entirely.
+
+`--sentinel` is therefore the weak mode, not a neutral override: it replaces the whole
+per-project set with a single root-scoped probe, giving up the all-projects-loaded guarantee.
+It is the escape hatch for a layout the scan cannot read.
+
+`diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
+Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to
+`workspace/symbol` and reports **no diagnostics at all** — only `outline` answers for it, off
+the syntax tree — so scoping would suppress nothing. A file linked in from outside its project
+directory (`<Compile Include="../Elsewhere/File.cs" />`) is fully indexed and does report, and
+scoping would drop those diagnostics silently. Under-reporting is worse than over-walking.
+
 ## Settled — do not re-litigate
 
 | Decision | Why |

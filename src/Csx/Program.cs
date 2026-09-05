@@ -50,6 +50,12 @@ internal static partial class Program
         }
 
         var opts = Options.Parse(argv);
+
+        // Before the server starts, like the argument checks in Options.Parse: this is a
+        // filesystem scan, and a root with no project in it should say so instantly rather
+        // than after a cold load.
+        var sentinels = Sentinels(opts);
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
@@ -57,7 +63,7 @@ internal static partial class Program
 
         try
         {
-            return await DispatchAsync(client, opts, cts.Token);
+            return await DispatchAsync(client, opts, sentinels, cts.Token);
         }
         finally
         {
@@ -71,47 +77,48 @@ internal static partial class Program
         }
     }
 
-    private static async Task<int> DispatchAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DispatchAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         switch (opts.Command)
         {
             case "ready":
-                await client.WaitReadyAsync(
-                    Sentinels(opts), opts.Timeout, ct);
+                await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
                 Console.WriteLine("ready");
                 return 0;
 
             case "refs":
-                return await RefsAsync(client, opts, ct);
+                return await RefsAsync(client, opts, sentinels, ct);
 
             case "def":
-                return await DefAsync(client, opts, ct);
+                return await DefAsync(client, opts, sentinels, ct);
 
             case "impl":
-                return await ImplAsync(client, opts, ct);
+                return await ImplAsync(client, opts, sentinels, ct);
 
             case "sym":
-                return await SymAsync(client, opts, ct);
+                return await SymAsync(client, opts, sentinels, ct);
 
             case "outline":
-                return await OutlineAsync(client, opts, ct);
+                return await OutlineAsync(client, opts, sentinels, ct);
 
             case "diag":
-                return await DiagAsync(client, opts, ct);
+                return await DiagAsync(client, opts, sentinels, ct);
 
             default:
                 throw new CsxException($"unknown command '{opts.Command}'\n\n{Usage}");
         }
     }
 
-    private static async Task<int> RefsAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> RefsAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("refs needs a symbol or file:line:col");
 
         // Gate on a sentinel that must exist, never on the symbol being asked about:
         // otherwise a genuinely absent symbol is indistinguishable from a workspace that
         // has not finished loading, and the caller waits out the whole timeout for it.
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ReferencesAsync(uri, position, ct);
@@ -120,11 +127,12 @@ internal static partial class Program
         return locations.Count == 0 ? 1 : 0;
     }
 
-    private static async Task<int> DefAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DefAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("def needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.DefinitionAsync(uri, position, ct);
@@ -140,11 +148,12 @@ internal static partial class Program
     /// means the position resolved to no symbol at all, not that nothing implements the
     /// symbol. Verified on the wire against 5.12.0-1.26426.8.
     /// </summary>
-    private static async Task<int> ImplAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> ImplAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("impl needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ImplementationsAsync(uri, position, ct);
@@ -159,13 +168,14 @@ internal static partial class Program
     /// the point rather than a problem. Empty exits 1, like <c>refs</c>: a search that found
     /// nothing is a lookup that failed.
     /// </summary>
-    private static async Task<int> SymAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> SymAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var query = opts.Argument ?? throw new CsxException("sym needs a query");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var (_, matches) = await QuerySymbolsAsync(client, query, Distinct, ct);
+        var matches = Distinct(await client.SymbolsAsync(query, ct));
         Output.WriteSymbols(opts.Root, matches, opts.Max, opts.Json);
         return matches.Count == 0 ? 1 : 0;
     }
@@ -175,11 +185,12 @@ internal static partial class Program
     /// empty file is a query that was answered. A target that fails to resolve still exits 1,
     /// by throwing out of the resolver.
     /// </summary>
-    private static async Task<int> OutlineAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> OutlineAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("outline needs a file or symbol");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var uri = await OutlineTargetAsync(client, opts.Root, target, ct);
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
@@ -228,9 +239,10 @@ internal static partial class Program
     /// a repo with no diagnostics is a successful `diag`, unlike an empty `refs`, which means
     /// the lookup failed.
     /// </summary>
-    private static async Task<int> DiagAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DiagAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var findings = new List<(string Uri, Diagnostic Diagnostic)>();
         if (opts.Argument is { } target)
@@ -304,12 +316,19 @@ internal static partial class Program
     /// Every symbol matching <paramref name="target"/>, deduplicated by location. Callers
     /// decide what more than one means: for <c>refs</c> and <c>def</c> it is ambiguity, for
     /// <c>outline</c> it is only ambiguity when the documents differ.
+    /// <para>
+    /// One query, no retry. This used to re-ask for 10s while the selection came back empty,
+    /// because a sentinel proved only that <em>some</em> project had loaded and a miss was
+    /// indistinguishable from a project still loading. Readiness now waits for every project,
+    /// so an empty answer means the symbol is absent — and the retry only made every genuine
+    /// miss cost 40 requests and 10s.
+    /// </para>
     /// </summary>
     private static async Task<List<SymbolInformation>> MatchSymbolsAsync(
         LspClient client, string target, CancellationToken ct)
     {
-        var (candidates, matches) = await QuerySymbolsAsync(
-            client, LastSegment(target), c => Distinct(c.Where(s => Matches(s, target))), ct);
+        var candidates = await client.SymbolsAsync(LastSegment(target), ct);
+        var matches = Distinct(candidates.Where(s => Matches(s, target)));
 
         if (matches.Count == 0)
         {
@@ -320,33 +339,6 @@ internal static partial class Program
         }
 
         return matches;
-    }
-
-    /// <summary>
-    /// One <c>workspace/symbol</c> query, retried while <paramref name="select"/> picks
-    /// nothing out of the answer. The sentinel proves the workspace loaded, not that every
-    /// project did, so a query fired in that window comes back missing the symbols of a
-    /// project still loading — indistinguishable from a target that is genuinely absent.
-    /// Retrying on the selection rather than on the raw answer matters: a query for a name
-    /// declared in two projects returns the loaded one's symbols immediately, so waiting for
-    /// a non-empty answer would stop waiting before the one actually being asked for arrives.
-    /// The whole answer comes back too, because the failure message lists it as candidates.
-    /// </summary>
-    private static async Task<(IReadOnlyList<SymbolInformation> Candidates, List<SymbolInformation> Selected)>
-        QuerySymbolsAsync(
-            LspClient client,
-            string query,
-            Func<IReadOnlyList<SymbolInformation>, List<SymbolInformation>> select,
-            CancellationToken ct)
-    {
-        var grace = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (true)
-        {
-            var candidates = await client.SymbolsAsync(query, ct);
-            var selected = select(candidates);
-            if (selected.Count > 0 || DateTime.UtcNow >= grace) return (candidates, selected);
-            await Task.Delay(250, ct);
-        }
     }
 
     // Roslyn reports a symbol once per project that sees it, so a symbol in a multi-targeted
@@ -458,23 +450,29 @@ internal static partial class Program
     /// because the list is a fallback chain, not an index.
     /// <para>
     /// A project that declares no type at all — one that is only top-level statements —
-    /// contributes no sentinel and is skipped. That degrades to the old coverage for that
-    /// project rather than hanging on a probe that cannot resolve. A root with no
-    /// <c>.csproj</c> under it falls back to a single root-scoped sentinel, which is what
-    /// every caller got before.
+    /// contributes no candidate. It is still returned, so that
+    /// <see cref="LspClient.WaitReadyAsync"/> can name it as unprobed on the failure path
+    /// rather than leaving it silently absent from readiness.
+    /// </para>
+    /// <para>
+    /// A root with no <c>.csproj</c> under it fails immediately. Roslyn loads nothing for such
+    /// a root, so every sentinel is unresolvable and every query answers empty: waiting out the
+    /// full timeout only delays the same conclusion. <c>--sentinel</c> bypasses this, which is
+    /// the escape hatch for a layout the scan cannot read.
     /// </para>
     /// </summary>
     private static IReadOnlyList<Sentinel> InferSentinels(string root)
     {
         var projects = ProjectDirectories(root);
-        if (projects.Count == 0) return [new Sentinel(Path.GetFullPath(root), Candidates(root))];
+        if (projects.Count == 0)
+        {
+            throw new CsxException(
+                $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
+        }
 
-        var sentinels = projects
-            .Select(d => new Sentinel(d, Candidates(d)))
-            .Where(s => s.Candidates.Count > 0)
-            .ToList();
+        var sentinels = projects.Select(d => new Sentinel(d, Candidates(d))).ToList();
 
-        return sentinels.Count > 0
+        return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
             : throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
     }

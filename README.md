@@ -119,6 +119,13 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 
 Paths are relative to `--root`; lines and columns are one-based.
 
+`--sentinel` is an escape hatch, not a neutral override. By default `csx` waits for *every*
+project under the root to load, one readiness probe per `.csproj`; passing `--sentinel` replaces
+that whole set with a single probe scoped to the root, which gives up the guarantee and restores
+the window in which `refs`, `impl` and `sym` can answer incompletely at exit 0. Use it when the
+`.csproj` scan cannot read the workspace layout — including a root with no `.csproj`, which
+otherwise fails immediately.
+
 `refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl` and
 `sym` follow the same rule.
@@ -246,8 +253,8 @@ weekly bump.
 
 | Failure mode | How |
 |---|---|
-| Async project load returning empty instead of erroring | `WaitReadyAsync` waits for `workspace/projectInitializationComplete`, then polls a sentinel symbol until it resolves, then fails loudly on timeout. Never `sleep`. |
-| A sentinel that is itself the thing being queried | The sentinel is inferred from a type declaration in the tree, so "symbol absent" and "workspace not loaded" stay distinguishable. The target gets a 10 s grace poll after readiness. |
+| Async project load returning empty instead of erroring | `WaitReadyAsync` polls one sentinel symbol per project until every one resolves, then fails loudly on timeout. Never `sleep`, and never block on `workspace/projectInitializationComplete` — it never fires for a client attaching to a loaded daemon. |
+| A sentinel that is itself the thing being queried | Sentinels are inferred from type declarations in each project, so "symbol absent" and "workspace not loaded" stay distinguishable. No grace poll on the target: readiness covering every project is what makes an empty answer mean absent. |
 | UTF-16 position encoding | The server does not advertise `positionEncoding`, which per LSP 3.17 means utf-16 — the same unit as a .NET string index. `csx` asserts this at `initialize` and refuses to run if a future build negotiates utf-8. A fixture line carrying an astral-plane character (a surrogate pair, so utf-16 and rune counts differ) pins the reported column at 39 in three cases; an accented letter would pass even on a broken implementation. |
 | A first diagnostic pull answered from the misc-files state | A freshly opened document is bound against whatever the server has at that instant, and for the first one that is the misc-files state, which reports only errors needing no project references. `DiagnosticsAsync` re-pulls until two consecutive reports agree (5 s budget). The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — so a first-response-only implementation reports nothing and the case fails. |
 | Roslyn ignoring unopened documents | Every query opens its document via `textDocument/didOpen` first — except source-generated ones, which the server owns and answers for without it. |

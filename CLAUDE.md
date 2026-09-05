@@ -67,6 +67,20 @@ dotnet build src/Csx/Csx.csproj          # build
   `TaskCanceled`, and every later request then failed with `-32000: Server was requested to
   shut down`. Payloads are hand-rolled in `Protocol.cs`, so a shape mistake is silent and
   then fatal rather than a clean error.
+- **A `.cs` file no project compiles is half-invisible, and the halves are not the ones you
+  would guess.** `workspace/symbol` does not index it and `textDocument/diagnostic` reports
+  **nothing** for it — but `outline` answers, off the syntax tree. So `csx outline` on such a
+  file works while `csx sym` on the type it declares exits 1, and scoping `diag`'s file walk to
+  project directories would suppress no noise whatsoever. The same file **linked in** with
+  `<Compile Include="../Elsewhere/File.cs" />` is fully indexed and does report, so that scoping
+  would silently drop real errors. Measured 2026-09-05; the reasoning is in `DESIGN.md`.
+- **Never pipe or command-substitute `csx` output in bash while the daemon is in play.** The
+  daemon inherits the client's stdout, so `csx ... | tail` and `out=$(csx ...)` block forever
+  waiting for the pipe's last writer — it looks exactly like a hung cold load. Redirect to a
+  file and `cat` it, or pass `--no-daemon`. Only the run that *launches* the daemon can hang,
+  which is why `probes/run.sh` captures every case with `$(...)` and never blocks: its cold
+  `csx ready` — the one leg that starts the daemon — is deliberately uncaptured. Keep it that
+  way.
 - **The server does not restore your projects.** `dotnet restore` before starting it.
 - **The daemon is the default, and it changes what "ready" means.** `csx` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every

@@ -47,11 +47,39 @@ Half of it, and the half that gated 1a/1c:
   answers partially. The partial window belongs to a client attaching to a daemon loading a
   root it has not loaded before — where the notification already fired for the previous root.
 
-Still open, and still gating 1b: **the misc-files question.** Nothing here established whether
+### The misc-files question — answered 2026-09-05, and it killed half of 1b
+
+Measured on a scratch copy of `fixture` with `Ambient/Stray.cs` added, against
+5.12.0-1.26426.8:
+
+- **`workspace/symbol` does not index a file in no project.** `csx sym Stray` exits 1 with
+  `no results`. The first root-cause bullet's premise was right.
+- **Neither does `textDocument/diagnostic`.** `csx diag Ambient/Stray.cs --json` returns
+  **count 0**, and the whole-workspace count stays 3. So the second root-cause bullet —
+  "bare `diag` reports on those same non-project files" — **is not real**, and
+  `workspace-diag-skips-non-project-file` would have asserted the same thing before and after
+  1b. It was never written.
+- **`outline` still answers**, off the syntax tree. The asymmetry is indexing, not parsing.
+- **A linked file is fully indexed.** Adding `<Compile Include="../Ambient/Stray.cs" />` to
+  `App.csproj` makes `sym Stray` resolve (`project App`) and `diag` report both CS0246 errors.
+  So the inverted failure mode 1b predicted is **measured, not theoretical**: full 1b would
+  have silently dropped two real errors to suppress zero noise.
+- **`fixture/` has `Fixture.slnx`.** The "no `.sln` and loads fine" contradiction with
+  `skill/SKILL.md` was a false alarm; that entry already says `.sln`/`.slnx` and stands.
+
+**1b was therefore cut down to what the measurements support**: readiness inference stays
+project-scoped (it already was, since 1a), a root with no `.csproj` now fails immediately
+instead of timing out, and `diag`'s file walk is left alone — deliberately, with the reason
+written into `DESIGN.md` so it is not "fixed" later. `fixture/Ambient/Stray.cs` landed anyway,
+with `sentinel-skips-non-project-file`: it no longer pins 1b, but it is a regression guard on
+1c's per-project inference, which would hang on that file if inference ever went back to
+scanning any `.cs` under the root.
+
+~~Still open, and still gating 1b: **the misc-files question.** Nothing here established whether
 `workspace/symbol` answers for a file in no project, so the first root-cause bullet and
 `sentinel-skips-non-project-file` remain unverified. Note also that `fixture/` has **no
 `.sln`** and loads fine, which contradicts `skill/SKILL.md`'s first troubleshooting entry —
-worth re-deriving before 1b leans on it.
+worth re-deriving before 1b leans on it.~~
 
 ## Verified on the wire, 2026-09-05
 
@@ -76,15 +104,13 @@ Four of the items — 1a through 1d — were one gap: **`csx` had no notion of w
 exist.** 1a and 1c closed it for readiness; 1b and 1d are what is left. The six symptoms, with
 what is now true of each:
 
-- `InferSentinel` picks a type out of any `.cs` under the root, including files no project
-  compiles, so readiness waits out the full 180 s on a symbol Roslyn will never index.
-  **This one bullet rests on an unverified premise** — that `workspace/symbol` does not answer
-  for a file in no project. Nothing in the repo establishes it; the misc-files evidence
-  (`README.md:252`, `LspClient.cs:219`) is about a freshly *opened* document, which is a
-  different question. 1s must settle it. If Roslyn does index such a file, this symptom is not
-  real and `sentinel-skips-non-project-file` pins nothing. The five bullets below do not depend
-  on it.
-- Bare `diag` reports on those same non-project files.
+- ~~`InferSentinel` picks a type out of any `.cs` under the root~~ — **fixed by 1a/1c**, and
+  its premise confirmed by 1s: `workspace/symbol` really does ignore a file in no project.
+  Inference has been per-project since 1a, so the stray is never picked. Pinned by
+  `sentinel-skips-non-project-file`.
+- ~~Bare `diag` reports on those same non-project files~~ — **not real.** 1s measured count 0
+  for such a file. Nothing to fix; see the misc-files section above for why scoping the walk
+  would be a net loss.
 - ~~`refs` / `impl` accept a result set that is merely *incomplete*~~ — **fixed by 1c.** This
   was the one that turned out to be live breakage rather than theory: it took CI red and three
   gate runs, each failing a different pair of cases.
@@ -92,7 +118,8 @@ what is now true of each:
 - ~~`def` resolves a genuinely ambiguous name to whichever project loaded first~~ — **fixed by
   1c**, in the sense that every project is now loaded before the query is asked, so the
   ambiguity is visible and the existing error fires.
-- `diag` settles on two identical empty misc-files snapshots taken 250 ms apart.
+- `diag` settles on two identical empty misc-files snapshots taken 250 ms apart. Still true,
+  and now the whole of the remaining cost — Phase 3.
 
 Three compensating retry loops exist because readiness was weak — `SettleAsync`,
 `QuerySymbolsAsync`'s 10 s grace, `DiagnosticsAsync`'s settle — and each has a hole. The plan
@@ -107,12 +134,12 @@ the compensations that only existed because it did not.** The first two thirds h
 | 0a | Validate numeric CLI arguments | 0 | **done** |
 | 0b | Dispose the client when `initialize` fails | 0 | **done** |
 | 0c | Reject a malformed position at parse time | 0 | **done** |
-| 1s | **Spike: what does Roslyn actually load?** | 1 | **half done** — see below |
+| 1s | **Spike: what does Roslyn actually load?** | 1 | **done** — see below |
 | 1a | Enumerate projects | 1 | **done** (PR #6) |
-| 1b | Scope `SourceFiles` to project directories | 1 | not started |
+| 1b | Scope `SourceFiles` to project directories | 1 | **done, redefined** — 1s killed the `diag` half |
 | 1c | Readiness means every project loaded | 1 | **done** (PR #6) |
-| 1d | Delete the compensating retries | 1 | not started — **next**, now unblocked |
-| 1e | Document what `--sentinel` now gives up | 1 | not started — debt from 1c |
+| 1d | Delete the compensating retries | 1 | **done** |
+| 1e | Document what `--sentinel` now gives up | 1 | **done** |
 | 2v | **Verify `workspace/symbol` ordering on the wire** | 2 | not started — gates 2a |
 | 2a | `sym`: truncate before sorting | 2 | not started |
 | 2b | README layout tree omits `App/Square.cs` | 2 | not started |
@@ -255,12 +282,13 @@ a file with no position has no sensible answer to give.
 
 ## Phase 1 — project scoping
 
-The real fix. 1a and 1c landed in PR #6; **1d is next and is unblocked**. 1b still waits on
-the unanswered half of 1s.
+The real fix, and **complete**. 1a and 1c landed in PR #6; 1s, 1b, 1d and 1e landed after it —
+1b cut down to what 1s's measurements support, which is the one place this plan was wrong about
+its own diagnosis rather than about a detail.
 
 ### 1s. Spike: what does Roslyn actually load?
 
-**Half answered — see "What 1s answered" above; the rest gates 1b.** The plan below identifies
+**Answered in full — see "What 1s answered" and the misc-files section above.** The plan below identifies
 projects by scanning for `.csproj`
 files. That is an approximation, and the failure modes run both ways: it can wait for a project
 Roslyn never loaded, and it can miss source that a project does compile. This repo already
@@ -296,7 +324,17 @@ survives either way.
 `bin`/`obj`, reduced to its containing directory. The `.csproj` scan, not a server query — 1s
 established the server exposes no project list to ask for.
 
-### 1b. Scope `SourceFiles` to project directories
+### 1b. Scope `SourceFiles` to project directories — **landed, cut down**
+
+**What shipped, and what did not.** 1s measured the `diag` half away (see above), so
+`SourceFiles` is unchanged and `DiagAsync` still walks every `.cs` under the root. What landed:
+`InferSentinels` throws `no .csproj under <root>; point --root at a workspace or pass
+--sentinel` instead of falling back to a root-scoped sentinel that could never resolve, and the
+scan runs in `RunAsync` **before `StartAsync`**, so that error costs 53 ms and no server — the
+same late-validation lesson as 0a. Pinned by `no-project-root-reports`. The original plan
+follows, struck, because its reasoning is what the measurements overturned.
+
+<details><summary>Original 1b plan — superseded</summary>
 
 `Program.SourceFiles` (~`Program.cs:482`) returns every `.cs` under the root minus `bin`/`obj`.
 Rebuild it over `ProjectDirectories` — **which 1a already provides** (~`Program.cs:467`): the `.cs` files under each project directory, `Distinct()`
@@ -348,6 +386,8 @@ already asserts `--errors-only`. Both cases are contingent on 1s: the first only
 if `workspace/symbol` really does ignore a file in no project, and the second only if the stray
 really does emit CS0246 as a misc file. Write neither before 1s has answered.
 
+</details>
+
 ### 1c. Readiness means every project loaded — **landed in `1796a31`**
 
 `LspClient.WaitReadyAsync` (~`LspClient.cs:135`) now takes `IReadOnlyList<Sentinel>` and returns
@@ -379,10 +419,13 @@ so** — see 1e.
 declaration is silently absent from readiness, which is the same class of quiet degradation
 this item exists to remove. Small, and worth folding into 1e.
 
-### 1d. Delete the compensating retries
+### 1d. Delete the compensating retries — **landed**
 
-**Unblocked:** 1c is in and the gate is green cold and warm, locally and on `ubuntu-latest`.
-This is the next item in Phase 1.
+`QuerySymbolsAsync` is gone: `MatchSymbolsAsync` and `SymAsync` each fire one
+`workspace/symbol` query, `Distinct` stays extracted, and `sym-no-match-fails` stops costing
+40 requests and 10 s. `SettleAsync` and the diagnostics settle were kept, as planned. Three
+consecutive `probes/run.sh` runs after the deletion: 50/50 each, no case differing between
+runs.
 
 - **`QuerySymbolsAsync`'s 10 s / 250 ms grace** (~`Program.cs:330-350`) — delete it. This is also
   the first review's cost complaint: `sym` pays 40 requests and 10 s on every miss, because a
@@ -404,7 +447,16 @@ If a cross-project case flakes after 1d, that is 1c having a hole. Fix 1c. Do no
 grace. If `--sentinel` was left as a replacing override, note that runs using it no longer have
 the grace either — that is the contradiction item 1c asks to settle.
 
-### 1e. Document what `--sentinel` now gives up
+### 1e. Document what `--sentinel` now gives up — **landed**
+
+`README.md` and `skill/SKILL.md` now say plainly that `--sentinel` is an escape hatch that
+drops the all-projects-loaded guarantee, `DESIGN.md` gained a `Readiness` section covering the
+all-projects predicate and the `.csproj` scan's limits, and the timeout message names projects
+that contributed no sentinel at all (`Not probed at all, for want of a type declaration: ...`).
+`README.md`'s failure-mode table also lost its two stale rows: the `projectInitializationComplete`
+ordering and the deleted 10 s grace.
+
+<details><summary>Original 1e note</summary>
 
 Debt from 1c, and the only user-visible contradiction it left. `--sentinel` replaces the
 per-project set with one root-scoped probe, so a run that passes it has exactly the weak
@@ -415,6 +467,8 @@ all-projects-loaded guarantee. While there, make the readiness timeout message n
 that contributed no sentinel at all.
 
 Not probeable for the same reason 1c is not.
+
+</details>
 
 ## Phase 2 — output
 
@@ -498,24 +552,27 @@ no way to assert throughput and should not pretend to.
 
 - `dotnet format --verify-no-changes` exits 0.
 - `probes/run.sh` green — 44 legs at the start of Phase 0, 48 after it (0a added three,
-  0c a fourth),
-  plus roughly two more to come, **one re-pinned**:
+  0c a fourth), **50 after Phase 1** (`sentinel-skips-non-project-file`,
+  `no-project-root-reports`), with **one re-pinned** still to come:
   `sym-truncates` (2a). `premature-query-fails-loudly` was the other candidate and survived 1c
   unchanged, because the rewritten message kept both asserted phrases.
 - ~~`CLAUDE.md`: the "sentinel resolving no longer implies every project is loaded" bullet~~ —
   **done in `1796a31`.** It now describes the per-project model, keeps the `SettleAsync` /
   `MetadataAsSource` half, and carries the rule against matching a hit to a project by
   `containerName`.
-- `DESIGN.md`: **still owed, and now the largest doc gap.** Readiness as an all-projects
-  predicate, and the limits of the `.csproj` scan 1s settled on — neither is in `DESIGN.md`,
-  though both are in `ROADMAP.md`'s verified facts. Plus the `sym` cap ordering note from 2a.
-- `skill/SKILL.md`: **still owed.** 1c changed what `ready` means and what `--sentinel` costs
-  (1e), and 1b changes the first troubleshooting entry — whose no-`.sln` premise 1s has already
-  cast doubt on. This file is what tells the agent what to do about all of it.
+- `DESIGN.md`: **done for Phase 1** — a `Readiness` section now carries the all-projects
+  predicate, the `.csproj` scan's limits, what `--sentinel` gives up, and why `diag`'s walk is
+  deliberately not scoped. Still owed: the `sym` cap ordering note from 2a.
+- `skill/SKILL.md`: **done** — `--sentinel` is described as an escape hatch, and the first
+  troubleshooting entry now also covers a root with no `.csproj` at all. Its no-`.sln` premise
+  was **re-derived and stands**: `fixture/` has `Fixture.slnx`, so it was never a
+  counterexample.
 - `ROADMAP.md`: Milestone 4's "output tuning" item is marked unscoped; 2a is a concrete tuning
   change and can be recorded against it. The generated-document-label limitation stays deferred.
   1s's findings are **already in** the verified-facts section; 2v's are not.
-- `README.md`: the layout tree (2b), the `--sentinel` wording (1e), and the case count.
+- `README.md`: the `--sentinel` wording and the two stale failure-mode rows are **done** (1e),
+  and `Ambient/Stray.cs` is in the layout tree. Still owed: `App/Square.cs` in that tree (2b)
+  and the case count.
 - Delete this file.
 - Never push, and do not commit unless asked.
 

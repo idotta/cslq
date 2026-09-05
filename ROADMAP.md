@@ -7,7 +7,7 @@ Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and t
 Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
 that names nothing concrete; it needs scope before it can be worked.
 
-44 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+50 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. Readiness is now one sentinel per project. This is the known window the sentinel does not
 close — it proves the workspace loaded, not that every project did — and neither the
@@ -332,6 +332,18 @@ against 5.12.0-1.26426.8 / win-x64.
   cold load. It belongs to a client attaching to a **daemon loading a root it has not loaded
   before**, where the notification already fired for the previous root and never fires again —
   which is exactly the case the notification cannot be used to close. Verified 2026-09-05.
+- A `.cs` file that **no project compiles** is answered for asymmetrically: `workspace/symbol`
+  does not index it (`csx sym` on a type declared only there exits 1 with `no results`) and
+  `textDocument/diagnostic` reports **nothing** for it, but `textDocument/documentSymbol` still
+  answers off the syntax tree, so `csx outline` works. The same file **linked into** a project
+  from outside its directory (`<Compile Include="../Ambient/Stray.cs" />`) is fully indexed and
+  reports its errors. This is why readiness inference is scoped to project directories while
+  `diag`'s file walk is not: scoping the walk would suppress no noise and would silently drop a
+  linked file's real diagnostics. Verified 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy
+  of the fixture.
+- `fixture/` **does** have a solution — `Fixture.slnx` — so it is not a counterexample to
+  `skill/SKILL.md`'s "a root with only a `.csproj` and no solution never loads". That entry
+  already covers `.slnx` and stands. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
   a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.

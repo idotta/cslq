@@ -42,3 +42,5 @@
 {"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line and column are one-based"}
 {"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"csx: line out of range"}
 {"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
+{"name":"sentinel-skips-non-project-file","args":"ready --root fixture --timeout 20","exit":"0","expect":"ready"}
+{"name":"no-project-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"csx: no .csproj under"}
