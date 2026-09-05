@@ -7,9 +7,11 @@ Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and t
 Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
 that names nothing concrete; it needs scope before it can be worked.
 
-44 cases, and they do not all pass on every run: `impl-interface-type` and `sym-truncates`
-fail on a cold load, both by answering with a cross-project hit missing rather than by
-erroring. Both pass against a warm workspace. This is the known window the sentinel does not
+44 cases, and they do not all pass on every run. Three have been seen to fail on a cold load
+so far — `impl-interface-type`, `sym-truncates` and `sym-generated` — but the set is not fixed
+to those three: two consecutive runs of the suite failed a different pair. Every one of them
+fails the same way, by answering with a cross-project or generated hit missing rather than by
+erroring, and every one passes against a warm workspace. This is the known window the sentinel does not
 close — it proves the workspace loaded, not that every project did — and neither the
 `SettleAsync` decompilation guard nor `QuerySymbolsAsync`'s retry catches it, because both
 watch for an *empty* answer and this one is merely *incomplete*. Closing it needs per-project

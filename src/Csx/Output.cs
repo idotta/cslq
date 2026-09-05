@@ -197,6 +197,14 @@ internal static class Output
             .OrderBy(h => h.Symbol.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Symbol.Location.Range.Start.Line)
+            // Two source-generated documents produced by one generator for different projects
+            // collide on Display -- see DESIGN.md -- and survive Distinct, which keys on the
+            // raw URI. Their rows would then tie on every visible key, and since OrderBy is
+            // stable the winner of --max truncation would be whichever order the server
+            // happened to answer in. containerName carries the project, so it breaks that tie;
+            // the raw URI would not, its authority guid being regenerated on every load.
+            .ThenBy(h => h.Symbol.Location.Range.Start.Character)
+            .ThenBy(h => h.Symbol.ContainerName, StringComparer.Ordinal)
             .ToList();
 
         var shown = hits.Take(max).ToList();
