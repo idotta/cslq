@@ -77,14 +77,19 @@ dotnet build src/Csx/Csx.csproj          # build
     sentinel from the start and treat the notification as diagnostic only. Blocking on it
     first made every warm run burn its entire timeout, 300 s under `run.sh`, and looked
     exactly like a slow cold load.
-  - **The sentinel resolving no longer implies every project is loaded.** Cold load used to
-    close that window by accident, costing a minute; warm attach reaches it in seconds. Until
-    a project is loaded, Roslyn binds a `ProjectReference` to the referenced project's *built
-    assembly*, so `definition` answers with a decompiled temp file under `MetadataAsSource` —
-    exit 0, no context lines, no relation to the repo. `PathUri.IsDecompiled` spots it and
-    `LspClient.SettleAsync` re-asks for up to 10 s. It surfaced as `def-non-ascii-json`
-    failing once in a run where every other case passed, so treat a lone flake here as this,
-    not as noise.
+  - **One sentinel no longer proved the workspace was loaded — now there is one per
+    project.** Cold load used to close that window by accident, costing a minute; warm attach
+    reaches it in seconds. Two symptoms came out of it. Until a project is loaded, Roslyn
+    binds a `ProjectReference` to the referenced project's *built assembly*, so `definition`
+    answers with a decompiled temp file under `MetadataAsSource` — exit 0, no context lines,
+    no relation to the repo; `PathUri.IsDecompiled` spots it and `LspClient.SettleAsync`
+    re-asks for up to 10 s. Worse, `refs`, `impl` and `sym` answered *incompletely* — a
+    cross-project hit or a whole project's hits simply missing, at exit 0, which no guard
+    caught because every one of them watches for an **empty** answer. `WaitReadyAsync` now
+    takes one sentinel per `.csproj` and requires each to resolve to a location under its own
+    project directory. **Do not match a hit to a project by `containerName`** — it is
+    localised display text. It cost a red CI run and two red gate runs that each failed a
+    *different* pair of cases, so treat a lone flake of this shape as this, not as noise.
 - **`probes/run.sh` must scope its own daemon.** It exports
   `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=csx-probe-$$` and a 60 s keepalive. Without it the
   gate inherits whatever daemon the developer's session left running — a stale workspace can

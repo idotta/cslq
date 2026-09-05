@@ -7,11 +7,9 @@ Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and t
 Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
 that names nothing concrete; it needs scope before it can be worked.
 
-44 cases, and they do not all pass on every run. Three have been seen to fail on a cold load
-so far — `impl-interface-type`, `sym-truncates` and `sym-generated` — but the set is not fixed
-to those three: two consecutive runs of the suite failed a different pair. Every one of them
-fails the same way, by answering with a cross-project or generated hit missing rather than by
-erroring, and every one passes against a warm workspace. This is the known window the sentinel does not
+44 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+pair of cases on each of three runs, always by answering with a cross-project or generated hit
+missing rather than by erroring. Readiness is now one sentinel per project. This is the known window the sentinel does not
 close — it proves the workspace loaded, not that every project did — and neither the
 `SettleAsync` decompilation guard nor `QuerySymbolsAsync`'s retry catches it, because both
 watch for an *empty* answer and this one is merely *incomplete*. Closing it needs per-project
@@ -302,6 +300,8 @@ agent to run `csx ready` once at session start.
 - [x] `skill/SKILL.md` exists and tells an agent not to grep for what `csx` answers
 - [x] `csx impl` resolves an interface member to implementers in two different projects
 - [x] `csx sym` searches the workspace by name, including a source-generated declaration
+- [x] Readiness means every project loaded, not just one, so no command can answer with a
+      cross-project hit missing at exit 0
 
 ## Verified facts, and when
 
@@ -325,6 +325,16 @@ against 5.12.0-1.26426.8 / win-x64.
   `kind: "full"` reports. `workspace/diagnostic` also answers but returns zero reports —
   `workspaceDiagnostics: false` in its dynamic registration is honest. Roslyn leaves
   `source` null on compiler diagnostics and sends `code` as a string (`"CS0029"`).
+- Against a **cold** server `workspace/symbol` answers nothing at all — not a partial list —
+  until `workspace/projectInitializationComplete` fires, and then answers completely: measured
+  0 hits for 8.1 s, then the full 3 on the same poll the notification arrived, with the
+  inferred sentinel resolving 0.33 s later. So the partial-answer window is not a property of
+  cold load. It belongs to a client attaching to a **daemon loading a root it has not loaded
+  before**, where the notification already fired for the previous root and never fires again —
+  which is exactly the case the notification cannot be used to close. Verified 2026-09-05.
+- The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
+  a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
+  accepts that this is an approximation. Verified 2026-09-05.
 - `textDocument/implementation` answers `Location[]`, with zero-width ranges at the
   implementer's name. Fired at an interface member it returns the implementing members, at an
   interface type the implementing types, and at a base-list mention of the interface the same

@@ -77,7 +77,7 @@ internal static partial class Program
         {
             case "ready":
                 await client.WaitReadyAsync(
-                    opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+                    Sentinels(opts), opts.Timeout, ct);
                 Console.WriteLine("ready");
                 return 0;
 
@@ -111,7 +111,7 @@ internal static partial class Program
         // Gate on a sentinel that must exist, never on the symbol being asked about:
         // otherwise a genuinely absent symbol is indistinguishable from a workspace that
         // has not finished loading, and the caller waits out the whole timeout for it.
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ReferencesAsync(uri, position, ct);
@@ -124,7 +124,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CsxException("def needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.DefinitionAsync(uri, position, ct);
@@ -144,7 +144,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CsxException("impl needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ImplementationsAsync(uri, position, ct);
@@ -163,7 +163,7 @@ internal static partial class Program
     {
         var query = opts.Argument ?? throw new CsxException("sym needs a query");
 
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var (_, matches) = await QuerySymbolsAsync(client, query, Distinct, ct);
         Output.WriteSymbols(opts.Root, matches, opts.Max, opts.Json);
@@ -179,7 +179,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CsxException("outline needs a file or symbol");
 
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var uri = await OutlineTargetAsync(client, opts.Root, target, ct);
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
@@ -230,7 +230,7 @@ internal static partial class Program
     /// </summary>
     private static async Task<int> DiagAsync(LspClient client, Options opts, CancellationToken ct)
     {
-        await client.WaitReadyAsync(opts.Sentinel ?? InferSentinel(opts.Root), opts.Timeout, ct);
+        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
 
         var findings = new List<(string Uri, Diagnostic Diagnostic)>();
         if (opts.Argument is { } target)
@@ -406,22 +406,72 @@ internal static partial class Program
     private static partial Regex TypeDeclaration();
 
     /// <summary>
-    /// Picks a symbol that must resolve once the workspace is loaded. Any real type in the
-    /// tree will do; the point is only that an empty answer means "not loaded yet". Sorted
-    /// because <see cref="Directory.EnumerateFiles(string, string, SearchOption)"/> order is
-    /// filesystem-defined, and readiness must not depend on which file it happens to hit —
-    /// adding a project to a workspace would otherwise silently change the sentinel.
+    /// One readiness probe per project, because a single one only ever proved that
+    /// <em>some</em> project had loaded — see <see cref="LspClient.WaitReadyAsync"/> for the
+    /// incomplete answers that produced. An explicit <c>--sentinel</c> replaces the whole set
+    /// with one probe scoped to the root, which is deliberately the weaker mode: it is the
+    /// escape hatch for a workspace whose layout this inference cannot read.
     /// </summary>
-    private static string InferSentinel(string root)
-    {
-        foreach (var file in SourceFiles(root))
-        {
-            var m = TypeDeclaration().Match(File.ReadAllText(file));
-            if (m.Success) return m.Groups["name"].Value;
-        }
+    private static IReadOnlyList<Sentinel> Sentinels(Options opts) =>
+        opts.Sentinel is { } explicitSentinel
+            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel])]
+            : InferSentinels(opts.Root);
 
-        throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
+    /// <summary>
+    /// A project per <c>.csproj</c>, and per project the type names declared in its own files,
+    /// most-shallow-file-first. Several candidates rather than one because
+    /// <see cref="TypeDeclaration"/> is a regex, not a parser: it matches inside comments and
+    /// string literals — <c>fixture/Gen/BuildInfoGenerator.cs</c> has a
+    /// <c>public static class BuildInfo</c> inside a raw string literal — and a project whose
+    /// first match is <c>// class Removed</c> would otherwise block readiness forever. Capped
+    /// because the list is a fallback chain, not an index.
+    /// <para>
+    /// A project that declares no type at all — one that is only top-level statements —
+    /// contributes no sentinel and is skipped. That degrades to the old coverage for that
+    /// project rather than hanging on a probe that cannot resolve. A root with no
+    /// <c>.csproj</c> under it falls back to a single root-scoped sentinel, which is what
+    /// every caller got before.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<Sentinel> InferSentinels(string root)
+    {
+        var projects = ProjectDirectories(root);
+        if (projects.Count == 0) return [new Sentinel(Path.GetFullPath(root), Candidates(root))];
+
+        var sentinels = projects
+            .Select(d => new Sentinel(d, Candidates(d)))
+            .Where(s => s.Candidates.Count > 0)
+            .ToList();
+
+        return sentinels.Count > 0
+            ? sentinels
+            : throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
     }
+
+    private static IReadOnlyList<string> Candidates(string directory) => SourceFiles(directory)
+        .Select(f => TypeDeclaration().Match(File.ReadAllText(f)))
+        .Where(m => m.Success)
+        .Select(m => m.Groups["name"].Value)
+        .Distinct(StringComparer.Ordinal)
+        .Take(3)
+        .ToList();
+
+    /// <summary>
+    /// Every project directory under the root, by <c>.csproj</c> scan. An approximation of what
+    /// Roslyn actually loaded — the server exposes no project list to ask instead
+    /// (<c>workspace/_roslyn_restorableProjects</c> is a server-to-client request carrying
+    /// none) — so a <c>.csproj</c> excluded from a solution would be waited on needlessly. It
+    /// errs that way on purpose: the alternative, missing a project, is the bug this exists to
+    /// close.
+    /// </summary>
+    private static IReadOnlyList<string> ProjectDirectories(string root) => Directory
+        .EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
+        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                    !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+        .Select(f => Path.GetFullPath(Path.GetDirectoryName(f)!))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Order(StringComparer.OrdinalIgnoreCase)
+        .ToList();
 
     /// <summary>
     /// The workspace's own C# files. Sorted because
