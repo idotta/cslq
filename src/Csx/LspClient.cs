@@ -107,27 +107,83 @@ internal sealed class LspClient : IAsyncDisposable
 
     /// <summary>
     /// A query fired before the workspace loads returns an empty result, not an error, so
-    /// readiness has to be established rather than assumed. Polls the sentinel from the
-    /// start: a client attaching to an already-loaded daemon never sees
+    /// readiness has to be established rather than assumed. Polls from the start: a client
+    /// attaching to an already-loaded daemon never sees
     /// <c>projectInitializationComplete</c> — it fired before this process existed — so
     /// waiting on the notification first burned the entire timeout on a workspace that was
     /// ready before we connected. The notification is kept only as diagnostic detail on the
     /// failure path.
+    /// <para>
+    /// One sentinel per project, and every one of them has to resolve. A single sentinel only
+    /// ever proved that <em>some</em> project loaded, which is the race behind every
+    /// incomplete answer this client has produced: a cross-project <c>refs</c> or <c>impl</c>
+    /// missing the half that had not loaded, and a <c>sym</c> search missing a whole project's
+    /// hits — all of them exit 0, because a short answer is not an error. Measured on the wire
+    /// 2026-09-05: against a <em>cold</em> server <c>workspace/symbol</c> answers nothing at
+    /// all until <c>projectInitializationComplete</c> and then jumps straight to complete, so
+    /// the partial window belongs to a client attaching to a daemon that is loading a root it
+    /// has not loaded before — exactly the case where the notification cannot help.
+    /// </para>
+    /// <para>
+    /// A hit only counts for the project that asked for it: its location has to sit under that
+    /// project's own directory. Two projects declaring <c>Program</c> is the ordinary case in a
+    /// real repo, and without the check one project's symbol would satisfy another's sentinel
+    /// and readiness would lie again. Matching on <c>containerName</c> would be the obvious
+    /// alternative and is wrong — it is localised display text.
+    /// </para>
     /// </summary>
-    public async Task WaitReadyAsync(string sentinel, TimeSpan timeout, CancellationToken ct)
+    public async Task WaitReadyAsync(
+        IReadOnlyList<Sentinel> sentinels, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
+        var pending = sentinels.ToList();
 
-        while (DateTime.UtcNow < deadline)
+        while (true)
         {
-            if ((await SymbolsAsync(sentinel, ct)).Count > 0) return;
+            // One round for every project at once, so a warm workspace costs a single
+            // round trip's wall-clock rather than one per project.
+            var resolved = await Task.WhenAll(pending.Select(s => ResolvesAsync(s, ct)));
+            pending = [.. pending.Where((_, i) => !resolved[i])];
+            if (pending.Count == 0) return;
+            if (DateTime.UtcNow >= deadline) break;
             await Task.Delay(250, ct);
         }
 
         var fired = _endpoints.ProjectInitialized.IsCompleted ? "fired" : "never fired";
+        var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
+        var projects = string.Join(", ", pending.Select(s => Path.GetFileName(s.Directory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
         throw new CsxException(
-            $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query '{sentinel}' " +
-            $"returned no symbols (projectInitializationComplete {fired}).{StderrTail()}");
+            $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
+            $"returned no symbols for project(s) {projects} " +
+            $"(projectInitializationComplete {fired}).{StderrTail()}");
+    }
+
+    /// <summary>
+    /// Whether any of a project's candidate sentinels resolves to a location inside it. Several
+    /// candidates because <c>Program.InferSentinels</c>'s type-declaration match is not
+    /// syntax-aware — it matches inside a comment or a string literal, and one bad guess would
+    /// otherwise block readiness for the whole run.
+    /// </summary>
+    private async Task<bool> ResolvesAsync(Sentinel sentinel, CancellationToken ct)
+    {
+        foreach (var candidate in sentinel.Candidates)
+        {
+            var hits = await SymbolsAsync(candidate, ct);
+            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory))) return true;
+        }
+
+        return false;
+    }
+
+    private static bool Under(string uri, string directory)
+    {
+        if (PathUri.IsGenerated(uri)) return false;
+
+        var path = Path.GetFullPath(PathUri.ToPath(uri));
+        var dir = Path.GetFullPath(directory).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return path.StartsWith(dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<IReadOnlyList<SymbolInformation>> SymbolsAsync(string query, CancellationToken ct)
@@ -159,6 +215,24 @@ internal sealed class LspClient : IAsyncDisposable
         return await SettleAsync(async () =>
             await _rpc.InvokeWithParameterObjectAsync<Location[]?>(
                 "textDocument/definition",
+                new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
+                ct) ?? [], ct);
+    }
+
+    /// <summary>
+    /// Same <c>Location[]</c> reasoning as <see cref="DefinitionAsync"/>, and for a stronger
+    /// reason: the client declares no <c>textDocument.implementation</c> capability node at
+    /// all, so <c>linkSupport</c> is absent by construction. Roslyn does not answer empty for
+    /// a member that simply has no implementations — it falls through to the declaration, so
+    /// this degenerates to <c>definition</c> on an ordinary method. Empty means the position
+    /// resolved to no symbol.
+    /// </summary>
+    public async Task<IReadOnlyList<Location>> ImplementationsAsync(string uri, Position position, CancellationToken ct)
+    {
+        await OpenAsync(uri, ct);
+        return await SettleAsync(async () =>
+            await _rpc.InvokeWithParameterObjectAsync<Location[]?>(
+                "textDocument/implementation",
                 new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
                 ct) ?? [], ct);
     }
@@ -387,3 +461,9 @@ internal sealed class LspClient : IAsyncDisposable
         public void OnProgress(JsonElement _) { }
     }
 }
+
+/// <summary>
+/// One project's readiness probe: the directory a resolving hit has to sit under, and the
+/// candidate type names to look for, in the order they were found.
+/// </summary>
+internal sealed record Sentinel(string Directory, IReadOnlyList<string> Candidates);
