@@ -106,6 +106,7 @@ the compensations that only existed because it did not.** The first two thirds h
 |---|---|---|---|
 | 0a | Validate numeric CLI arguments | 0 | **done** |
 | 0b | Dispose the client when `initialize` fails | 0 | **done** |
+| 0c | Reject a malformed position at parse time | 0 | **done** |
 | 1s | **Spike: what does Roslyn actually load?** | 1 | **half done** — see below |
 | 1a | Enumerate projects | 1 | **done** (PR #6) |
 | 1b | Scope `SourceFiles` to project directories | 1 | not started |
@@ -120,15 +121,16 @@ the compensations that only existed because it did not.** The first two thirds h
 Phases 0 and 2 are small and independent; they can land together. Phase 1 is the real change
 and should be its own PR. Phase 3 is gated on measurement and should be a third.
 
-## Phase 0 — CLI hygiene — **done, uncommitted**
+## Phase 0 — CLI hygiene — **done**
 
 Independent of everything else. Do it first so the gate is green from a clean base.
 
-Both items landed 2026-09-05 in the working tree. What the plan did not say, and is worth
-keeping: the position check has to live in `Options.Parse` rather than beside `LocateAsync`, so
-it applies to **every** command's argument. `PositionSpec` cannot match a bare symbol name, so
-there are no false positives, and gating it per command would reintroduce exactly the
-late-validation problem 0a exists to remove.
+All three items landed 2026-09-05; 0a and 0b as `1e36173`, 0c from the review of it. What the
+plan did not say, and is worth keeping: the position check has to live in `Options.Parse`
+rather than beside `LocateAsync`, so it applies to **every** command's argument. `PositionSpec`
+cannot match a bare symbol name, so there are no false positives, and gating it per command
+would reintroduce exactly the late-validation problem 0a exists to remove. 0c is the same
+argument applied to the shapes `PositionSpec` does not match either.
 
 ### 0a. Validate numeric CLI arguments
 
@@ -209,6 +211,47 @@ process survives the run. Note what this **cannot** show: `initialize` passes
 `Environment.ProcessId`, so the server would have exited on the parent-process watch anyway.
 The check proves the message survived the edit and nothing leaks — not that disposal is what
 collected it. Not probeable.
+
+### 0c. Reject a malformed position at parse time
+
+Found reviewing 0a. `TryParsePosition` now throws once `PositionSpec` **matched**, but a
+file-shaped argument it could not match at all still fell through to the symbol resolver —
+the exact outcome 0a exists to remove, and the slow one:
+
+```
+$ csx refs Core/Greeter.cs:+1:2 --root fixture
+csx: no symbol matched 'Core/Greeter.cs:+1:2'          # after ~40 s of start and readiness
+```
+
+`\d+` rejects `+1`, `-1`, `1.5` and an empty coordinate, so all of those took the fallthrough.
+`OutlineTargetAsync` was already guarded by `LooksLikePath` (`Program.cs:207`); `LocateAsync`
+(`Program.cs:284`) never was.
+
+Fixed in `Options.Parse`, beside the 0a check and for the same reason — before `StartAsync`,
+so it costs nothing. `ValidatePosition` (`Program.cs:~421`) takes the colon in the argument's
+**last path segment** as the signal, which is what keeps `C:\dev\x.cs` out of it: a drive
+letter puts its colon in the first segment. A bare symbol name has no colon at all.
+
+The 0a call site was `TryParsePosition(argument, out _, out _, out _)` — a `Try*` method
+invoked for its throw, with three discards and a dropped `bool`. It is now
+`ValidatePosition(argument)`, which is where the new check lives.
+
+Also folded in: `Int` reported `--max 99999999999` as "needs an integer", which is a lie about
+the input and inconsistent with the position path's "out of range". It now distinguishes the
+two, matching `Coordinate`'s wording.
+
+```
+{"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
+```
+
+**The `expect` field cannot contain a single quote.** `run.sh:95` rewrites `'` to `"` before
+matching, so the existing cases can assert JSON keys — which means the quotes this message puts
+around the argument are unassertable, and the case pins the tail of the message only.
+
+**Not fixed, and out of scope:** `csx refs Core/Greeter.cs` — a bare path, no colon — still
+reaches the symbol resolver and answers "no symbol matched". `refs` has no `LooksLikePath`
+guard, unlike `outline`. It is the same shape of complaint but a different fix, since `refs` on
+a file with no position has no sensible answer to give.
 
 ## Phase 1 — project scoping
 
@@ -454,7 +497,8 @@ no way to assert throughput and should not pretend to.
 ## Close-out, when all phases are done
 
 - `dotnet format --verify-no-changes` exits 0.
-- `probes/run.sh` green — 44 legs at the start of Phase 0, 47 after it (0a added three),
+- `probes/run.sh` green — 44 legs at the start of Phase 0, 48 after it (0a added three,
+  0c a fourth),
   plus roughly two more to come, **one re-pinned**:
   `sym-truncates` (2a). `premature-query-fails-loudly` was the other candidate and survived 1c
   unchanged, because the rewritten message kept both asserted phrases.

@@ -414,6 +414,25 @@ internal static partial class Program
         ? value > 0 ? value : throw new CsxException("line and column are one-based")
         : throw new CsxException($"{name} out of range: {text}");
 
+    /// <summary>
+    /// Rejects a file-shaped argument that is not a usable position, so it fails at parse time
+    /// rather than reaching the symbol resolver. <see cref="TryParsePosition"/> already throws
+    /// once <see cref="PositionSpec"/> matched; what is left is a spec it could not match at
+    /// all — a `+`, a sign, an empty coordinate — which would otherwise start a server, wait
+    /// out readiness, and answer "no symbol matched 'Core/Greeter.cs:+1:2'".
+    /// </summary>
+    private static void ValidatePosition(string argument)
+    {
+        if (TryParsePosition(argument, out _, out _, out _)) return;
+
+        // Only the last segment: a Windows drive letter puts a colon in the first one.
+        var segment = argument[(argument.LastIndexOfAny(['/', '\\']) + 1)..];
+        if (segment.Contains(':'))
+        {
+            throw new CsxException($"'{argument}' is not a position: expected file:line:col");
+        }
+    }
+
     [GeneratedRegex(@"\b(?:class|struct|record|interface|enum)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)")]
     private static partial Regex TypeDeclaration();
 
@@ -554,7 +573,7 @@ internal static partial class Program
             // so `file:0:1` would start a server and wait out readiness before printing an
             // argument error. PositionSpec cannot match a bare symbol name, so checking every
             // command's argument has no false positives.
-            if (argument is not null) TryParsePosition(argument, out _, out _, out _);
+            if (argument is not null) ValidatePosition(argument);
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
@@ -571,7 +590,16 @@ internal static partial class Program
         {
             var name = argv[i];
             var text = Next(argv, ref i);
-            if (!int.TryParse(text, out var value)) throw new CsxException($"{name} needs an integer");
+            if (!int.TryParse(text, out var value))
+            {
+                // Overflow is not garbage: `--max 99999999999` is a number, just not one that
+                // fits, and "needs an integer" reads as a lie about the input.
+                var magnitude = text.StartsWith('-') ? text[1..] : text;
+                throw new CsxException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
+                    ? $"{name} out of range: {text}"
+                    : $"{name} needs an integer");
+            }
+
             if (value < floor) throw new CsxException($"{name} needs to be {floor} or more");
             return value;
         }
