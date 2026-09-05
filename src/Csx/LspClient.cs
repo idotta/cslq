@@ -59,15 +59,27 @@ internal sealed class LspClient : IAsyncDisposable
         {
             await client.InitializeAsync(ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException or CsxException)
+        {
+            // Escapes unchanged, but not uncleaned: without this the client built above is
+            // dropped with its process and RPC connection still live. A CsxException means
+            // initialize was answered and we rejected the answer — the encoding assertion —
+            // so the connection-lost wrapping below would be a lie about a live server.
+            await client.DisposeAsync();
+            throw;
+        }
+        catch (Exception ex)
         {
             // The thin client can die before it answers initialize — a daemon that never came
             // up, for one — and StreamJsonRpc then reports nothing but a lost connection. Give
             // the process a moment to finish exiting so its stderr, the only thing that says
-            // why, is flushed before we quote it.
+            // why, is flushed before we quote it. Quote it before disposing: StderrTail is the
+            // only thing that turns "connection lost" into a diagnosis.
             await Task.WhenAny(proc.WaitForExitAsync(ct), Task.Delay(1000, ct));
+            var tail = client.StderrTail();
+            await client.DisposeAsync();
             throw new CsxException(
-                $"the language server closed the connection during initialize: {ex.Message}{client.StderrTail()}");
+                $"the language server closed the connection during initialize: {ex.Message}{tail}");
         }
 
         return client;

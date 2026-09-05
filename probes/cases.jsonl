@@ -38,3 +38,6 @@
 {"name":"sym-generated","args":"sym BuildInfo --root fixture --json","exit":"0","expect":"'name': 'BuildInfo'|'path': '<generated>/Gen/BuildInfo.g.cs'|'generated': true"}
 {"name":"sym-truncates","args":"sym Area --root fixture --max 2","exit":"0","expect":"App/Square.cs:12:16|... 1 more (use --max 3 to see all)"}
 {"name":"sym-no-match-fails","args":"sym NoSuchThing --root fixture","exit":"1","expect":"no results"}
+{"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"csx: --max needs an integer"}
+{"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line and column are one-based"}
+{"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"csx: line out of range"}

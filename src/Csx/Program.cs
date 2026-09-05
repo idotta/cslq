@@ -387,20 +387,32 @@ internal static partial class Program
     [GeneratedRegex(@"^(?<file>.+):(?<line>\d+):(?<col>\d+)$")]
     private static partial Regex PositionSpec();
 
+    /// <summary>
+    /// Throws rather than returning <c>false</c> once the <c>file:line:col</c> shape has
+    /// matched but the numbers are unusable. Falling through to the symbol resolver instead
+    /// would answer "no symbol matched 'Core/Greeter.cs:0:1'" and dump candidates, when the
+    /// real answer is that the position is not one. Zero is rejected with overflow: positions
+    /// are one-based everywhere in <c>csx</c>, and <c>line - 1</c> would otherwise hand Roslyn
+    /// a negative position, which it throws out of as an unhandled RPC fault.
+    /// </summary>
     private static bool TryParsePosition(string spec, out string file, out int line, out int column)
     {
         var m = PositionSpec().Match(spec);
         if (m.Success)
         {
             file = m.Groups["file"].Value;
-            line = int.Parse(m.Groups["line"].Value);
-            column = int.Parse(m.Groups["col"].Value);
+            line = Coordinate(m.Groups["line"].Value, "line");
+            column = Coordinate(m.Groups["col"].Value, "column");
             return true;
         }
 
         (file, line, column) = (string.Empty, 0, 0);
         return false;
     }
+
+    private static int Coordinate(string text, string name) => int.TryParse(text, out var value)
+        ? value > 0 ? value : throw new CsxException("line and column are one-based")
+        : throw new CsxException($"{name} out of range: {text}");
 
     [GeneratedRegex(@"\b(?:class|struct|record|interface|enum)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)")]
     private static partial Regex TypeDeclaration();
@@ -518,9 +530,12 @@ internal static partial class Program
                 {
                     case "--root": root = Path.GetFullPath(Next(argv, ref i)); break;
                     case "--sentinel": sentinel = Next(argv, ref i); break;
-                    case "--max": max = int.Parse(Next(argv, ref i)); break;
-                    case "--context": context = int.Parse(Next(argv, ref i)); break;
-                    case "--timeout": timeout = TimeSpan.FromSeconds(int.Parse(Next(argv, ref i))); break;
+                    case "--max": max = Int(argv, ref i, 1); break;
+                    case "--context": context = Int(argv, ref i, 0); break;
+                    // No floor of 1: a zero timeout is how `premature-query-fails-loudly`
+                    // proves a query fired before load fails loudly rather than answering
+                    // empty. Only a negative one is rejected.
+                    case "--timeout": timeout = TimeSpan.FromSeconds(Int(argv, ref i, 0)); break;
                     case "--log-level": logLevel = Next(argv, ref i); break;
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
@@ -534,6 +549,13 @@ internal static partial class Program
             }
 
             if (!Directory.Exists(root)) throw new CsxException($"no such directory: {root}");
+
+            // Here rather than in LocateAsync: that runs after StartAsync and WaitReadyAsync,
+            // so `file:0:1` would start a server and wait out readiness before printing an
+            // argument error. PositionSpec cannot match a bare symbol name, so checking every
+            // command's argument has no false positives.
+            if (argument is not null) TryParsePosition(argument, out _, out _, out _);
+
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
                 daemon);
@@ -543,6 +565,15 @@ internal static partial class Program
         {
             if (++i >= argv.Length) throw new CsxException($"option '{argv[i - 1]}' needs a value");
             return argv[i];
+        }
+
+        private static int Int(string[] argv, ref int i, int floor)
+        {
+            var name = argv[i];
+            var text = Next(argv, ref i);
+            if (!int.TryParse(text, out var value)) throw new CsxException($"{name} needs an integer");
+            if (value < floor) throw new CsxException($"{name} needs to be {floor} or more");
+            return value;
         }
     }
 }
