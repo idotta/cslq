@@ -306,12 +306,16 @@ directory, nested projects.
 ~~Before writing 1a, establish whether the server can simply be **asked** what it loaded.~~
 **Answered: it cannot.** `workspace/_roslyn_restorableProjects` is a server-to-client request
 carrying no project list. 1a is therefore the directory scan, and its limits are recorded in
-`ROADMAP.md`'s verified facts — **but not yet in `DESIGN.md`**, which this item asked for so
-the approximation becomes a documented property of `csx` rather than an implementation detail.
-That write-up is still owed; fold it into 1b or the close-out.
+`ROADMAP.md`'s verified facts ~~but not yet in `DESIGN.md`; that write-up is still owed, fold it
+into 1b or the close-out~~ — **and in `DESIGN.md`, which carries the whole of it**: the server
+cannot be asked, the scan is an approximation erring deliberately towards over-inclusion, a root
+with no `.csproj` fails immediately, and `--sentinel` bypasses the scan. So the approximation is
+a documented property of `csx`, which is what this item asked for.
 
-Note also that `fixture/` has **no `.sln`** and loads fine, which contradicts
-`skill/SKILL.md`'s first troubleshooting entry. Re-derive that claim before 1b leans on it.
+~~Note also that `fixture/` has **no `.sln`** and loads fine, which contradicts
+`skill/SKILL.md`'s first troubleshooting entry. Re-derive that claim before 1b leans on it.~~
+**Re-derived and false:** `fixture/Fixture.slnx` exists, so it was never a counterexample. That
+entry already covers `.slnx` and stands.
 
 **Settle the misc-files question in the same session — it gates 1b's fixture, not just its
 prose.** Drop `Ambient/Stray.cs` into a *scratch copy* of `fixture` (not the tree — see the
