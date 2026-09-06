@@ -140,7 +140,8 @@ internal static partial class Program
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ReferencesAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, u => client.LinesAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json,
+            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -154,7 +155,8 @@ internal static partial class Program
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.DefinitionAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, u => client.LinesAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json,
+            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -175,7 +177,8 @@ internal static partial class Program
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ImplementationsAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, u => client.LinesAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json,
+            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -193,7 +196,8 @@ internal static partial class Program
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var matches = Distinct(await client.SymbolsAsync(query, ct));
-        Output.WriteSymbols(opts.Root, matches, opts.Max, opts.Json);
+        await Output.WriteSymbolsAsync(
+            opts.Root, matches, opts.Max, opts.Json, u => client.ProjectOfAsync(u, ct));
         return matches.Count == 0 ? 1 : 0;
     }
 
@@ -212,7 +216,8 @@ internal static partial class Program
         var uri = await OutlineTargetAsync(client, opts.Root, target, ct);
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
         await Output.WriteOutlineAsync(
-            opts.Root, uri, symbols, opts.Max, opts.Json, u => client.LinesAsync(u, ct));
+            opts.Root, uri, symbols, opts.Max, opts.Json,
+            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
         return 0;
     }
 
@@ -240,8 +245,14 @@ internal static partial class Program
         var uris = matches.Select(m => m.Location.Uri).Distinct(StringComparer.Ordinal).ToList();
         if (uris.Count > 1)
         {
-            var listing = string.Join('\n', uris.Select(u => "  " + PathUri.Display(root, u)));
-            throw new CsxException($"'{target}' is declared in several documents; pick one:\n{listing}");
+            var rows = new List<string>(uris.Count);
+            foreach (var u in uris)
+            {
+                rows.Add("  " + await PathUri.DisplayAsync(root, u, x => client.ProjectOfAsync(x, ct)));
+            }
+
+            throw new CsxException(
+                $"'{target}' is declared in several documents; pick one:\n{string.Join('\n', rows)}");
         }
 
         return uris[0];
@@ -299,7 +310,8 @@ internal static partial class Program
         }
 
         await Output.WriteDiagnosticsAsync(
-            opts.Root, findings, opts.Max, opts.Context, opts.Json, u => client.LinesAsync(u, ct));
+            opts.Root, findings, opts.Max, opts.Context, opts.Json,
+            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
         return 0;
     }
 
@@ -320,9 +332,15 @@ internal static partial class Program
         var matches = await MatchSymbolsAsync(client, target, ct);
         if (matches.Count > 1)
         {
-            var listing = string.Join('\n', matches.Select(m =>
-                $"  {FullName(m)}  {PathUri.Display(root, m.Location.Uri)}:{m.Location.Range.Start.Line + 1}"));
-            throw new CsxException($"'{target}' is ambiguous; qualify it further:\n{listing}");
+            var rows = new List<string>(matches.Count);
+            foreach (var m in matches)
+            {
+                var display = await PathUri.DisplayAsync(root, m.Location.Uri, x => client.ProjectOfAsync(x, ct));
+                rows.Add($"  {FullName(m)}  {display}:{m.Location.Range.Start.Line + 1}");
+            }
+
+            throw new CsxException(
+                $"'{target}' is ambiguous; qualify it further:\n{string.Join('\n', rows)}");
         }
 
         var match = matches[0];

@@ -3,13 +3,13 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-06, after the hardening phases closed the readiness window.
-Milestone 3 is done. Milestone 4's remaining item — output tuning — has had one concrete
-change land against it: `sym` now applies `--max` in the server's relevance order and sorts
-only what survives, so a capped broad query keeps the best matches. The rest of the item is
-still a placeholder that names nothing concrete.
+Last updated: 2026-09-06, after the generated-document label and the readiness-scoping test
+closed Milestone 4. Every milestone is done. Output tuning held two concrete changes: `sym`
+applies `--max` in the server's relevance order and sorts only what survives, so a capped
+broad query keeps the best matches; and a generated document's label now names the project
+that consumed the generator, which the URI never did.
 
-57 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+60 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
 that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
@@ -19,15 +19,16 @@ at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guar
 *empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
 in one directory, which no path scoping can separate — documented, not scheduled.
 
-Known gap in the gate, now half closed: `Sentinel.Nested` has an inference half and a scoping
-half, and only the first is pinned. `SentinelInferenceTests` builds the `Web/` + `Web/Tests/`
-shape in a temp tree and asserts that Web takes no candidate from Tests and carries Tests in
-its `Nested` list. What is still exercised by nothing is the other half — that `LspClient`
-actually discards a hit under a nested project when deciding the parent is ready. All three
-fixture projects are siblings, so every `Nested` list is empty in every case the suite runs.
-Pinning that needs a fourth fixture project nested under `App/` declaring a duplicate
-`Program`, at the cost of a project load on all 57 cases and of re-baselining every
-whole-fixture expectation. Not taken; recorded here so nobody assumes otherwise.
+That gate gap is closed, and not the way this file used to propose. The scoping half of
+`Sentinel.Nested` — that a hit under a nested project is *discarded* when deciding the parent
+is ready — was exercised by nothing, since all three fixture projects are siblings and every
+`Nested` list is empty in every case the suite runs. The proposal was a fourth fixture project
+nested under `App/`, costing a project load on every case; it would also have been a weak
+probe, because it only goes red when Tests happens to load before App, a load-order race. The
+predicate is now `Sentinel.Accepts`, a pure function over a URI, and `SentinelScopingTests`
+pins it directly in a temp tree — including that a generated URI can never mark a project
+ready. What a unit test cannot pin is that `ResolvesAsync` passes the sentinel's `Nested` list
+at all; that stays a one-line coupling at the call site.
 
 ## Status
 
@@ -36,7 +37,7 @@ whole-fixture expectation. Not taken; recorded here so nobody assumes otherwise.
 | 1 | `ready` + `refs`, cross-project fixture, probe gate, both workflows | **done** |
 | 2 | The hard fixture cases and the read commands | **done** |
 | 3 | Daemon mode, then `skill/SKILL.md` | **done** |
-| 4 | Remaining commands and output tuning | commands done, tuning: `sym` cap ordering done, rest unscoped |
+| 4 | Remaining commands and output tuning | **done** |
 
 ## Milestone 1 — the loop works (done)
 
@@ -282,14 +283,25 @@ agent to run `csx ready` once at session start.
       fired in that window answers nothing — indistinguishable from a typo. It retries on the
       *selection*, not on the raw answer, because a name declared in two projects returns the
       loaded one's symbols immediately.
-- [ ] Output tuning. **Unscoped** — this item names nothing concrete and cannot be worked
-      until it does. The one tuning item written down anywhere is DESIGN.md's: a generated
-      document's label is built only from URI fields that are stable across runs, none of
-      which identify the *consuming* project, so one generator applied to several projects
-      renders several distinct documents identically. That one is explicitly deferred until a
-      fixture has two projects consuming one generator, and wiring it needs the resolved
-      symbol's project carried alongside the URI, since a reference location carries only a
-      URI and a range.
+- [x] Output tuning — the one concrete item under it, DESIGN.md's generated-document label,
+      is done. The label now leads with the consuming project's directory
+      (`<generated>/Core/Gen/BuildInfo.g.cs`), which comes from
+      `textDocument/_vs_getProjectContexts` rather than from the URI: the URI's stable fields
+      name the *generator*, so one generator serving several projects rendered several
+      distinct documents identically, and `Output` sorts on that label. The `_vs_id` it
+      answers with is `<projectId guid>|<absolute .csproj> ($<tfm>)`; only the path half is
+      read, the guid being regenerated per load like the URI's own authority. `_vs_label` is
+      display text and is not parsed, for the same reason `containerName` never was. The
+      lookup is made only for a generated URI, cached per document, and falls back to the old
+      generator-only label if the server will not answer. The two ambiguity listings in
+      `Program` were rendering the same label twice — `outline Stamp` on two consumers said
+      "pick one" and then printed one string twice — and now name the projects.
+      Fixture: `fixture2/`, where `Alpha` and `Beta` both consume `Gen2`. It is a second
+      fixture rather than an extension of the first because `App` references `Core`, so a
+      second copy of the generated type collides at the use site (CS0433); `Alpha` and `Beta`
+      reference nothing of each other's. Three cases, and `run.sh` restores and builds it the
+      way it does `fixture/Core`.
+      Nothing else was ever written down under this item, so it closes with it.
 
 ## Acceptance criteria
 
@@ -322,6 +334,10 @@ agent to run `csx ready` once at session start.
       `.csproj` files the solution excludes does not time out
 - [x] `csx` answers about its own repository: `csx ready --root .` and a `refs` that crosses
       from `src/Csx` into `tests/`
+- [x] A generated document's label names the project that consumed the generator, so one
+      generator emitting into two projects renders two distinct labels rather than one
+- [x] The nested-project half of readiness scoping is pinned by a test: a hit under
+      `Web/Tests/` does not mark `Web/` ready
 
 ## Verified facts, and when
 
@@ -430,6 +446,16 @@ against 5.12.0-1.26426.8 / win-x64.
   and `documentId` are regenerated on every workspace load.
 - `DOTNET_CLI_UI_LANGUAGE=en` pins Roslyn's own display strings, but StreamJsonRpc's error text
   still came back localised (Portuguese on this machine). Do not assert on transport error text.
+
+- **A generated document's consuming project can be asked for, and only one request answers.**
+  `textDocument/_vs_getProjectContexts` is a VS protocol extension the server implements
+  without advertising it and without requiring a matching client capability. For a
+  `roslyn-source-generated:` URI it answers one context per TFM, whose `_vs_id` is
+  `<projectId guid>|<absolute .csproj> ($<tfm>)` — the guid matching the URI's own authority,
+  and regenerated with it on every load. The path half is the only stable identification of
+  the consuming project available anywhere: `assemblyName`, `typeName` and `assemblyPath` in
+  the URI all name the *generator*, and `containerName` is localised display text absent from
+  reference locations entirely. Verified 2026-09-06 against 5.12.0-1.26426.8.
 
 ### The daemon
 

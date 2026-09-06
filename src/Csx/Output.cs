@@ -24,6 +24,9 @@ internal static class Output
     /// <paramref name="linesOf"/> resolves a URI to its source lines. Text is not read here
     /// because a generated document has no file behind it — only the server can supply it —
     /// and it is fetched lazily so a capped result set costs no requests for hits it drops.
+    /// <paramref name="projectOf"/> resolves a generated URI to its consuming project, which
+    /// the URI itself does not carry; it runs before the cap because the label it produces is
+    /// what the rows are sorted on.
     /// </summary>
     public static async Task WriteLocationsAsync(
         string root,
@@ -31,10 +34,17 @@ internal static class Output
         int max,
         int context,
         bool json,
-        Func<string, Task<string[]>> linesOf)
+        Func<string, Task<string[]>> linesOf,
+        Func<string, Task<string?>> projectOf)
     {
-        var hits = locations
-            .Select(l => new Hit(l.Uri, PathUri.Display(root, l.Uri), l.Range))
+        var labelled = new List<Hit>(locations.Count);
+        foreach (var location in locations)
+        {
+            labelled.Add(new Hit(
+                location.Uri, await PathUri.DisplayAsync(root, location.Uri, projectOf), location.Range));
+        }
+
+        var hits = labelled
             .OrderBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Range.Start.Line)
             .ThenBy(h => h.Range.Start.Character)
@@ -106,10 +116,17 @@ internal static class Output
         int max,
         int context,
         bool json,
-        Func<string, Task<string[]>> linesOf)
+        Func<string, Task<string[]>> linesOf,
+        Func<string, Task<string?>> projectOf)
     {
-        var hits = findings
-            .Select(f => new Finding(f.Uri, PathUri.Display(root, f.Uri), f.Diagnostic))
+        var labelled = new List<Finding>(findings.Count);
+        foreach (var finding in findings)
+        {
+            labelled.Add(new Finding(
+                finding.Uri, await PathUri.DisplayAsync(root, finding.Uri, projectOf), finding.Diagnostic));
+        }
+
+        var hits = labelled
             .OrderBy(f => f.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(f => f.Diagnostic.Range.Start.Line)
             .ThenBy(f => f.Diagnostic.Range.Start.Character)
@@ -190,8 +207,12 @@ internal static class Output
     /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape. The cap applies
     /// to the server's relevance order and the display sort is cosmetic -- see below.
     /// </summary>
-    public static void WriteSymbols(
-        string root, IReadOnlyList<SymbolInformation> symbols, int max, bool json)
+    public static async Task WriteSymbolsAsync(
+        string root,
+        IReadOnlyList<SymbolInformation> symbols,
+        int max,
+        bool json,
+        Func<string, Task<string?>> projectOf)
     {
         // Truncate first, then sort: Roslyn answers workspace/symbol in relevance order --
         // exact, then prefix, then substring, across every project -- and Distinct's DistinctBy
@@ -200,19 +221,18 @@ internal static class Output
         // before the projection is also what keeps PathUri.Display off the hits that are
         // dropped, which on a broad query is most of them. WriteLocationsAsync sorts first,
         // deliberately: textDocument/references has no ranking to preserve.
-        var shown = symbols.Take(max)
-            .Select(s => new Match(PathUri.Display(root, s.Location.Uri), s))
+        var labelled = new List<Match>(Math.Min(max, symbols.Count));
+        foreach (var symbol in symbols.Take(max))
+        {
+            labelled.Add(new Match(
+                await PathUri.DisplayAsync(root, symbol.Location.Uri, projectOf), symbol));
+        }
+
+        var shown = labelled
             .OrderBy(h => h.Symbol.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Symbol.Location.Range.Start.Line)
-            // Two source-generated documents produced by one generator for different projects
-            // collide on Display -- see DESIGN.md -- and survive Distinct, which keys on the
-            // raw URI. Their rows would otherwise tie on every visible key, leaving the
-            // rendered order of the two dependent on whichever order the server answered in.
-            // containerName carries the project, so it breaks that tie; the raw URI would not,
-            // its authority guid being regenerated on every load.
             .ThenBy(h => h.Symbol.Location.Range.Start.Character)
-            .ThenBy(h => h.Symbol.ContainerName, StringComparer.Ordinal)
             .ToList();
 
         if (json)
@@ -274,9 +294,10 @@ internal static class Output
         IReadOnlyList<DocumentSymbol> symbols,
         int max,
         bool json,
-        Func<string, Task<string[]>> linesOf)
+        Func<string, Task<string[]>> linesOf,
+        Func<string, Task<string?>> projectOf)
     {
-        var display = PathUri.Display(root, uri);
+        var display = await PathUri.DisplayAsync(root, uri, projectOf);
         var total = Count(symbols);
         var kept = Math.Min(max, total);
         var lines = await linesOf(uri);

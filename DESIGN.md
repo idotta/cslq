@@ -53,17 +53,31 @@ survives is sorted for display. Sorting first would keep an alphabetical prefix 
 instead of the best ones, which does not show on a fixture where the interesting query's hits
 all share a name but loses the ranking entirely on a real repository.
 
-Source-generated locations are labelled `<generated>/<assemblyName>/<hintName>`, built only
-from the URI fields that are stable across runs and machines. **Known limitation:** none of
-those fields identifies the *consuming* project, so one generator applied to several projects
-— an analyzer in `Directory.Build.props`, the common real-world shape — produces several
-distinct documents that all render identically, and `Output` sorts and renders by that label.
-A references response carries only a URI and a range, so there is nothing in it to
-disambiguate with. The available disambiguator is `containerName` (`"in BuildInfo (project
-Core (net10.0))"`), which arrives on `workspace/symbol` results and is already parsed by
-`Program.Matches` — but it is absent from the reference locations themselves, so wiring it
-through means carrying the resolved symbol's project alongside the URI. Deferred until a
-fixture has two projects consuming one generator; the fixture today has one.
+Source-generated locations are labelled
+`<generated>/<consuming project directory>/<assemblyName>/<hintName>`. Everything after the
+project comes from the URI's stable fields; the project does not, and cannot. Those fields name
+the *generator* — one generator applied to several projects, an analyzer in
+`Directory.Build.props` being the common real-world shape, yields several distinct documents
+whose URIs differ only in an authority guid that is regenerated on every workspace load. Before
+the project was resolved they all rendered identically, and `Output` sorts and renders by that
+label, so two rows tied on every visible key.
+
+The project comes from `textDocument/_vs_getProjectContexts`, a VS protocol extension rather
+than LSP. Its `_vs_id` is `<projectId guid>|<absolute .csproj> ($<tfm>)`; only the path half is
+read, the guid being as unstable as the URI's own. Its `_vs_label` (`"Core (net10.0)"`) is
+display text and is not parsed, for the same reason `containerName` is not — that was the other
+candidate disambiguator, and it is both localised and absent from reference locations, which
+carry a URI and a range and nothing else. The server neither advertises the request nor
+requires a matching client capability, verified against 5.12.0-1.26426.8 on 2026-09-06. It is
+asked only for a generated URI, at most once per document, and a failure falls back to the
+generator-only label rather than to a guess. The project's *directory* is rendered rather than
+its file name, so two same-named projects in different directories stay distinct.
+
+`fixture2/` exists for this and nothing else: `Alpha` and `Beta` both consume `Gen2`, which
+emits one identical `Stamp.g.cs` into each. They deliberately do not reference each other, so
+both compilations can hold `Fixture2.Generated.Stamp` without CS0433. The shape cannot be added
+to `fixture/` — `App` references `Core`, so a second copy of the generated type would collide at
+the use site in `App/Program.cs`.
 
 ## Readiness
 

@@ -4,9 +4,9 @@
 {"name":"context-lines-rendered","args":"refs Greet --root fixture --context 1","exit":"0","expect":"Console.WriteLine(Greeter.Greet(|public static string Greet(string name)"}
 {"name":"premature-query-fails-loudly","args":"refs Fixture.Core.Greeter.Greet --root fixture --timeout 0","exit":"1","expect":"did not become ready|returned no symbols"}
 {"name":"unknown-symbol-fails","args":"refs Fixture.Core.Greeter.NoSuchMethod --root fixture","exit":"1","expect":"no symbol matched"}
-{"name":"source-generated-refs-symbol","args":"refs Fixture.Core.Generated.BuildInfo.Stamp --root fixture","exit":"0","expect":"<generated>/Gen/BuildInfo.g.cs:5|App/Program.cs:10|public static string Stamp()"}
-{"name":"source-generated-refs-position","args":"refs App/Program.cs:10:60 --root fixture","exit":"0","expect":"<generated>/Gen/BuildInfo.g.cs:5|App/Program.cs:10|public static string Stamp()"}
-{"name":"source-generated-refs-json","args":"refs Fixture.Core.Generated.BuildInfo.Stamp --root fixture --json","exit":"0","expect":"'count': 2|'path': '<generated>/Gen/BuildInfo.g.cs'|'generated': true|'line': 5"}
+{"name":"source-generated-refs-symbol","args":"refs Fixture.Core.Generated.BuildInfo.Stamp --root fixture","exit":"0","expect":"<generated>/Core/Gen/BuildInfo.g.cs:5|App/Program.cs:10|public static string Stamp()"}
+{"name":"source-generated-refs-position","args":"refs App/Program.cs:10:60 --root fixture","exit":"0","expect":"<generated>/Core/Gen/BuildInfo.g.cs:5|App/Program.cs:10|public static string Stamp()"}
+{"name":"source-generated-refs-json","args":"refs Fixture.Core.Generated.BuildInfo.Stamp --root fixture --json","exit":"0","expect":"'count': 2|'path': '<generated>/Core/Gen/BuildInfo.g.cs'|'generated': true|'line': 5"}
 {"name":"non-ascii-refs-symbol","args":"refs Fixture.Core.Party.Cheer --root fixture","exit":"0","expect":"Core/Party.cs:5|App/Program.cs:11|🎉"}
 {"name":"non-ascii-refs-position","args":"refs App/Program.cs:11:39 --root fixture","exit":"0","expect":"Core/Party.cs:5|App/Program.cs:11"}
 {"name":"non-ascii-refs-json","args":"refs Fixture.Core.Party.Cheer --root fixture --json","exit":"0","expect":"'path': 'App/Program.cs'|'line': 11|'column': 39"}
@@ -16,12 +16,12 @@
 {"name":"def-position","args":"def App/Program.cs:9:35 --root fixture","exit":"0","expect":"Core/Greeter.cs:5|public static string Greet(string name)"}
 {"name":"def-position-json","args":"def App/Program.cs:9:35 --root fixture --json","exit":"0","expect":"'count': 1|'path': 'Core/Greeter.cs'|'line': 5|'column': 26"}
 {"name":"def-symbol","args":"def Fixture.Core.Greeter.Greet --root fixture","exit":"0","expect":"Core/Greeter.cs:5|public static string Greet(string name)"}
-{"name":"def-generated","args":"def App/Program.cs:10:60 --root fixture","exit":"0","expect":"<generated>/Gen/BuildInfo.g.cs:5|public static string Stamp()"}
+{"name":"def-generated","args":"def App/Program.cs:10:60 --root fixture","exit":"0","expect":"<generated>/Core/Gen/BuildInfo.g.cs:5|public static string Stamp()"}
 {"name":"def-non-ascii-json","args":"def App/Program.cs:11:39 --root fixture --json","exit":"0","expect":"'count': 1|'path': 'Core/Party.cs'|'line': 5"}
 {"name":"def-no-definition-fails","args":"def App/Program.cs:12:1 --root fixture","exit":"1","expect":"no results"}
 {"name":"outline-file","args":"outline Core/Greeter.cs --root fixture","exit":"0","expect":"Core/Greeter.cs|public static class Greeter|public static string Greet(string name)|public static string Farewell(string name)"}
 {"name":"outline-json","args":"outline Core/Greeter.cs --root fixture --json","exit":"0","expect":"'count': 4|'path': 'Core/Greeter.cs'|'kind': 'namespace'|'kind': 'class'|'kind': 'method'|'children': ["}
-{"name":"outline-generated","args":"outline Fixture.Core.Generated.BuildInfo.Stamp --root fixture","exit":"0","expect":"<generated>/Gen/BuildInfo.g.cs|public static class BuildInfo|public static string Stamp()"}
+{"name":"outline-generated","args":"outline Fixture.Core.Generated.BuildInfo.Stamp --root fixture","exit":"0","expect":"<generated>/Core/Gen/BuildInfo.g.cs|public static class BuildInfo|public static string Stamp()"}
 {"name":"outline-truncates","args":"outline Core/Greeter.cs --root fixture --max 2","exit":"0","expect":"public static class Greeter|... 2 more (use --max 4 to see all)"}
 {"name":"outline-missing-file-fails","args":"outline Core/Missing.cs --root fixture","exit":"1","expect":"no such file: Core/Missing.cs"}
 {"name":"outline-ambiguous-fails","args":"outline Split --root fixture","exit":"1","expect":"declared in several documents|Core/Split.cs|Core/Split.More.cs"}
@@ -35,7 +35,7 @@
 {"name":"impl-no-symbol-fails","args":"impl App/Program.cs:12:1 --root fixture","exit":"1","expect":"no results"}
 {"name":"sym-query","args":"sym Area --root fixture","exit":"0","expect":"App/Square.cs:12:16|Core/Shape.cs:11:9|Core/Shape.cs:16:16"}
 {"name":"sym-json","args":"sym Area --root fixture --json","exit":"0","expect":"'count': 3|'name': 'Area'|'kind': 'method'|'path': 'Core/Shape.cs'|'column': 9"}
-{"name":"sym-generated","args":"sym BuildInfo --root fixture --json","exit":"0","expect":"'name': 'BuildInfo'|'path': '<generated>/Gen/BuildInfo.g.cs'|'generated': true"}
+{"name":"sym-generated","args":"sym BuildInfo --root fixture --json","exit":"0","expect":"'name': 'BuildInfo'|'path': '<generated>/Core/Gen/BuildInfo.g.cs'|'generated': true"}
 {"name":"sym-truncates","args":"sym Area --root fixture --max 2","exit":"0","expect":"method  Area|... 1 more (use --max 3 to see all)"}
 {"name":"sym-truncates-by-relevance","args":"sym Volume --root fixture --max 1","exit":"0","expect":"Core/Volume.cs:9:21|... 1 more (use --max 2 to see all)"}
 {"name":"sym-no-match-fails","args":"sym NoSuchThing --root fixture","exit":"1","expect":"no results"}
@@ -50,3 +50,6 @@
 {"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"csx: unknown command|usage:"}
 {"name":"self-hosted-ready","args":"ready --root . --timeout 120","exit":"0","expect":"ready"}
 {"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Csx/Program.cs:|tests/Csx.Tests/"}
+{"name":"generated-label-names-consuming-project","args":"sym Stamp --root fixture2","exit":"0","expect":"<generated>/Alpha/Gen2/Stamp.g.cs:3|<generated>/Beta/Gen2/Stamp.g.cs:3"}
+{"name":"generated-label-json","args":"sym Stamp --root fixture2 --json","exit":"0","expect":"'path': '<generated>/Alpha/Gen2/Stamp.g.cs'|'path': '<generated>/Beta/Gen2/Stamp.g.cs'|'generated': true"}
+{"name":"generated-ambiguity-names-consumers","args":"outline Stamp --root fixture2","exit":"1","expect":"declared in several documents|<generated>/Alpha/Gen2/Stamp.g.cs|<generated>/Beta/Gen2/Stamp.g.cs"}

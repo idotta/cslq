@@ -59,6 +59,23 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   implements without advertising a `textDocumentContentProvider` and answers whether or not
   the client declares the matching capability (verified both ways). The older
   `sourceGeneratedDocument/_roslyn_getText` no longer exists.
+- **A generated document's URI names the generator, never the project consuming it.**
+  `assemblyName`, `typeName` and `assemblyPath` are all the generator's; the only thing
+  separating two projects' copies of one generated document is the authority guid, which is
+  regenerated on every workspace load. `textDocument/_vs_getProjectContexts` is what answers
+  it — a VS protocol extension, not LSP, which the server neither advertises nor gates on a
+  client capability. Its `_vs_id` is `<projectId guid>|<absolute .csproj> ($<tfm>)`: read the
+  path half only. `_vs_label` (`"Core (net10.0)"`) is display text, same class of thing as
+  `containerName`, and is not parsed. The label is
+  `<generated>/<project dir>/<assembly>/<hintName>`, and every rendering path has to go
+  through it — the two ambiguity listings in `Program` did not, and printed the same string
+  twice under "pick one".
+- **`fixture2/` is the two-consumers-of-one-generator shape, and it cannot live in
+  `fixture/`.** `App` references `Core`, so a second copy of the generated type collides at
+  the use site with CS0433. `fixture2/Alpha` and `fixture2/Beta` reference nothing of each
+  other's, so both compilations hold `Fixture2.Generated.Stamp` happily. `run.sh` restores and
+  builds both consumers for the same reason it builds `fixture/Core`: an unbuilt analyzer
+  contributes nothing, silently. It is excluded from `Csx.slnx`, so `--root .` never loads it.
 - **An unbuilt source generator produces nothing, silently.** With `fixture/Gen/bin` absent
   the workspace still loads, the sentinel still resolves, and only the generated symbol is
   missing — no error, no diagnostic, no CS9057 on the wire. `run.sh` builds `fixture/Gen`
@@ -86,6 +103,11 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   chain anyway: the regex still reads types out of `#if` branches and uncompiled files. The
   fixture cannot reproduce the original failure — it needs prose in a doc comment above the
   only declaration in a single-file project.
+- **The nested-project scoping is `Sentinel.Accepts`, and a probe case cannot pin it.**
+  A fixture project nested under another only goes red without the scoping when the nested one
+  happens to load *first* — a load-order race, so the case would pass on a broken build most
+  runs. It is a pure predicate over a URI instead, pinned by `SentinelScopingTests`. Both
+  fixtures are flat, so every `Nested` list is empty in every probe case.
 - **A candidate must resolve inside the project's *own* directory, nested projects excluded.**
   `LspClient.Under` counts any hit below a directory, so with `Web/` and `Web/Tests/` both
   declaring `Program` — the ordinary shape — Tests loading marks Web ready and the

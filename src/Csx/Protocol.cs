@@ -66,6 +66,24 @@ internal sealed record TextDocumentContentParams(string Uri);
 
 internal sealed record TextDocumentContentResult(string Text);
 
+// VS's own protocol extension, not LSP. It is the only thing that answers "which project
+// does this document belong to" — the alternative, SymbolInformation.containerName, is
+// localised display text. The underscore-prefixed names are the wire shape and do not come
+// from the camelCase policy, hence the attributes.
+internal sealed record ProjectContextParams(
+    [property: JsonPropertyName("_vs_textDocument")] TextDocumentIdentifier TextDocument);
+
+internal sealed record ProjectContextList(
+    [property: JsonPropertyName("_vs_projectContexts")] ProjectContext[]? Contexts,
+    [property: JsonPropertyName("_vs_defaultIndex")] int DefaultIndex);
+
+// _vs_id is "<projectId guid>|<absolute .csproj path> ($<tfm>)". The guid half is
+// regenerated on every workspace load; the path half is what makes this worth asking for.
+// _vs_label ("Core (net10.0)") is display text and is deliberately not read.
+internal sealed record ProjectContext(
+    [property: JsonPropertyName("_vs_id")] string Id,
+    [property: JsonPropertyName("_vs_label")] string? Label);
+
 internal sealed record SymbolInformation(
     string Name,
     int Kind,

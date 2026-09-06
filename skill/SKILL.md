@@ -78,9 +78,10 @@ and no `>` marker, so `--context` does nothing for it. Its third column is the c
 Roslyn displays it (`in Greeter (project Core (net10.0))`) — display text, not a namespace
 path, so do not parse it.
 
-Source-generated locations print as `<generated>/<assembly>/<hintName>` and have no file on
-disk. That is a real answer, not an error — read the source with `csx outline` on the symbol,
-not with a file read.
+Source-generated locations print as `<generated>/<project>/<assembly>/<hintName>` and have no
+file on disk. That is a real answer, not an error — read the source with `csx outline` on the
+symbol, not with a file read. The leading segment is the project that consumed the generator,
+which is the only thing separating two documents one generator emitted into two projects.
 
 ## Exit codes
 

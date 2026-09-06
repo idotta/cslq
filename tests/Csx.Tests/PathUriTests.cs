@@ -68,6 +68,58 @@ public class PathUriTests
     }
 
     /// <summary>
+    /// The generator-only label is the same for every project consuming that generator, so
+    /// two distinct documents render identically. The consuming project's <c>.csproj</c> —
+    /// which only <c>textDocument/_vs_getProjectContexts</c> can supply — is what separates
+    /// them, and its directory is used rather than its file name so two same-named projects
+    /// in different directories stay distinct.
+    /// </summary>
+    [Fact]
+    public void A_generated_uri_displays_the_project_that_consumed_it()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+        var alpha = Path.Combine(root, "Alpha", "Alpha.csproj");
+        var beta = Path.Combine(root, "Beta", "Beta.csproj");
+
+        Assert.Equal("<generated>/Alpha/Fixture.App/BuildInfo.g.cs", PathUri.Display(root, Generated, alpha));
+        Assert.Equal("<generated>/Beta/Fixture.App/BuildInfo.g.cs", PathUri.Display(root, Generated, beta));
+    }
+
+    /// <summary>
+    /// A server that will not name the project falls back to the older ambiguous label rather
+    /// than inventing one: coarse is recoverable, wrong is not.
+    /// </summary>
+    [Fact]
+    public async Task An_unanswered_project_lookup_falls_back_to_the_generator_only_label()
+    {
+        var display = await PathUri.DisplayAsync(
+            "/anywhere", Generated, _ => Task.FromResult<string?>(null));
+
+        Assert.Equal("<generated>/Fixture.App/BuildInfo.g.cs", display);
+    }
+
+    /// <summary>
+    /// A file URI carries its own path, so the lookup — a round trip to the server — is never
+    /// made for one.
+    /// </summary>
+    [Fact]
+    public async Task A_file_uri_is_never_looked_up()
+    {
+        var asked = false;
+
+        await PathUri.DisplayAsync(
+            Path.GetTempPath(),
+            PathUri.FromPath(Path.Combine(Path.GetTempPath(), "Greeter.cs")),
+            _ =>
+            {
+                asked = true;
+                return Task.FromResult<string?>(null);
+            });
+
+        Assert.False(asked);
+    }
+
+    /// <summary>
     /// A hit outside the root — a linked file, or a symbol resolved from elsewhere on disk —
     /// stays absolute rather than becoming a `../../..` chain that reads as noise.
     /// </summary>

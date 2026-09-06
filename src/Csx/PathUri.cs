@@ -41,16 +41,37 @@ internal static class PathUri
     /// documentId that are both regenerated on every workspace load, plus a machine-absolute
     /// assemblyPath, so the label is built only from the fields that are stable across runs
     /// and machines. The angle brackets keep it from being mistaken for a readable file.
+    /// <para>
+    /// Those stable fields name the <em>generator</em>, never the project consuming it, so
+    /// one generator applied to several projects renders several distinct documents
+    /// identically. <paramref name="projectFile"/> — the <c>.csproj</c> from
+    /// <c>LspClient.ProjectOfAsync</c> — is what separates them, and its directory is used
+    /// rather than its file name so two same-named projects in different directories stay
+    /// distinct. Null when the server would not say, which restores the older ambiguous form
+    /// rather than inventing a project.
+    /// </para>
     /// </summary>
-    public static string Display(string root, string uri)
+    public static string Display(string root, string uri, string? projectFile = null)
     {
         if (!IsGenerated(uri)) return Relative(root, ToPath(uri));
 
         var query = Query(uri);
         var assembly = query.GetValueOrDefault("assemblyName", "?");
         var hint = query.GetValueOrDefault("hintName") ?? ToPath(uri).TrimStart('/');
-        return $"<generated>/{assembly}/{hint}";
+        var project = projectFile is null
+            ? string.Empty
+            : Relative(root, Path.GetDirectoryName(Path.GetFullPath(projectFile))!) + "/";
+        return $"<generated>/{project}{assembly}/{hint}";
     }
+
+    /// <summary>
+    /// <see cref="Display(string, string, string?)"/> with the project lookup attached. The
+    /// lookup is a request, so it is made only for a generated URI — a file URI carries its
+    /// own path and needs nothing asked.
+    /// </summary>
+    public static async Task<string> DisplayAsync(
+        string root, string uri, Func<string, Task<string?>> projectOf) =>
+        IsGenerated(uri) ? Display(root, uri, await projectOf(uri)) : Display(root, uri);
 
     private static Dictionary<string, string> Query(string uri)
     {

@@ -55,6 +55,18 @@ dotnet restore fixture/Fixture.slnx --nologo -v q || exit 1
 log "build fixture generator + Core"
 dotnet build fixture/Core/Core.csproj -c Debug --nologo -v q || exit 1
 
+# The second fixture: two projects consuming one generator, which is the shape fixture/
+# cannot hold. Its generated documents differ only by the project that consumed them --
+# the generated URI names the generator, never the consumer -- so it is the only thing
+# that catches the label collapsing back to one. Both consumers are built for the same
+# reason Core is: an unbuilt analyzer contributes nothing, silently.
+log "dotnet restore (fixture2)"
+dotnet restore fixture2/Fixture2.slnx --nologo -v q || exit 1
+
+log "build fixture2 generator + consumers"
+dotnet build fixture2/Alpha/Alpha.csproj -c Debug --nologo -v q || exit 1
+dotnet build fixture2/Beta/Beta.csproj -c Debug --nologo -v q || exit 1
+
 log "build csx"
 dotnet build src/Csx/Csx.csproj -c Release --nologo -v q || exit 1
 
