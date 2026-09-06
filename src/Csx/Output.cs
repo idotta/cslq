@@ -187,23 +187,21 @@ internal static class Output
     /// can quote one whole. containerName is Roslyn's localised display text ("in Greeter
     /// (project Core (net10.0))"), not a namespace path; it is rendered because it is the
     /// only thing separating two symbols that share a name, and never asserted on, because
-    /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape.
-    /// <paramref name="max"/> caps the server's relevance order and the display sort applies
-    /// to what survived, so a capped query keeps the best matches rather than an alphabetical
-    /// prefix of them.
+    /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape. The cap applies
+    /// to the server's relevance order and the display sort is cosmetic -- see below.
     /// </summary>
     public static void WriteSymbols(
         string root, IReadOnlyList<SymbolInformation> symbols, int max, bool json)
     {
-        var hits = symbols
-            .Select(s => new Match(PathUri.Display(root, s.Location.Uri), s))
-            .ToList();
-
         // Truncate first, then sort: Roslyn answers workspace/symbol in relevance order --
         // exact, then prefix, then substring, across every project -- and Distinct's DistinctBy
         // keeps first-seen order, so that ranking arrives here intact. Sorting before the cap
-        // would keep an alphabetical prefix of the hits rather than the best matches.
-        var shown = hits.Take(max)
+        // would keep an alphabetical prefix of the hits rather than the best matches. Taking
+        // before the projection is also what keeps PathUri.Display off the hits that are
+        // dropped, which on a broad query is most of them. WriteLocationsAsync sorts first,
+        // deliberately: textDocument/references has no ranking to preserve.
+        var shown = symbols.Take(max)
+            .Select(s => new Match(PathUri.Display(root, s.Location.Uri), s))
             .OrderBy(h => h.Symbol.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Symbol.Location.Range.Start.Line)
@@ -231,7 +229,7 @@ internal static class Output
             });
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = hits.Count, truncated = hits.Count > shown.Count, results = payload },
+                new { count = symbols.Count, truncated = symbols.Count > shown.Count, results = payload },
                 JsonOut));
             return;
         }
@@ -256,10 +254,10 @@ internal static class Output
             Console.WriteLine(row);
         }
 
-        if (hits.Count > shown.Count)
+        if (symbols.Count > shown.Count)
         {
             Console.WriteLine();
-            Console.WriteLine($"... {hits.Count - shown.Count} more (use --max {hits.Count} to see all)");
+            Console.WriteLine($"... {symbols.Count - shown.Count} more (use --max {symbols.Count} to see all)");
         }
     }
 
