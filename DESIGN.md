@@ -86,9 +86,10 @@ be attributed to one of them by path — no scan-based scoping can separate them
 project is covered only incidentally.
 
 Knowing the projects means reading the root's solution, and scanning for `*.csproj` under the
-root only when there is none, because **the server cannot be asked**:
-`workspace/_roslyn_restorableProjects` is a server-to-client request and carries no project
-list. Either way it is an approximation, and the two err in opposite directions.
+root whenever there is not exactly one to read — none, or several — because **the server
+cannot be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and
+carries no project list. Either way it is an approximation, and the two err in opposite
+directions.
 
 The solution is read because **over-inclusion is not merely wasteful, it is fatal:** a `.csproj`
 the solution excludes is never loaded, so its types are never indexed, its sentinel can never
@@ -105,7 +106,10 @@ exists to close. A `.slnf` solution filter is not read. A project the solution l
 not on disk is dropped: waiting on one is the same unresolvable sentinel by another route. A
 root with no project at all fails immediately instead of timing out, naming the solution when
 there is one, because "no .csproj under <root>" would be a lie about a root whose solution
-simply lists no C# project. `--sentinel` bypasses all of it.
+simply lists no C# project. A `.slnx` that no longer parses fails the same way rather than as
+an unhandled `XmlException`: `Main` catches `CsxException` and nothing else, so a hand-edited
+solution file would otherwise be answered with a stack trace and exit 127. `--sentinel`
+bypasses all of it.
 
 `--sentinel` is therefore the weak mode, not a neutral override: it replaces the whole
 per-project set with a single root-scoped probe, giving up the all-projects-loaded guarantee.

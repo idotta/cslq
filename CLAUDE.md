@@ -141,6 +141,8 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
   still a documented limit. This is the fix for the OrchardCore template failure above; scoping
   `--root` below the templates was only the workaround.
+  Parse failures go through `CsxException`: `Main` catches that and nothing else, so a
+  hand-edited `.slnx` that no longer parses would otherwise exit 127 with a stack trace.
 - **`csx` can now be pointed at its own repo, and `Csx.slnx` is why.** The root solution lists
   `src/Csx` and `tests/Csx.Tests` and deliberately excludes `fixture/`, whose `App` does not
   compile on purpose. Put a fixture project in it and `dotnet build` at the root fails by

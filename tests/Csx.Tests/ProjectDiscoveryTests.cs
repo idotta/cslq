@@ -167,6 +167,28 @@ public class ProjectDiscoveryTests
     }
 
     /// <summary>
+    /// A hand-edited solution that no longer parses has to arrive as a CLI error. `Main` catches
+    /// `CsxException` and nothing else, so an escaping `XmlException` answered a bad solution
+    /// file with an unhandled stack trace and exit 127.
+    /// </summary>
+    [Fact]
+    public void A_solution_that_is_not_valid_xml_fails_as_a_cli_error()
+    {
+        using var ws = new Workspace();
+        ws.Project("App");
+        ws.Write("App/Real.cs", "internal class Real;");
+        ws.Write("Broken.slnx", """
+            <Solution>
+              <Project Path="App/App.csproj"
+            </Solution>
+            """);
+
+        var ex = Assert.Throws<CsxException>(() => Program.InferSentinels(ws.Root));
+
+        Assert.Contains("Broken.slnx is not valid XML", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// "no .csproj under &lt;root&gt;" would be a lie about a root whose solution simply lists
     /// no C# project, and would send the reader looking for files that are sitting right there.
     /// </summary>

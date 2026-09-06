@@ -109,8 +109,10 @@ public class SentinelInferenceTests
     /// <summary>
     /// <c>Web/</c> and <c>Web/Tests/</c> both declaring <c>Program</c> is the ordinary shape,
     /// and it is the one that brought back incomplete-answers-at-exit-0: Tests loading marked
-    /// Web ready. Both halves are asserted — Web takes no candidate from Tests, and Web
-    /// carries Tests as a nested directory so the hit can be scoped away too.
+    /// Web ready. Only the inference half is asserted here — Web takes no candidate from Tests,
+    /// and Web carries Tests in its <c>Nested</c> list so a hit can be scoped away. That
+    /// <see cref="LspClient"/> actually discards such a hit when deciding Web is ready is the
+    /// other half, and it is still exercised by nothing; ROADMAP.md records why.
     /// </summary>
     [Fact]
     public void A_nested_project_neither_lends_its_types_nor_goes_unscoped()

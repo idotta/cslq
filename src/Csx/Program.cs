@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace Csx;
@@ -604,7 +605,7 @@ internal static partial class Program
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(solution))!;
         var listed = Path.GetExtension(solution).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
-            ? XDocument.Load(solution).Descendants("Project").Select(e => (string?)e.Attribute("Path"))
+            ? SolutionXml(solution).Descendants("Project").Select(e => (string?)e.Attribute("Path"))
             : SolutionEntry().Matches(File.ReadAllText(solution)).Select(m => m.Groups["path"].Value);
 
         return listed
@@ -612,6 +613,24 @@ internal static partial class Program
             .Select(p => Path.GetFullPath(
                 Path.Combine(directory, p!.Replace('\\', Path.DirectorySeparatorChar))))
             .Where(p => p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && File.Exists(p));
+    }
+
+    /// <summary>
+    /// A hand-edited <c>.slnx</c> that no longer parses is a workspace mistake, not a defect,
+    /// and has to arrive as one: <c>Main</c> catches <see cref="CsxException"/> and nothing
+    /// else, so an escaping <see cref="XmlException"/> answers a bad solution file with an
+    /// unhandled stack trace and exit 127.
+    /// </summary>
+    private static XDocument SolutionXml(string solution)
+    {
+        try
+        {
+            return XDocument.Load(solution);
+        }
+        catch (XmlException ex)
+        {
+            throw new CsxException($"{Path.GetFileName(solution)} is not valid XML: {ex.Message}");
+        }
     }
 
     // `Project("{type guid}") = "Name", "Relative\Path.csproj", "{project guid}"`.

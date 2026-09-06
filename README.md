@@ -120,8 +120,8 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 Paths are relative to `--root`; lines and columns are one-based.
 
 `--sentinel` is an escape hatch, not a neutral override. By default `csx` waits for *every*
-project under the root to load, one readiness probe per project the root's solution lists (or per
-`.csproj` when there is no solution); passing `--sentinel` replaces
+project under the root to load, one readiness probe per project the root's solution lists — or
+per `.csproj` when the root holds no solution, or more than one. Passing `--sentinel` replaces
 that whole set with a single probe scoped to the root, which gives up the guarantee and restores
 the window in which `refs`, `impl` and `sym` can answer incompletely at exit 0. Use it when the
 `.csproj` scan cannot read the workspace layout — including a root with no `.csproj`, which
