@@ -292,7 +292,9 @@ src/Csx/                    the thin LSP client and CLI
   Output.cs                 path:line + context formatting, and the outline tree
 fixture/                    deliberately tricky solution
   Gen/                      incremental source generator; its output is referenced from App
+  Ambient/Stray.cs          a document no project compiles, for the misc-files cases
   App/TypeError.cs          the deliberate cross-project type error for `csx diag`
+  App/Square.cs             the cross-project implementer of `Core/Shape.cs`, for `impl`
   Core/Party.cs             an astral-plane character on a line carrying a symbol
   Core/Split*.cs            one type in two documents, plus an overload in one of them
   Core/Empty.cs             a compilable document that declares nothing

@@ -46,6 +46,13 @@ is the only thing separating two symbols that share a name; it is localised disp
 nothing asserts on it. No `|` appears in a row, unlike an outline's gutter, so a probe case can
 quote one whole.
 
+**The cap is applied in the server's order, and the display sort is cosmetic.** Roslyn answers
+`workspace/symbol` in relevance order -- exact match, then prefix, then substring, across every
+project rather than project by project -- so `--max` truncates that ranking and only what
+survives is sorted for display. Sorting first would keep an alphabetical prefix of the hits
+instead of the best ones, which does not show on a fixture where the interesting query's hits
+all share a name but loses the ranking entirely on a real repository.
+
 Source-generated locations are labelled `<generated>/<assemblyName>/<hintName>`, built only
 from the URI fields that are stable across runs and machines. **Known limitation:** none of
 those fields identifies the *consuming* project, so one generator applied to several projects

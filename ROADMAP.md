@@ -4,8 +4,10 @@ Work spans multiple sessions. This file is the handoff: what is done, what is ne
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
 Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and ten cases.
-Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
-that names nothing concrete; it needs scope before it can be worked.
+Milestone 3 is done. Milestone 4's remaining item — output tuning — has had one concrete
+change land against it: `sym` now applies `--max` in the server's relevance order and sorts
+only what survives, so a capped broad query keeps the best matches. The rest of the item is
+still a placeholder that names nothing concrete.
 
 53 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
@@ -22,7 +24,7 @@ readiness, which is its own piece of work.
 | 1 | `ready` + `refs`, cross-project fixture, probe gate, both workflows | **done** |
 | 2 | The hard fixture cases and the read commands | **done** |
 | 3 | Daemon mode, then `skill/SKILL.md` | **done** |
-| 4 | Remaining commands and output tuning | commands done, tuning unscoped |
+| 4 | Remaining commands and output tuning | commands done, tuning: `sym` cap ordering done, rest unscoped |
 
 ## Milestone 1 — the loop works (done)
 
@@ -347,6 +349,14 @@ against 5.12.0-1.26426.8 / win-x64.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
   a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.
+- **`workspace/symbol` ranks its answer by relevance, globally.** Measured on a scratch copy of
+  `fixture` carrying `Core/AbcZed.cs`, `Core/ZedHelper.cs` and `App/Zed.cs`, chosen so that
+  relevance order, alphabetical order, document order and per-project-then-relevance order are
+  four distinct strings. The query `Zed` answered `Zed` (App), `ZedHelper` (Core), `AbcZed`
+  (Core) -- exact, prefix, substring, with the exact match's project coming second in document
+  order, so neither project order nor declaration order explains it. Identical across two runs.
+  This is what makes `sym`'s truncate-before-sort meaningful. Verified 2026-09-05 against
+  5.12.0-1.26426.8.
 - `textDocument/implementation` answers `Location[]`, with zero-width ranges at the
   implementer's name. Fired at an interface member it returns the implementing members, at an
   interface type the implementing types, and at a base-list mention of the interface the same

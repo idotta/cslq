@@ -145,9 +145,9 @@ the compensations that only existed because it did not.** The first two thirds h
 | 1c | Readiness means every project loaded | 1 | **done** (PR #6) |
 | 1d | Delete the compensating retries | 1 | **done** |
 | 1e | Document what `--sentinel` now gives up | 1 | **done** |
-| 2v | **Verify `workspace/symbol` ordering on the wire** | 2 | not started — gates 2a |
-| 2a | `sym`: truncate before sorting | 2 | not started |
-| 2b | README layout tree omits `App/Square.cs` | 2 | not started |
+| 2v | **Verify `workspace/symbol` ordering on the wire** | 2 | **done** — Roslyn ranks |
+| 2a | `sym`: truncate before sorting | 2 | **done** |
+| 2b | README layout tree omits `App/Square.cs` | 2 | **done** |
 | 3 | Whole-workspace `diag` throughput | 3 | not started |
 
 Phases 0 and 2 are small and independent; they can land together. Phase 1 is the real change
@@ -491,7 +491,34 @@ Not probeable for the same reason 1c is not.
 
 ## Phase 2 — output
 
-### 2v. Verify `workspace/symbol` ordering — gates 2a
+### 2v. Verify `workspace/symbol` ordering — **done, and 2a's premise holds**
+
+Measured 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy of `fixture`, with the five
+`OrderBy`/`ThenBy` lines in `WriteSymbols` temporarily commented out so the raw order reached
+stdout. Recorded in `ROADMAP.md`'s verified-facts section.
+
+**The first design of this experiment was confounded and review caught it.** Three names in one
+file cannot separate relevance ranking from declaration order, and three names in one project
+cannot separate global ranking from per-project ranking concatenated in project order. What was
+actually run puts the *exact* match in a different project from the two inexact ones:
+
+- `Core/AbcZed.cs` → `AbcZed` (substring), `Core/ZedHelper.cs` → `ZedHelper` (prefix),
+  `App/Zed.cs` → `Zed` (exact).
+- Query `Zed`. Global relevance → `Zed, ZedHelper, AbcZed`; per-project then relevance →
+  `ZedHelper, AbcZed, Zed`; document order → `AbcZed, ZedHelper, Zed`; alphabetical →
+  `AbcZed, Zed, ZedHelper`. Four hypotheses, four distinct strings.
+- Observed: **`Zed, ZedHelper, AbcZed`**, identical across two runs. Global relevance ranking.
+
+Two preconditions were checked before reading anything into the order, and both matter. The run
+is void unless all three names come back — an incomplete result set is the silent exit-0 failure
+`CLAUDE.md` describes, and here the measurement *is* the membership and order, so a missing
+`AbcZed` would leave `Zed, ZedHelper`, where relevance and alphabetical agree, and 2a would have
+been dropped on a measurement failure rather than on evidence. And the query was run twice and
+required to answer identically. The structural reason only the substring match discriminates:
+the display sort's first key is `Symbol.Name`, and an exact match is always
+`OrdinalIgnoreCase`-≤ every prefix match of itself.
+
+<details><summary>Original 2v note</summary>
 
 **The premise of 2a is unverified.** The claim is that Roslyn answers a partial query in
 relevance order, which is plausible (NavigateTo ranks exact over prefix over substring over
@@ -502,7 +529,28 @@ the sort, fire a partial query with clearly different match qualities, and recor
 
 If Roslyn does not rank, 2a is pointless and should be dropped rather than implemented.
 
-### 2a. `sym`: truncate before sorting
+</details>
+
+### 2a. `sym`: truncate before sorting — **done**
+
+`WriteSymbols` now projects into `hits`, `Take(max)` in the server's order, and sorts only the
+kept set. `hits.Count` still carries the untruncated total into both the `... N more` line and
+the JSON `count` / `truncated`, so the `Take` stayed inside `WriteSymbols` exactly as planned.
+
+Two things the plan for this item did not say:
+
+- **The comment above the sort keys had to be rewritten, not kept.** It justified the
+  containerName key by saying that without it "the winner of `--max` truncation would be
+  whichever order the server happened to answer in" — which after 2a is the behaviour by
+  design. The key still earns its place, but for display determinism between two colliding
+  generated documents, and it now says so.
+- **The re-pinned `sym-truncates` did not have to lose all its row coverage.** Only the *path*
+  is server-dependent. Both survivors are named `Area` and both are methods whichever pair the
+  server keeps, so with two rows shown `kindWidth` is 6 and `nameWidth` is 4 and the row always
+  begins `method  Area`. `run.sh` splits `expect` on `|` and requires every part, so that
+  assertion is free.
+
+<details><summary>Original 2a plan</summary>
 
 `Output.WriteSymbols` (~`Output.cs:192`) sorts by name, path, line, column and container, and
 *then* takes `max`. (PR #6 added the column and container keys, for determinism when two
@@ -537,12 +585,18 @@ server-dependent, so drop the path assertion:
 `sym-query` is uncapped and unaffected. Add a sentence to `DESIGN.md`'s `sym` paragraph: the cap
 is applied in the server's order and the display sort is cosmetic.
 
-### 2b. README layout tree
+</details>
 
-The tree lists `Core/Shape.cs` (`README.md:292`) but not `App/Square.cs`, and the cross-project
-split is the whole point of that fixture. It lists other `App/` files (`App/TypeError.cs`,
-`README.md:288`), so this is an omission, not a convention. One line. **Re-checked against
-`1796a31`: still true.**
+### 2b. README layout tree — **done**
+
+The tree listed `Core/Shape.cs` but not `App/Square.cs`, and the cross-project split is the
+whole point of that fixture. It listed other `App/` files, so this was an omission, not a
+convention.
+
+**`Ambient/Stray.cs` was missing from the same tree**, and the close-out checklist below claimed
+it was already there. Both lines were added. The other half of that same checklist claim — that
+the case count is still owed — was stale too: `README.md` already says fifty-three cases,
+forty-nine rows, which is correct, and Phase 2 re-pins one row without adding any.
 
 ## Phase 3 — whole-workspace `diag` throughput
 
@@ -572,26 +626,26 @@ no way to assert throughput and should not pretend to.
 - `dotnet format --verify-no-changes` exits 0.
 - `probes/run.sh` green — 44 legs at the start of Phase 0, 48 after it (0a added three,
   0c a fourth), **53 after Phase 1** (three non-project-file cases,
-  `no-project-root-reports`, `unknown-command-reports`), with **one re-pinned** still to come:
-  `sym-truncates` (2a). `premature-query-fails-loudly` was the other candidate and survived 1c
+  `no-project-root-reports`, `unknown-command-reports`), and **still 53 after Phase 2**:
+  `sym-truncates` was re-pinned, not added to. `premature-query-fails-loudly` was the other candidate and survived 1c
   unchanged, because the rewritten message kept both asserted phrases.
 - ~~`CLAUDE.md`: the "sentinel resolving no longer implies every project is loaded" bullet~~ —
   **done in `1796a31`.** It now describes the per-project model, keeps the `SettleAsync` /
   `MetadataAsSource` half, and carries the rule against matching a hit to a project by
   `containerName`.
-- `DESIGN.md`: **done for Phase 1** — a `Readiness` section now carries the all-projects
-  predicate, the `.csproj` scan's limits, what `--sentinel` gives up, and why `diag`'s walk is
-  deliberately not scoped. Still owed: the `sym` cap ordering note from 2a.
+- `DESIGN.md`: **done** — the Phase 1 `Readiness` section carries the all-projects predicate,
+  the `.csproj` scan's limits, what `--sentinel` gives up, and why `diag`'s walk is deliberately
+  not scoped; the `sym` paragraph now carries 2a's cap-ordering note.
 - `skill/SKILL.md`: **done** — `--sentinel` is described as an escape hatch, and the first
   troubleshooting entry now also covers a root with no `.csproj` at all. Its no-`.sln` premise
   was **re-derived and stands**: `fixture/` has `Fixture.slnx`, so it was never a
   counterexample.
-- `ROADMAP.md`: Milestone 4's "output tuning" item is marked unscoped; 2a is a concrete tuning
-  change and can be recorded against it. The generated-document-label limitation stays deferred.
-  1s's findings are **already in** the verified-facts section; 2v's are not.
-- `README.md`: the `--sentinel` wording and the two stale failure-mode rows are **done** (1e),
-  and `Ambient/Stray.cs` is in the layout tree. Still owed: `App/Square.cs` in that tree (2b)
-  and the case count.
+- `ROADMAP.md`: **done** — 2v's finding is in the verified-facts section and Milestone 4's
+  "output tuning" item records 2a. The generated-document-label limitation stays deferred.
+- `README.md`: **done.** The `--sentinel` wording and the two stale failure-mode rows landed
+  with 1e; `Ambient/Stray.cs` and `App/Square.cs` landed with 2b. The case count needed no
+  change — `README.md`'s fifty-three / forty-nine was already right, and 2a re-pins a row
+  rather than adding one. This entry previously claimed the opposite of both facts.
 - Delete this file.
 - Never push, and do not commit unless asked.
 

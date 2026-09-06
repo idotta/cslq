@@ -188,26 +188,34 @@ internal static class Output
     /// (project Core (net10.0))"), not a namespace path; it is rendered because it is the
     /// only thing separating two symbols that share a name, and never asserted on, because
     /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape.
+    /// <paramref name="max"/> caps the server's relevance order and the display sort applies
+    /// to what survived, so a capped query keeps the best matches rather than an alphabetical
+    /// prefix of them.
     /// </summary>
     public static void WriteSymbols(
         string root, IReadOnlyList<SymbolInformation> symbols, int max, bool json)
     {
         var hits = symbols
             .Select(s => new Match(PathUri.Display(root, s.Location.Uri), s))
+            .ToList();
+
+        // Truncate first, then sort: Roslyn answers workspace/symbol in relevance order --
+        // exact, then prefix, then substring, across every project -- and Distinct's DistinctBy
+        // keeps first-seen order, so that ranking arrives here intact. Sorting before the cap
+        // would keep an alphabetical prefix of the hits rather than the best matches.
+        var shown = hits.Take(max)
             .OrderBy(h => h.Symbol.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Symbol.Location.Range.Start.Line)
             // Two source-generated documents produced by one generator for different projects
             // collide on Display -- see DESIGN.md -- and survive Distinct, which keys on the
-            // raw URI. Their rows would then tie on every visible key, and since OrderBy is
-            // stable the winner of --max truncation would be whichever order the server
-            // happened to answer in. containerName carries the project, so it breaks that tie;
-            // the raw URI would not, its authority guid being regenerated on every load.
+            // raw URI. Their rows would otherwise tie on every visible key, leaving the
+            // rendered order of the two dependent on whichever order the server answered in.
+            // containerName carries the project, so it breaks that tie; the raw URI would not,
+            // its authority guid being regenerated on every load.
             .ThenBy(h => h.Symbol.Location.Range.Start.Character)
             .ThenBy(h => h.Symbol.ContainerName, StringComparer.Ordinal)
             .ToList();
-
-        var shown = hits.Take(max).ToList();
 
         if (json)
         {
