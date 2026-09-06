@@ -209,5 +209,35 @@ kill "$fb_holder" 2>/dev/null
 wait "$fb_holder" 2>/dev/null
 rm -f "$fb_log"
 
+# diag pulls each document once, so the first pull has to be the correct one. Every
+# cases.jsonl leg above runs against this suite's shared daemon, which by now has
+# App/TypeError.cs open -- a warm document answers correctly whatever the pull count, so
+# none of them can catch a regression here. This leg uses a server that has never seen the
+# document, the only state where answering before the document binds would show up.
+cold_log=$(mktemp)
+# --no-daemon, not a private pipe name: a fresh pipe would make this run *launch* a daemon,
+# the daemon inherits stdout, and $(...) then blocks forever waiting for the pipe's last
+# writer. --no-daemon gives a dedicated server that has never seen the document, which is
+# the state under test anyway.
+"$CSX" diag --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
+rc=$?
+out=$(cat "$cold_log")
+rm -f "$cold_log"
+case "$out" in
+  *"App/TypeError.cs:18:36 error CS0029"*) ok=$([ "$rc" = 0 ] && echo 1 || echo 0) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s
+' "cold-server-diag-reports-cross-project-error"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s, wanted 0 and the cross-project CS0029)
+'     "cold-server-diag-reports-cross-project-error" "$rc"
+  printf '%s
+' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

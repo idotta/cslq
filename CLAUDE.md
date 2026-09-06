@@ -74,6 +74,33 @@ dotnet build src/Csx/Csx.csproj          # build
   project directories would suppress no noise whatsoever. The same file **linked in** with
   `<Compile Include="../Elsewhere/File.cs" />` is fully indexed and does report, so that scoping
   would silently drop real errors. Measured 2026-09-05; the reasoning is in `DESIGN.md`.
+- **Sentinel inference reads prose, and it used to read only the first line that matched.**
+  The candidate regex matches `class|struct|record|interface|enum` followed by a word, so the
+  doc comment "identifying the class and assembly context" yields the candidate `and`. It takes
+  **every** match per file now, not the first — with one per file, that one sentence masked the
+  real type below it, and a one-file project was left with a candidate nothing can resolve while
+  readiness burned its entire timeout. `csx ready` on OrchardCore failed this way after 900 s on
+  fifteen projects. The fixture cannot reproduce it: it needs prose in a doc comment above the
+  only declaration in a single-file project.
+- **`diag` pulls once, and the settle loop that used to wrap it is gone on evidence.**
+  `textDocument/diagnostic` does not answer from the misc-files state and then correct itself —
+  it **blocks until the document is bound**. A cross-project error opened as the first document
+  in a never-used daemon returns the right code on pull #1 (~4.2 s), and the second pull (~0.7 s)
+  never once differed across six whole-fixture runs, cold and warm. If a bump starts answering
+  early, `diag` is where it shows up. Do not restore the loop without re-measuring: the old one
+  could not have caught that case anyway, since two equally-wrong pulls agree.
+- **`csx` never sends `didClose`, so daemon document state outlives the client.** `_open` is
+  per-process and says nothing about what the shared daemon still has open. Any measurement of
+  first-open behaviour must use a fresh `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` or
+  `--no-daemon`; a warm daemon shows "no divergence" for the wrong reason. The same effect is
+  worth ~4 s per document: the first `diag` of a file in a fresh daemon cost 7.6 s against 3.3 s
+  warm.
+- **`cases.jsonl` order is load-bearing for the `diag` cases, invisibly.** `run.sh` scopes one
+  daemon for the whole suite, and cases 1-12 never open `App/TypeError.cs`. So
+  `deliberate-error-diag` is the first `didOpen` of that document and the only leg that observes
+  a cold document at all; by the time `deliberate-error-diag-workspace` and
+  `non-project-file-no-diagnostics` run it is already open and warm. Reordering the file, or
+  running one case against an ambient daemon, disarms that coverage with nothing going red.
 - **Never pipe or command-substitute `csx` output in bash while the daemon is in play.** The
   daemon inherits the client's stdout, so `csx ... | tail` and `out=$(csx ...)` block forever
   waiting for the pipe's last writer — it looks exactly like a hung cold load. Redirect to a

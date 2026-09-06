@@ -76,14 +76,27 @@ own directory — never matched by `containerName`, which is localised display t
 
 Knowing the projects means scanning for `*.csproj` under the root, because **the server cannot
 be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
-project list. The scan is an approximation and it errs deliberately towards over-inclusion — a
-`.csproj` excluded from the solution is waited on needlessly, where the opposite mistake is the
-incomplete-answer bug this exists to close. A root with no `.csproj` at all fails immediately
+project list. The scan is an approximation and it errs deliberately towards over-inclusion — the
+opposite mistake is the incomplete-answer bug this exists to close. **Over-inclusion is not
+merely wasteful, it is fatal:** a `.csproj` the solution excludes is never loaded, so its types
+are never indexed, its sentinel can never resolve, and readiness burns the whole timeout and
+exits 1. Measured 2026-09-06: `csx ready` on OrchardCore v3.0.1 fails on
+`src/Templates/OrchardCore.ProjectTemplates/content/*`, which are `dotnet new` template content
+rather than solution projects. A root containing template or sample `.csproj` files needs
+`--root` pointed below them, or `--sentinel`. A root with no `.csproj` at all fails immediately
 instead of timing out; `--sentinel` bypasses the scan entirely.
 
 `--sentinel` is therefore the weak mode, not a neutral override: it replaces the whole
 per-project set with a single root-scoped probe, giving up the all-projects-loaded guarantee.
 It is the escape hatch for a layout the scan cannot read.
+
+Sentinel candidates come from a regex, not a parser, and it matches English prose in doc
+comments: "identifying the class and assembly context" yields the candidate `and`. Candidates
+are therefore taken as **every** declaration in a file, in order, not the first one — with one
+per file, a single such sentence masked every real type below it, and a project with one source
+file was left with a candidate no query can resolve. Measured 2026-09-06: `csx ready` against
+OrchardCore v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
+`'and' / 'and' / 'and'`.
 
 `diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
 Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to
@@ -91,6 +104,38 @@ Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles i
 the syntax tree — so scoping would suppress nothing. A file linked in from outside its project
 directory (`<Compile Include="../Elsewhere/File.cs" />`) is fully indexed and does report, and
 scoping would drop those diagnostics silently. Under-reporting is worse than over-walking.
+
+`diag` pulls each document **once**. It used to re-pull until two consecutive reports agreed, on
+the premise that a freshly opened document binds against the misc-files state and under-reports
+until its project references resolve. Measured 2026-09-06 against 5.12.0-1.26426.8 and **the
+premise is false**: `textDocument/diagnostic` does not answer early, it blocks until the document
+is bound. A cross-project error opened as the first document in a never-used daemon returns the
+correct `CS0029` on the first pull — that pull costs ~4.2s and the redundant second one ~0.7s.
+Across six whole-fixture runs, cold daemon and warm, 22 pulls each, the second pull never once
+differed from the first. The loop bought a mandatory 250 ms delay plus a duplicate round trip per
+file, about 45% of warm per-file cost, and nothing else.
+
+Measured cost, fixture (11 files, 3 projects), 2026-09-06: fixed ~2.5s per invocation, then
+~560 ms per file warm and ~1080 ms cold. The fixed term is process start, sentinel inference and
+readiness — none of which `diag` controls, and on a 233-project workspace it dominates. Any
+throughput number that is not split at the readiness boundary is measuring the wrong thing.
+
+### The measurement corpus
+
+Throughput and divergence claims are measured against **`OrchardCMS/OrchardCore` at tag
+`v3.0.1` = `b9c4b2f23e56ef11fbdbd28603c871d1b0fc9deb`** — 5,258 `.cs` across 233 `.csproj`,
+`OrchardCore.slnx` at the root, BSD-3-Clause. Chosen because it is strictly single-TFM `net10.0`,
+so a document belongs to one project instance and a per-document pull is unambiguous; every
+larger candidate multi-targets. No Arcade, no submodules, no native code, nuget.org only.
+
+**Pin the tag, never `main`.** `global.json` at `v3.0.1` is `10.0.200` / `rollForward:
+latestMajor`; `main` has moved to `10.0.302`, which fails against an SDK below it. And set
+`git config core.longpaths true` before checkout — OrchardCore has paths past Windows'
+`MAX_PATH`, and the clone otherwise aborts half-written with `Filename too long`.
+
+Scope the *file walk* with a directory argument, not with `--root`: `--root` drives project
+enumeration, so a narrowed root also narrows readiness and stops meaning all-projects-loaded.
+`csx diag <subdir> --root <repo>` keeps the full sentinel set and walks only the subtree.
 
 ## Settled — do not re-litigate
 

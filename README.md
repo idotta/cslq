@@ -271,9 +271,10 @@ weekly bump.
 ```
 
 Restores the tool and the fixture, builds `csx`, asserts readiness, then runs every case in
-`probes/cases.jsonl`. Exits non-zero on any mismatch. Fifty-three cases today — forty-nine
-rows, three source-generator staleness legs and the forced non-daemon fallback — including a
-negative one that pins a query fired before load to a loud failure rather than an empty result.
+`probes/cases.jsonl`. Exits non-zero on any mismatch. Fifty-four cases today — forty-nine
+rows, three source-generator staleness legs, the forced non-daemon fallback and a cold-server
+`diag` — including a negative one that pins a query fired before load to a loud failure rather
+than an empty result.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it

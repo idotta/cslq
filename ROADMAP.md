@@ -349,6 +349,30 @@ against 5.12.0-1.26426.8 / win-x64.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
   a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.
+- **`textDocument/diagnostic` does not answer from the misc-files state and then correct
+  itself -- it blocks until the document is bound.** A cross-project error opened as the first
+  and only document in a never-used daemon returns the correct `CS0029` on the *first* pull;
+  that pull costs ~4.2 s and a second, redundant one ~0.7 s. Across six whole-fixture runs,
+  three against a fresh daemon and three warm, 22 pulls each, the second pull never once
+  differed from the first. So `DiagnosticsAsync`'s settle loop was buying a mandatory 250 ms
+  delay plus a duplicate round trip per file -- about 45% of warm per-file cost -- and nothing
+  else. It is gone. Verified 2026-09-06 against 5.12.0-1.26426.8.
+- **`diag` cost splits into a fixed term and a per-file term, and the fixed term is not small.**
+  Fixture (11 files, 3 projects): ~2.5 s fixed per invocation -- process start, sentinel
+  inference, readiness -- then ~560 ms per file warm and ~1080 ms cold. The first `diag` of a
+  document in a fresh daemon costs ~4 s more than any later one. Any per-file number taken from
+  an undecomposed wall clock is wrong; `csx` never sends `didClose`, so daemon document state
+  outlives the client that opened it. Verified 2026-09-06.
+- **Sentinel inference matched English prose, and one bad line could sink a project.**
+  Candidates were the *first* regex match per file, and the regex matches
+  `class|struct|record|interface|enum` followed by a word -- so "identifying the class and
+  assembly context" in a doc comment yielded the candidate `and` and masked the real type below
+  it. `csx ready` on OrchardCore v3.0.1 failed after 900 s on fifteen projects, six with
+  `'and' / 'and' / 'and'`. Taking every match per file instead cut that to two, both of which
+  are `dotnet new` template content excluded from the solution -- Roslyn never loads them, so
+  the `.csproj` scan's over-inclusion is fatal there, not merely wasteful. Scoped below the
+  templates, `csx ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
+  Verified 2026-09-06 against 5.12.0-1.26426.8.
 - **`workspace/symbol` ranks its answer by relevance, globally.** Measured on a scratch copy of
   `fixture` carrying `Core/AbcZed.cs`, `Core/ZedHelper.cs` and `App/Zed.cs`, chosen so that
   relevance order, alphabetical order, document order and per-project-then-relevance order are
