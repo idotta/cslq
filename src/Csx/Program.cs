@@ -28,6 +28,13 @@ internal static partial class Program
           --no-daemon       start a dedicated server instead of the shared daemon
         """;
 
+    private static readonly string[] Commands =
+        ["ready", "refs", "def", "impl", "sym", "outline", "diag"];
+
+    // `outline` is here because it accepts a position too — see OutlineTargetAsync. `sym`
+    // takes a free-text query and `diag` a path, neither of which is position-shaped.
+    private static readonly string[] TakesPosition = ["refs", "def", "impl", "outline"];
+
     private static async Task<int> Main(string[] argv)
     {
         try
@@ -38,6 +45,13 @@ internal static partial class Program
         {
             Console.Error.WriteLine("csx: " + ex.Message);
             return 1;
+        }
+        catch (OperationCanceledException)
+        {
+            // Ctrl+C. Without this the cancellation escapes as an unhandled exception and the
+            // interrupt is answered with a stack trace and exit 134.
+            Console.Error.WriteLine("csx: interrupted.");
+            return 130;
         }
     }
 
@@ -50,6 +64,12 @@ internal static partial class Program
         }
 
         var opts = Options.Parse(argv);
+
+        // Before the server starts, like the argument checks in Options.Parse: this is a
+        // filesystem scan, and a root with no project in it should say so instantly rather
+        // than after a cold load.
+        var sentinels = Sentinels(opts);
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
@@ -57,7 +77,7 @@ internal static partial class Program
 
         try
         {
-            return await DispatchAsync(client, opts, cts.Token);
+            return await DispatchAsync(client, opts, sentinels, cts.Token);
         }
         finally
         {
@@ -71,47 +91,49 @@ internal static partial class Program
         }
     }
 
-    private static async Task<int> DispatchAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DispatchAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         switch (opts.Command)
         {
             case "ready":
-                await client.WaitReadyAsync(
-                    Sentinels(opts), opts.Timeout, ct);
+                await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
                 Console.WriteLine("ready");
                 return 0;
 
             case "refs":
-                return await RefsAsync(client, opts, ct);
+                return await RefsAsync(client, opts, sentinels, ct);
 
             case "def":
-                return await DefAsync(client, opts, ct);
+                return await DefAsync(client, opts, sentinels, ct);
 
             case "impl":
-                return await ImplAsync(client, opts, ct);
+                return await ImplAsync(client, opts, sentinels, ct);
 
             case "sym":
-                return await SymAsync(client, opts, ct);
+                return await SymAsync(client, opts, sentinels, ct);
 
             case "outline":
-                return await OutlineAsync(client, opts, ct);
+                return await OutlineAsync(client, opts, sentinels, ct);
 
             case "diag":
-                return await DiagAsync(client, opts, ct);
+                return await DiagAsync(client, opts, sentinels, ct);
 
             default:
-                throw new CsxException($"unknown command '{opts.Command}'\n\n{Usage}");
+                throw new System.Diagnostics.UnreachableException(
+                    $"Options.Parse admitted '{opts.Command}'");
         }
     }
 
-    private static async Task<int> RefsAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> RefsAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("refs needs a symbol or file:line:col");
 
         // Gate on a sentinel that must exist, never on the symbol being asked about:
         // otherwise a genuinely absent symbol is indistinguishable from a workspace that
         // has not finished loading, and the caller waits out the whole timeout for it.
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ReferencesAsync(uri, position, ct);
@@ -120,11 +142,12 @@ internal static partial class Program
         return locations.Count == 0 ? 1 : 0;
     }
 
-    private static async Task<int> DefAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DefAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("def needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.DefinitionAsync(uri, position, ct);
@@ -140,11 +163,12 @@ internal static partial class Program
     /// means the position resolved to no symbol at all, not that nothing implements the
     /// symbol. Verified on the wire against 5.12.0-1.26426.8.
     /// </summary>
-    private static async Task<int> ImplAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> ImplAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("impl needs a symbol or file:line:col");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
         var locations = await client.ImplementationsAsync(uri, position, ct);
@@ -159,13 +183,14 @@ internal static partial class Program
     /// the point rather than a problem. Empty exits 1, like <c>refs</c>: a search that found
     /// nothing is a lookup that failed.
     /// </summary>
-    private static async Task<int> SymAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> SymAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var query = opts.Argument ?? throw new CsxException("sym needs a query");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var (_, matches) = await QuerySymbolsAsync(client, query, Distinct, ct);
+        var matches = Distinct(await client.SymbolsAsync(query, ct));
         Output.WriteSymbols(opts.Root, matches, opts.Max, opts.Json);
         return matches.Count == 0 ? 1 : 0;
     }
@@ -175,11 +200,12 @@ internal static partial class Program
     /// empty file is a query that was answered. A target that fails to resolve still exits 1,
     /// by throwing out of the resolver.
     /// </summary>
-    private static async Task<int> OutlineAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> OutlineAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CsxException("outline needs a file or symbol");
 
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var uri = await OutlineTargetAsync(client, opts.Root, target, ct);
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
@@ -228,9 +254,10 @@ internal static partial class Program
     /// a repo with no diagnostics is a successful `diag`, unlike an empty `refs`, which means
     /// the lookup failed.
     /// </summary>
-    private static async Task<int> DiagAsync(LspClient client, Options opts, CancellationToken ct)
+    private static async Task<int> DiagAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        await client.WaitReadyAsync(Sentinels(opts), opts.Timeout, ct);
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var findings = new List<(string Uri, Diagnostic Diagnostic)>();
         if (opts.Argument is { } target)
@@ -304,12 +331,19 @@ internal static partial class Program
     /// Every symbol matching <paramref name="target"/>, deduplicated by location. Callers
     /// decide what more than one means: for <c>refs</c> and <c>def</c> it is ambiguity, for
     /// <c>outline</c> it is only ambiguity when the documents differ.
+    /// <para>
+    /// One query, no retry. This used to re-ask for 10s while the selection came back empty,
+    /// because a sentinel proved only that <em>some</em> project had loaded and a miss was
+    /// indistinguishable from a project still loading. Readiness now waits for every project,
+    /// so an empty answer means the symbol is absent — and the retry only made every genuine
+    /// miss cost 40 requests and 10s.
+    /// </para>
     /// </summary>
     private static async Task<List<SymbolInformation>> MatchSymbolsAsync(
         LspClient client, string target, CancellationToken ct)
     {
-        var (candidates, matches) = await QuerySymbolsAsync(
-            client, LastSegment(target), c => Distinct(c.Where(s => Matches(s, target))), ct);
+        var candidates = await client.SymbolsAsync(LastSegment(target), ct);
+        var matches = Distinct(candidates.Where(s => Matches(s, target)));
 
         if (matches.Count == 0)
         {
@@ -320,33 +354,6 @@ internal static partial class Program
         }
 
         return matches;
-    }
-
-    /// <summary>
-    /// One <c>workspace/symbol</c> query, retried while <paramref name="select"/> picks
-    /// nothing out of the answer. The sentinel proves the workspace loaded, not that every
-    /// project did, so a query fired in that window comes back missing the symbols of a
-    /// project still loading — indistinguishable from a target that is genuinely absent.
-    /// Retrying on the selection rather than on the raw answer matters: a query for a name
-    /// declared in two projects returns the loaded one's symbols immediately, so waiting for
-    /// a non-empty answer would stop waiting before the one actually being asked for arrives.
-    /// The whole answer comes back too, because the failure message lists it as candidates.
-    /// </summary>
-    private static async Task<(IReadOnlyList<SymbolInformation> Candidates, List<SymbolInformation> Selected)>
-        QuerySymbolsAsync(
-            LspClient client,
-            string query,
-            Func<IReadOnlyList<SymbolInformation>, List<SymbolInformation>> select,
-            CancellationToken ct)
-    {
-        var grace = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (true)
-        {
-            var candidates = await client.SymbolsAsync(query, ct);
-            var selected = select(candidates);
-            if (selected.Count > 0 || DateTime.UtcNow >= grace) return (candidates, selected);
-            await Task.Delay(250, ct);
-        }
     }
 
     // Roslyn reports a symbol once per project that sees it, so a symbol in a multi-targeted
@@ -387,14 +394,22 @@ internal static partial class Program
     [GeneratedRegex(@"^(?<file>.+):(?<line>\d+):(?<col>\d+)$")]
     private static partial Regex PositionSpec();
 
+    /// <summary>
+    /// Throws rather than returning <c>false</c> once the <c>file:line:col</c> shape has
+    /// matched but the numbers are unusable. Falling through to the symbol resolver instead
+    /// would answer "no symbol matched 'Core/Greeter.cs:0:1'" and dump candidates, when the
+    /// real answer is that the position is not one. Zero is rejected with overflow: positions
+    /// are one-based everywhere in <c>csx</c>, and <c>line - 1</c> would otherwise hand Roslyn
+    /// a negative position, which it throws out of as an unhandled RPC fault.
+    /// </summary>
     private static bool TryParsePosition(string spec, out string file, out int line, out int column)
     {
         var m = PositionSpec().Match(spec);
         if (m.Success)
         {
             file = m.Groups["file"].Value;
-            line = int.Parse(m.Groups["line"].Value);
-            column = int.Parse(m.Groups["col"].Value);
+            line = Coordinate(m.Groups["line"].Value, "line");
+            column = Coordinate(m.Groups["col"].Value, "column");
             return true;
         }
 
@@ -402,8 +417,37 @@ internal static partial class Program
         return false;
     }
 
+    private static int Coordinate(string text, string name) => int.TryParse(text, out var value)
+        ? value > 0 ? value : throw new CsxException($"{name} is one-based: {text}")
+        : throw new CsxException($"{name} out of range: {text}");
+
+    /// <summary>
+    /// Rejects a file-shaped argument that is not a usable position, so it fails at parse time
+    /// rather than reaching the symbol resolver. <see cref="TryParsePosition"/> already throws
+    /// once <see cref="PositionSpec"/> matched; what is left is a spec it could not match at
+    /// all — a `+`, a sign, an empty coordinate — which would otherwise start a server, wait
+    /// out readiness, and answer "no symbol matched 'Core/Greeter.cs:+1:2'".
+    /// </summary>
+    private static void ValidatePosition(string argument)
+    {
+        if (TryParsePosition(argument, out _, out _, out _)) return;
+
+        // Only the last segment: a Windows drive letter puts a colon in the first one.
+        var segment = argument[(argument.LastIndexOfAny(['/', '\\']) + 1)..];
+        if (segment.Contains(':'))
+        {
+            throw new CsxException($"'{argument}' is not a position: expected file:line:col");
+        }
+    }
+
     [GeneratedRegex(@"\b(?:class|struct|record|interface|enum)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)")]
     private static partial Regex TypeDeclaration();
+
+    // Raw strings first, then verbatim, then ordinary: a shorter alternative would otherwise
+    // close a longer literal early. Replaced with a space, not nothing, so `class/*x*/Foo`
+    // does not become the declaration `classFoo`.
+    [GeneratedRegex("\"\"\"[\\s\\S]*?\"\"\"|@\"(?:[^\"]|\"\")*\"|\"(?:\\\\.|[^\"\\\\\n])*\"|'(?:\\\\.|[^'\\\\\n])*'|//[^\n]*|/\\*[\\s\\S]*?\\*/")]
+    private static partial Regex NonCode();
 
     /// <summary>
     /// One readiness probe per project, because a single one only ever proved that
@@ -414,47 +458,87 @@ internal static partial class Program
     /// </summary>
     private static IReadOnlyList<Sentinel> Sentinels(Options opts) =>
         opts.Sentinel is { } explicitSentinel
-            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel])]
+            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel], [])]
             : InferSentinels(opts.Root);
 
     /// <summary>
     /// A project per <c>.csproj</c>, and per project the type names declared in its own files,
     /// most-shallow-file-first. Several candidates rather than one because
-    /// <see cref="TypeDeclaration"/> is a regex, not a parser: it matches inside comments and
-    /// string literals — <c>fixture/Gen/BuildInfoGenerator.cs</c> has a
-    /// <c>public static class BuildInfo</c> inside a raw string literal — and a project whose
-    /// first match is <c>// class Removed</c> would otherwise block readiness forever. Capped
-    /// because the list is a fallback chain, not an index.
+    /// <see cref="TypeDeclaration"/> is a regex, not a parser: even with comments and string
+    /// literals stripped it reads a type out of a file no project compiles, out of an
+    /// excluded <c>#if</c> branch, or out of a <c>using</c> alias, and one such guess would
+    /// otherwise block readiness for the whole run. Capped because the list is a fallback
+    /// chain, not an index.
     /// <para>
     /// A project that declares no type at all — one that is only top-level statements —
-    /// contributes no sentinel and is skipped. That degrades to the old coverage for that
-    /// project rather than hanging on a probe that cannot resolve. A root with no
-    /// <c>.csproj</c> under it falls back to a single root-scoped sentinel, which is what
-    /// every caller got before.
+    /// contributes no candidate. It is still returned, so that
+    /// <see cref="LspClient.WaitReadyAsync"/> can name it as unprobed on the failure path
+    /// rather than leaving it silently absent from readiness.
+    /// </para>
+    /// <para>
+    /// A root with no <c>.csproj</c> under it fails immediately. Roslyn loads nothing for such
+    /// a root, so every sentinel is unresolvable and every query answers empty: waiting out the
+    /// full timeout only delays the same conclusion. <c>--sentinel</c> bypasses this, which is
+    /// the escape hatch for a layout the scan cannot read.
     /// </para>
     /// </summary>
     private static IReadOnlyList<Sentinel> InferSentinels(string root)
     {
         var projects = ProjectDirectories(root);
-        if (projects.Count == 0) return [new Sentinel(Path.GetFullPath(root), Candidates(root))];
+        if (projects.Count == 0)
+        {
+            throw new CsxException(
+                $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
+        }
 
         var sentinels = projects
-            .Select(d => new Sentinel(d, Candidates(d)))
-            .Where(s => s.Candidates.Count > 0)
+            .Select(d => new Sentinel(d, Candidates(d, projects), NestedProjects(d, projects)))
             .ToList();
 
-        return sentinels.Count > 0
+        return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
             : throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
     }
 
-    private static IReadOnlyList<string> Candidates(string directory) => SourceFiles(directory)
-        .Select(f => TypeDeclaration().Match(File.ReadAllText(f)))
-        .Where(m => m.Success)
-        .Select(m => m.Groups["name"].Value)
-        .Distinct(StringComparer.Ordinal)
-        .Take(3)
-        .ToList();
+    /// <summary>
+    /// Type names declared in a project's <em>own</em> files. Own excludes anything under a
+    /// project nested inside this one, so a candidate taken from <c>A/B</c> cannot be what
+    /// marks A ready. That is only half of it: the hit has to be scoped too, which is what
+    /// <see cref="Sentinel.Nested"/> carries — <c>Web/</c> and <c>Web/Tests/</c> both
+    /// declaring <c>Program</c> is the ordinary shape, and a scan of A's own files alone does
+    /// not stop B's <c>Program</c> from answering A's query. A project left with no candidate
+    /// of its own is reported as unprobed rather than assumed loaded.
+    /// <para>
+    /// <see cref="NonCode"/> first, because <see cref="TypeDeclaration"/> matches English
+    /// prose: "identifying the class and assembly context" in a doc comment yields the
+    /// candidate <c>and</c>, a word no <c>workspace/symbol</c> query can resolve. Measured
+    /// 2026-09-06, before the strip: <c>csx ready</c> on OrchardCore v3.0.1 failed after 900s
+    /// on fifteen projects, six of whose candidate lists were <c>'and' / 'and' / 'and'</c> —
+    /// one doc comment can fill all three slots, so capping at three is no defence and taking
+    /// every match per file rather than the first is not one either.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<string> Candidates(string directory, IReadOnlyList<string> projects)
+    {
+        var nested = NestedProjects(directory, projects);
+
+        return SourceFiles(directory)
+            .Where(f => !nested.Any(n => IsUnder(f, n)))
+            .SelectMany(f => TypeDeclaration().Matches(NonCode().Replace(File.ReadAllText(f), " ")))
+            .Select(m => m.Groups["name"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(3)
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> NestedProjects(
+        string directory, IReadOnlyList<string> projects) =>
+        [.. projects.Where(p => p != directory && IsUnder(p, directory))];
+
+    private static bool IsUnder(string path, string directory) => path.StartsWith(
+        directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar,
+        StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Every project directory under the root, by <c>.csproj</c> scan. An approximation of what
@@ -500,7 +584,13 @@ internal static partial class Program
     {
         public static Options Parse(string[] argv)
         {
-            string command = argv[0];
+            // Here rather than in DispatchAsync's default branch, for the reason the numeric
+            // checks are here: everything between the two starts a server and scans the
+            // workspace, so a typo would be answered by whatever failed first. It was —
+            // `csx bogus --root <dir with no .csproj>` reported the missing project.
+            string command = argv[0] is var c && Commands.Contains(c)
+                ? c
+                : throw new CsxException($"unknown command '{argv[0]}'\n\n{Usage}");
             string? argument = null;
             var root = Directory.GetCurrentDirectory();
             string? sentinel = null;
@@ -518,9 +608,12 @@ internal static partial class Program
                 {
                     case "--root": root = Path.GetFullPath(Next(argv, ref i)); break;
                     case "--sentinel": sentinel = Next(argv, ref i); break;
-                    case "--max": max = int.Parse(Next(argv, ref i)); break;
-                    case "--context": context = int.Parse(Next(argv, ref i)); break;
-                    case "--timeout": timeout = TimeSpan.FromSeconds(int.Parse(Next(argv, ref i))); break;
+                    case "--max": max = Int(argv, ref i, 1); break;
+                    case "--context": context = Int(argv, ref i, 0); break;
+                    // No floor of 1: a zero timeout is how `premature-query-fails-loudly`
+                    // proves a query fired before load fails loudly rather than answering
+                    // empty. Only a negative one is rejected.
+                    case "--timeout": timeout = TimeSpan.FromSeconds(Int(argv, ref i, 0)); break;
                     case "--log-level": logLevel = Next(argv, ref i); break;
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
@@ -534,6 +627,13 @@ internal static partial class Program
             }
 
             if (!Directory.Exists(root)) throw new CsxException($"no such directory: {root}");
+
+            // Here rather than in LocateAsync: that runs after StartAsync and WaitReadyAsync,
+            // so `file:0:1` would start a server and wait out readiness before printing an
+            // argument error. Only for the commands that accept a position: `sym Foo:1` is a
+            // legitimate query and `diag nope:x` a path, and validating those rejected both.
+            if (argument is not null && TakesPosition.Contains(command)) ValidatePosition(argument);
+
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
                 daemon);
@@ -543,6 +643,24 @@ internal static partial class Program
         {
             if (++i >= argv.Length) throw new CsxException($"option '{argv[i - 1]}' needs a value");
             return argv[i];
+        }
+
+        private static int Int(string[] argv, ref int i, int floor)
+        {
+            var name = argv[i];
+            var text = Next(argv, ref i);
+            if (!int.TryParse(text, out var value))
+            {
+                // Overflow is not garbage: `--max 99999999999` is a number, just not one that
+                // fits, and "needs an integer" reads as a lie about the input.
+                var magnitude = text.StartsWith('-') ? text[1..] : text;
+                throw new CsxException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
+                    ? $"{name} out of range: {text}"
+                    : $"{name} needs an integer");
+            }
+
+            if (value < floor) throw new CsxException($"{name} needs to be {floor} or more");
+            return value;
         }
     }
 }

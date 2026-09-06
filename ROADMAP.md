@@ -3,17 +3,29 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and ten cases.
-Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
-that names nothing concrete; it needs scope before it can be worked.
+Last updated: 2026-09-06, after the hardening phases closed the readiness window.
+Milestone 3 is done. Milestone 4's remaining item — output tuning — has had one concrete
+change land against it: `sym` now applies `--max` in the server's relevance order and sorts
+only what survives, so a capped broad query keeps the best matches. The rest of the item is
+still a placeholder that names nothing concrete.
 
-44 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+55 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
-missing rather than by erroring. Readiness is now one sentinel per project. This is the known window the sentinel does not
-close — it proves the workspace loaded, not that every project did — and neither the
-`SettleAsync` decompilation guard nor `QuerySymbolsAsync`'s retry catches it, because both
-watch for an *empty* answer and this one is merely *incomplete*. Closing it needs per-project
-readiness, which is its own piece of work.
+missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
+that every project did — is closed: `WaitReadyAsync` now takes one sentinel per `.csproj` and
+requires each to resolve to a location under its own project directory, so an incomplete answer
+at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard and
+`QuerySymbolsAsync`'s retry remain, but neither is load-bearing for it; both watch for an
+*empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
+in one directory, which no path scoping can separate — documented, not scheduled.
+
+Known gap in the gate: `Sentinel.Nested` — the half that keeps a nested project's hit from
+marking its parent ready — is exercised by nothing. All three fixture projects are siblings, so
+every `Nested` list is empty in every case the suite runs, and the `Web/` + `Web/Tests/` shape
+that motivates it is verified by argument only. Pinning it needs a fourth fixture project nested
+under `App/` declaring a duplicate `Program`, at the cost of a project load on all 55 cases and
+of re-baselining every whole-fixture expectation. Not taken; recorded here so nobody assumes
+otherwise.
 
 ## Status
 
@@ -22,7 +34,7 @@ readiness, which is its own piece of work.
 | 1 | `ready` + `refs`, cross-project fixture, probe gate, both workflows | **done** |
 | 2 | The hard fixture cases and the read commands | **done** |
 | 3 | Daemon mode, then `skill/SKILL.md` | **done** |
-| 4 | Remaining commands and output tuning | commands done, tuning unscoped |
+| 4 | Remaining commands and output tuning | commands done, tuning: `sym` cap ordering done, rest unscoped |
 
 ## Milestone 1 — the loop works (done)
 
@@ -332,9 +344,53 @@ against 5.12.0-1.26426.8 / win-x64.
   cold load. It belongs to a client attaching to a **daemon loading a root it has not loaded
   before**, where the notification already fired for the previous root and never fires again —
   which is exactly the case the notification cannot be used to close. Verified 2026-09-05.
+- A `.cs` file that **no project compiles** is answered for asymmetrically: `workspace/symbol`
+  does not index it (`csx sym` on a type declared only there exits 1 with `no results`) and
+  `textDocument/diagnostic` reports **nothing** for it, but `textDocument/documentSymbol` still
+  answers off the syntax tree, so `csx outline` works. The same file **linked into** a project
+  from outside its directory (`<Compile Include="../Ambient/Stray.cs" />`) is fully indexed and
+  reports its errors. This is why readiness inference is scoped to project directories while
+  `diag`'s file walk is not: scoping the walk would suppress no noise and would silently drop a
+  linked file's real diagnostics. Verified 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy
+  of the fixture.
+- `fixture/` **does** have a solution — `Fixture.slnx` — so it is not a counterexample to
+  `skill/SKILL.md`'s "a root with only a `.csproj` and no solution never loads". That entry
+  already covers `.slnx` and stands. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
   a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.
+- **`textDocument/diagnostic` does not answer from the misc-files state and then correct
+  itself -- it blocks until the document is bound.** A cross-project error opened as the first
+  and only document in a never-used daemon returns the correct `CS0029` on the *first* pull;
+  that pull costs ~4.2 s and a second, redundant one ~0.7 s. Across six whole-fixture runs,
+  three against a fresh daemon and three warm, 22 pulls each, the second pull never once
+  differed from the first. So `DiagnosticsAsync`'s settle loop was buying a mandatory 250 ms
+  delay plus a duplicate round trip per file -- about 45% of warm per-file cost -- and nothing
+  else. It is gone. Verified 2026-09-06 against 5.12.0-1.26426.8.
+- **`diag` cost splits into a fixed term and a per-file term, and the fixed term is not small.**
+  Fixture (11 files, 3 projects): ~2.5 s fixed per invocation -- process start, sentinel
+  inference, readiness -- then ~560 ms per file warm and ~1080 ms cold. The first `diag` of a
+  document in a fresh daemon costs ~4 s more than any later one. Any per-file number taken from
+  an undecomposed wall clock is wrong; `csx` never sends `didClose`, so daemon document state
+  outlives the client that opened it. Verified 2026-09-06.
+- **Sentinel inference matched English prose, and one bad line could sink a project.**
+  Candidates were the *first* regex match per file, and the regex matches
+  `class|struct|record|interface|enum` followed by a word -- so "identifying the class and
+  assembly context" in a doc comment yielded the candidate `and` and masked the real type below
+  it. `csx ready` on OrchardCore v3.0.1 failed after 900 s on fifteen projects, six with
+  `'and' / 'and' / 'and'`. Taking every match per file instead cut that to two, both of which
+  are `dotnet new` template content excluded from the solution -- Roslyn never loads them, so
+  the `.csproj` scan's over-inclusion is fatal there, not merely wasteful. Scoped below the
+  templates, `csx ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
+  Verified 2026-09-06 against 5.12.0-1.26426.8.
+- **`workspace/symbol` ranks its answer by relevance, globally.** Measured on a scratch copy of
+  `fixture` carrying `Core/AbcZed.cs`, `Core/ZedHelper.cs` and `App/Zed.cs`, chosen so that
+  relevance order, alphabetical order, document order and per-project-then-relevance order are
+  four distinct strings. The query `Zed` answered `Zed` (App), `ZedHelper` (Core), `AbcZed`
+  (Core) -- exact, prefix, substring, with the exact match's project coming second in document
+  order, so neither project order nor declaration order explains it. Identical across two runs.
+  This is what makes `sym`'s truncate-before-sort meaningful. Verified 2026-09-05 against
+  5.12.0-1.26426.8.
 - `textDocument/implementation` answers `Location[]`, with zero-width ranges at the
   implementer's name. Fired at an interface member it returns the implementing members, at an
   interface type the implementing types, and at a base-list mention of the interface the same

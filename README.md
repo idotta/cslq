@@ -119,6 +119,13 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 
 Paths are relative to `--root`; lines and columns are one-based.
 
+`--sentinel` is an escape hatch, not a neutral override. By default `csx` waits for *every*
+project under the root to load, one readiness probe per `.csproj`; passing `--sentinel` replaces
+that whole set with a single probe scoped to the root, which gives up the guarantee and restores
+the window in which `refs`, `impl` and `sym` can answer incompletely at exit 0. Use it when the
+`.csproj` scan cannot read the workspace layout — including a root with no `.csproj`, which
+otherwise fails immediately.
+
 `refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl` and
 `sym` follow the same rule.
@@ -149,7 +156,7 @@ Measured on the fixture, Windows 11 / .NET 10.0.301, debug build:
 | `csx def` | ~6.4–7.0 s |
 | `csx outline` | ~5.4–6.2 s |
 | `csx diag <file>` | ~11–12 s |
-| `csx diag` (whole fixture, 6 files) | ~16 s |
+| `csx diag` (whole fixture) | ~16 s over the 11 files it then had |
 
 The same suite on `ubuntu-latest` reaches ready in ~12 s and runs six cases in ~39 s.
 
@@ -246,10 +253,10 @@ weekly bump.
 
 | Failure mode | How |
 |---|---|
-| Async project load returning empty instead of erroring | `WaitReadyAsync` waits for `workspace/projectInitializationComplete`, then polls a sentinel symbol until it resolves, then fails loudly on timeout. Never `sleep`. |
-| A sentinel that is itself the thing being queried | The sentinel is inferred from a type declaration in the tree, so "symbol absent" and "workspace not loaded" stay distinguishable. The target gets a 10 s grace poll after readiness. |
+| Async project load returning empty instead of erroring | `WaitReadyAsync` polls one sentinel symbol per project until every project that has one resolves it, then fails loudly on timeout. A project the scan could infer no sentinel for — one that is only top-level statements, or only Razor or resources — is not waited on, because there is nothing to ask the server for; it is named on the failure path instead, so its absence from readiness is visible rather than silent. Never `sleep`, and never block on `workspace/projectInitializationComplete` — it never fires for a client attaching to a loaded daemon. |
+| A sentinel that is itself the thing being queried | Sentinels are inferred from type declarations in each project, so "symbol absent" and "workspace not loaded" stay distinguishable. No grace poll on the target: readiness covering every project is what makes an empty answer mean absent. |
 | UTF-16 position encoding | The server does not advertise `positionEncoding`, which per LSP 3.17 means utf-16 — the same unit as a .NET string index. `csx` asserts this at `initialize` and refuses to run if a future build negotiates utf-8. A fixture line carrying an astral-plane character (a surrogate pair, so utf-16 and rune counts differ) pins the reported column at 39 in three cases; an accented letter would pass even on a broken implementation. |
-| A first diagnostic pull answered from the misc-files state | A freshly opened document is bound against whatever the server has at that instant, and for the first one that is the misc-files state, which reports only errors needing no project references. `DiagnosticsAsync` re-pulls until two consecutive reports agree (5 s budget). The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — so a first-response-only implementation reports nothing and the case fails. |
+| A first diagnostic pull under-reporting on an unbound document | `textDocument/diagnostic` does not answer from the misc-files state and then correct itself — it **blocks until the document is bound**, so `diag` pulls once and the settle loop that used to wrap it is gone. Measured 2026-09-06: a cross-project error opened as the first document in a never-used server returns the right code on pull #1 (~4.2 s), and a second pull (~0.7 s) never once differed across six whole-fixture runs, cold and warm. (A document in **no** project is a different case: it reports nothing at all, whatever the error class. See `DESIGN.md`.) The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — and `cold-server-diag-reports-cross-project-error` opens it as the first document of a dedicated server, which is the only state where answering early would show. |
 | Roslyn ignoring unopened documents | Every query opens its document via `textDocument/didOpen` first — except source-generated ones, which the server owns and answers for without it. |
 | No auto-restore | `probes/run.sh` runs `dotnet restore` on the fixture before starting the server. |
 | Source-generated symbols rendering as a nonexistent path | Generated documents come back under a `roslyn-source-generated:` URI. `new Uri(u).LocalPath` does not throw for one, it returns `/BuildInfo.g.cs`, so `PathUri.Display` branches on the scheme and labels them `<generated>/<assembly>/<hintName>`. Text comes from `workspace/textDocumentContent`. |
@@ -264,9 +271,10 @@ weekly bump.
 ```
 
 Restores the tool and the fixture, builds `csx`, asserts readiness, then runs every case in
-`probes/cases.jsonl`. Exits non-zero on any mismatch. Forty-four cases today — forty rows,
-three source-generator staleness legs and the forced non-daemon fallback — including a
-negative one that pins a query fired before load to a loud failure rather than an empty result.
+`probes/cases.jsonl`. Exits non-zero on any mismatch. Fifty-four cases today — forty-nine
+rows, three source-generator staleness legs, the forced non-daemon fallback and a cold-server
+`diag` — including a negative one that pins a query fired before load to a loud failure rather
+than an empty result.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it
@@ -285,7 +293,9 @@ src/Csx/                    the thin LSP client and CLI
   Output.cs                 path:line + context formatting, and the outline tree
 fixture/                    deliberately tricky solution
   Gen/                      incremental source generator; its output is referenced from App
+  Ambient/Stray.cs          a document no project compiles, for the misc-files cases
   App/TypeError.cs          the deliberate cross-project type error for `csx diag`
+  App/Square.cs             the cross-project implementer of `Core/Shape.cs`, for `impl`
   Core/Party.cs             an astral-plane character on a line carrying a symbol
   Core/Split*.cs            one type in two documents, plus an overload in one of them
   Core/Empty.cs             a compilable document that declares nothing

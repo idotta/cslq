@@ -107,9 +107,14 @@ as "this implements something".
 --context N         source lines either side of a hit (default 1; inert for outline and sym)
 --timeout N         seconds to wait for the workspace to load (default 180)
 --json              machine-readable output
---sentinel <sym>    the symbol used to prove the workspace loaded
+--sentinel <sym>    escape hatch: probe readiness with this one symbol instead
 --no-daemon         start a private server instead of sharing the daemon
 ```
+
+Do not reach for `--sentinel` to speed a run up. By default `csx` waits for every project
+under the root to load, one probe per `.csproj`; `--sentinel` replaces that with a single
+root-scoped probe and drops the guarantee, so `refs`, `impl` and `sym` can come back missing a
+project's hits at exit 0. It is for a workspace whose layout the scan cannot read.
 
 `csx` shares one background server (the daemon) across invocations, so a warm query costs a
 couple of seconds instead of a full solution load. You do not need to manage it. If a run

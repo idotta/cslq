@@ -67,6 +67,65 @@ dotnet build src/Csx/Csx.csproj          # build
   `TaskCanceled`, and every later request then failed with `-32000: Server was requested to
   shut down`. Payloads are hand-rolled in `Protocol.cs`, so a shape mistake is silent and
   then fatal rather than a clean error.
+- **A `.cs` file no project compiles is half-invisible, and the halves are not the ones you
+  would guess.** `workspace/symbol` does not index it and `textDocument/diagnostic` reports
+  **nothing** for it — but `outline` answers, off the syntax tree. So `csx outline` on such a
+  file works while `csx sym` on the type it declares exits 1, and scoping `diag`'s file walk to
+  project directories would suppress no noise whatsoever. The same file **linked in** with
+  `<Compile Include="../Elsewhere/File.cs" />` is fully indexed and does report, so that scoping
+  would silently drop real errors. Measured 2026-09-05; the reasoning is in `DESIGN.md`.
+- **Sentinel inference reads prose, and neither taking every match nor capping at three saves
+  it.** The candidate regex matches `class|struct|record|interface|enum` followed by a word, so
+  the doc comment "identifying the class and assembly context" yields the candidate `and` — and
+  one sentence can yield `and` / `of` / `for` and fill all three slots, leaving a project probed
+  only by words nothing can resolve while readiness burns its entire timeout. `csx ready` on
+  OrchardCore failed this way after 900 s on fifteen projects. `Program.NonCode` therefore
+  strips comments and string literals before the declaration regex runs. Keep the fallback
+  chain anyway: the regex still reads types out of `#if` branches and uncompiled files. The
+  fixture cannot reproduce the original failure — it needs prose in a doc comment above the
+  only declaration in a single-file project.
+- **A candidate must resolve inside the project's *own* directory, nested projects excluded.**
+  `LspClient.Under` counts any hit below a directory, so with `Web/` and `Web/Tests/` both
+  declaring `Program` — the ordinary shape — Tests loading marks Web ready and the
+  incomplete-answer-at-exit-0 bug is back. Both halves are needed: `Program.Candidates` skips
+  files under a nested project, and `Sentinel.Nested` scopes the hit. Two `.csproj` in **one**
+  directory cannot be separated by any path scoping and are a documented limit, not a bug to
+  fix here.
+- **`diag` pulls once, and the settle loop that used to wrap it is gone on evidence.**
+  `textDocument/diagnostic` does not answer from the misc-files state and then correct itself —
+  it **blocks until the document is bound**. A cross-project error opened as the first document
+  in a never-used daemon returns the right code on pull #1 (~4.2 s), and the second pull (~0.7 s)
+  never once differed across six whole-fixture runs, cold and warm. The leg that pins this names
+  one file: a whole-fixture `diag` opens three other documents before `App/TypeError.cs`, so it
+  never observes a first document at all. If a bump starts answering
+  early, `diag` is where it shows up. Do not restore the loop without re-measuring: the old one
+  could not have caught that case anyway, since two equally-wrong pulls agree.
+- **`csx` never sends `didClose`, so daemon document state outlives the client.** `_open` is
+  per-process and says nothing about what the shared daemon still has open. Any measurement of
+  first-open behaviour must use a fresh `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` or
+  `--no-daemon`; a warm daemon shows "no divergence" for the wrong reason. The same effect is
+  worth ~4 s per document: the first `diag` of a file in a fresh daemon cost 7.6 s against 3.3 s
+  warm.
+- **`cases.jsonl` order is load-bearing for the `diag` cases, invisibly.** `run.sh` scopes one
+  daemon for the whole suite, and cases 1-12 never open `App/TypeError.cs`. So
+  `deliberate-error-diag` is the first `didOpen` of that document and the only leg that observes
+  a cold document at all; by the time `deliberate-error-diag-workspace` and
+  `non-project-file-no-diagnostics` run it is already open and warm. Reordering the file, or
+  running one case against an ambient daemon, disarms that coverage with nothing going red.
+- **Never pipe or command-substitute `csx` output in bash while the daemon is in play.** The
+  daemon inherits the client's stdout, so `csx ... | tail` and `out=$(csx ...)` block forever
+  waiting for the pipe's last writer — it looks exactly like a hung cold load. Redirect to a
+  file and `cat` it, or pass `--no-daemon`. Only the run that *launches* the daemon can hang,
+  which is why `probes/run.sh` captures every case with `$(...)` and never blocks: its cold
+  `csx ready` — the one leg that starts the daemon — is deliberately uncaptured. Keep it that
+  way.
+- **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
+  it terminates the process without ever raising a console control event, so the handler never
+  runs and the 130 you see is bash's own signal status. To exercise the real path, launch `csx`
+  with `CREATE_NEW_PROCESS_GROUP` and send it `CTRL_BREAK_EVENT` with
+  `GenerateConsoleCtrlEvent` — a throwaway file-based app does it in 40 lines. Measured
+  2026-09-06: `csx: interrupted.` and exit 130 within 62 ms, with the fallback run's own server
+  tree gone.
 - **The server does not restore your projects.** `dotnet restore` before starting it.
 - **The daemon is the default, and it changes what "ready" means.** `csx` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every

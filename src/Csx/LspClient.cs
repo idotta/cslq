@@ -13,14 +13,18 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly StringBuilder _stderr;
     private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string[]> _lines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly bool _daemon;
+    private readonly CancellationToken _ct;
 
-    private static readonly TimeSpan SettleBudget = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(10);
 
     public string Root { get; }
 
-    private LspClient(string root, Process proc, JsonRpc rpc, Endpoints endpoints, StringBuilder stderr)
-        => (Root, _proc, _rpc, _endpoints, _stderr) = (root, proc, rpc, endpoints, stderr);
+    private LspClient(
+        string root, Process proc, JsonRpc rpc, Endpoints endpoints, StringBuilder stderr,
+        bool daemon, CancellationToken ct)
+        => (Root, _proc, _rpc, _endpoints, _stderr, _daemon, _ct)
+            = (root, proc, rpc, endpoints, stderr, daemon, ct);
 
     public static async Task<LspClient> StartAsync(string root, string logLevel, bool daemon, CancellationToken ct)
     {
@@ -54,20 +58,32 @@ internal sealed class LspClient : IAsyncDisposable
         rpc.AddLocalRpcTarget(endpoints);
         rpc.StartListening();
 
-        var client = new LspClient(root, proc, rpc, endpoints, stderr);
+        var client = new LspClient(root, proc, rpc, endpoints, stderr, daemon, ct);
         try
         {
             await client.InitializeAsync(ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException or CsxException)
+        {
+            // Escapes unchanged, but not uncleaned: without this the client built above is
+            // dropped with its process and RPC connection still live. A CsxException means
+            // initialize was answered and we rejected the answer — the encoding assertion —
+            // so the connection-lost wrapping below would be a lie about a live server.
+            await client.DisposeAsync();
+            throw;
+        }
+        catch (Exception ex)
         {
             // The thin client can die before it answers initialize — a daemon that never came
             // up, for one — and StreamJsonRpc then reports nothing but a lost connection. Give
             // the process a moment to finish exiting so its stderr, the only thing that says
-            // why, is flushed before we quote it.
+            // why, is flushed before we quote it. Quote it before disposing: StderrTail is the
+            // only thing that turns "connection lost" into a diagnosis.
             await Task.WhenAny(proc.WaitForExitAsync(ct), Task.Delay(1000, ct));
+            var tail = client.StderrTail();
+            await client.DisposeAsync();
             throw new CsxException(
-                $"the language server closed the connection during initialize: {ex.Message}{client.StderrTail()}");
+                $"the language server closed the connection during initialize: {ex.Message}{tail}");
         }
 
         return client;
@@ -114,7 +130,8 @@ internal sealed class LspClient : IAsyncDisposable
     /// ready before we connected. The notification is kept only as diagnostic detail on the
     /// failure path.
     /// <para>
-    /// One sentinel per project, and every one of them has to resolve. A single sentinel only
+    /// One sentinel per project, and every project that has one has to resolve it — see the
+    /// last paragraph for the ones that have none. A single sentinel only
     /// ever proved that <em>some</em> project loaded, which is the race behind every
     /// incomplete answer this client has produced: a cross-project <c>refs</c> or <c>impl</c>
     /// missing the half that had not loaded, and a <c>sym</c> search missing a whole project's
@@ -131,12 +148,19 @@ internal sealed class LspClient : IAsyncDisposable
     /// and readiness would lie again. Matching on <c>containerName</c> would be the obvious
     /// alternative and is wrong — it is localised display text.
     /// </para>
+    /// <para>
+    /// A project that contributed no candidate is not waited on — there is nothing to ask for
+    /// — but it is named on the failure path so its absence from readiness is visible rather
+    /// than silent. <c>Program.InferSentinels</c> guarantees at least one project does
+    /// contribute, so this never degrades to waiting for nothing at all.
+    /// </para>
     /// </summary>
     public async Task WaitReadyAsync(
         IReadOnlyList<Sentinel> sentinels, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
-        var pending = sentinels.ToList();
+        var pending = sentinels.Where(s => s.Candidates.Count > 0).ToList();
+        var unprobed = sentinels.Where(s => s.Candidates.Count == 0).ToList();
 
         while (true)
         {
@@ -151,30 +175,44 @@ internal sealed class LspClient : IAsyncDisposable
 
         var fired = _endpoints.ProjectInitialized.IsCompleted ? "fired" : "never fired";
         var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
-        var projects = string.Join(", ", pending.Select(s => Path.GetFileName(s.Directory.TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
+        // Projects nothing probed are named too: readiness says nothing about them either way,
+        // and leaving them out is the same quiet degradation the per-project set exists to end.
+        var skipped = unprobed.Count == 0
+            ? string.Empty
+            : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.";
         throw new CsxException(
             $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
-            $"returned no symbols for project(s) {projects} " +
-            $"(projectInitializationComplete {fired}).{StderrTail()}");
+            $"returned no symbols for project(s) {Names(pending)} " +
+            $"(projectInitializationComplete {fired}).{skipped}{StderrTail()}");
     }
 
     /// <summary>
-    /// Whether any of a project's candidate sentinels resolves to a location inside it. Several
-    /// candidates because <c>Program.InferSentinels</c>'s type-declaration match is not
-    /// syntax-aware — it matches inside a comment or a string literal, and one bad guess would
-    /// otherwise block readiness for the whole run.
+    /// Whether any of a project's candidate sentinels resolves to a location inside it, and
+    /// not inside a project nested within it. Without that second half, <c>Web/</c> and
+    /// <c>Web/Tests/</c> both declaring <c>Program</c> — the ordinary shape — lets Tests
+    /// loading mark Web ready, which is the every-project-loaded guarantee failing quietly.
+    /// Several candidates because <c>Program.InferSentinels</c>'s type-declaration match is a
+    /// regex, not a parser, and one bad guess would otherwise block readiness for the run.
     /// </summary>
     private async Task<bool> ResolvesAsync(Sentinel sentinel, CancellationToken ct)
     {
         foreach (var candidate in sentinel.Candidates)
         {
             var hits = await SymbolsAsync(candidate, ct);
-            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory))) return true;
+            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory) &&
+                              !sentinel.Nested.Any(n => Under(h.Location.Uri, n))))
+            {
+                return true;
+            }
         }
 
         return false;
     }
+
+    private static string Names(IEnumerable<Sentinel> sentinels) => string.Join(
+        ", ",
+        sentinels.Select(s => Path.GetFileName(s.Directory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
 
     private static bool Under(string uri, string directory)
     {
@@ -271,27 +309,21 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// A freshly opened document is bound against whatever the server has at that instant,
-    /// which for the first one is the misc-files state: it reports only what needs no project
-    /// references. Waiting on readiness is not enough either, since the document was opened
-    /// after it. So re-pull until two consecutive reports agree, or the budget runs out.
+    /// One pull. This used to re-pull until two consecutive reports agreed, on the premise that
+    /// a freshly opened document is bound against the misc-files state and under-reports until
+    /// its project references resolve. <b>Measured false on 2026-09-06</b> against
+    /// 5.12.0-1.26426.8: the endpoint does not answer early, it <em>blocks</em> until the
+    /// document is bound. A cross-project error opened as the first document in a never-used
+    /// daemon returns the correct CS0029 on the first pull — that pull costs ~4.2 s and the
+    /// redundant second one ~0.7 s. Across six whole-fixture runs, cold daemon and warm, the
+    /// second pull never once differed from the first, so the loop bought a mandatory 250 ms
+    /// delay plus a duplicate round trip per file and nothing else: removing it halved the
+    /// per-file cost, 570 ms to 294 ms warm. <c>cold-server-diag-reports-cross-project-error</c>
+    /// in <c>probes/run.sh</c> is the guard — it is the only leg that pulls a document the
+    /// daemon has never opened, which is the one state where answering before binding shows up.
+    /// Note the old loop could not have caught that case anyway: two equally-wrong pulls agree.
     /// </summary>
     public async Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string uri, CancellationToken ct)
-    {
-        var deadline = DateTime.UtcNow + SettleBudget;
-        var previous = await PullDiagnosticsAsync(uri, ct);
-        while (DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(250, ct);
-            var next = await PullDiagnosticsAsync(uri, ct);
-            if (Same(previous, next)) return next;
-            previous = next;
-        }
-
-        return previous;
-    }
-
-    private async Task<IReadOnlyList<Diagnostic>> PullDiagnosticsAsync(string uri, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
         var report = await _rpc.InvokeWithParameterObjectAsync<DocumentDiagnosticReport?>(
@@ -300,12 +332,6 @@ internal sealed class LspClient : IAsyncDisposable
             ct);
         return report?.Items ?? [];
     }
-
-    private static bool Same(IReadOnlyList<Diagnostic> a, IReadOnlyList<Diagnostic> b) =>
-        a.Count == b.Count && a.Zip(b).All(p =>
-            p.First.Range == p.Second.Range &&
-            p.First.Severity == p.Second.Severity &&
-            p.First.Message == p.Second.Message);
 
     /// <summary>
     /// Roslyn will not answer requests for a document it does not consider open. Generated
@@ -368,6 +394,12 @@ internal sealed class LspClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Whether this run owns its server outright. A daemon run that fell back has a private
+    /// server nothing else will ever attach to, so it is as dedicated as <c>--no-daemon</c>.
+    /// </summary>
+    private bool Dedicated => !_daemon || DaemonFallback;
+
     private static readonly string[] DaemonFallbackMarkers =
     [
         "Falling back to non-daemon mode",
@@ -383,23 +415,40 @@ internal sealed class LspClient : IAsyncDisposable
         return "\n--- server stderr ---\n" + string.Join('\n', tail[Math.Max(0, tail.Length - lines)..]);
     }
 
+    /// <summary>
+    /// Ctrl+C has to be felt at the prompt, so a cancelled teardown skips the polite shutdown
+    /// and does not wait out the exit: the two budgets together cost ~8s, and the token was
+    /// honoured everywhere except here. Only a server this run owns is then killed. The
+    /// shared daemon is a child of the thin client this run started but serves every other
+    /// client on the machine, so killing that process tree would take their workspace down
+    /// with it; it is left to its own keepalive instead.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        try
+        var cancelled = _ct.IsCancellationRequested;
+        if (!cancelled)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await _rpc.InvokeWithParameterObjectAsync<object?>("shutdown", null, cts.Token);
-            await _rpc.NotifyWithParameterObjectAsync("exit");
-        }
-        catch
-        {
-            // A server that is already gone needs no polite shutdown.
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await _rpc.InvokeWithParameterObjectAsync<object?>("shutdown", null, cts.Token);
+                await _rpc.NotifyWithParameterObjectAsync("exit");
+            }
+            catch
+            {
+                // A server that is already gone needs no polite shutdown.
+            }
         }
 
         _rpc.Dispose();
         try
         {
-            if (!_proc.WaitForExit(3000)) _proc.Kill(entireProcessTree: true);
+            if (!_proc.WaitForExit(cancelled ? 250 : 3000) && (Dedicated || !cancelled))
+            {
+                // Tree only when the server is ours. The shared daemon is a child of this
+                // thin client, so a tree kill on the timeout path would take it down too.
+                _proc.Kill(entireProcessTree: Dedicated);
+            }
         }
         catch
         {
@@ -463,7 +512,9 @@ internal sealed class LspClient : IAsyncDisposable
 }
 
 /// <summary>
-/// One project's readiness probe: the directory a resolving hit has to sit under, and the
-/// candidate type names to look for, in the order they were found.
+/// One project's readiness probe: the directory a resolving hit has to sit under, the
+/// candidate type names to look for, in the order they were found, and the directories of
+/// projects nested inside this one, which a hit must <em>not</em> sit under.
 /// </summary>
-internal sealed record Sentinel(string Directory, IReadOnlyList<string> Candidates);
+internal sealed record Sentinel(
+    string Directory, IReadOnlyList<string> Candidates, IReadOnlyList<string> Nested);
