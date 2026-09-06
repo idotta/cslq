@@ -13,6 +13,7 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly StringBuilder _stderr;
     private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string[]> _lines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string?> _projects = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _daemon;
     private readonly CancellationToken _ct;
 
@@ -187,23 +188,17 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether any of a project's candidate sentinels resolves to a location inside it, and
-    /// not inside a project nested within it. Without that second half, <c>Web/</c> and
-    /// <c>Web/Tests/</c> both declaring <c>Program</c> — the ordinary shape — lets Tests
-    /// loading mark Web ready, which is the every-project-loaded guarantee failing quietly.
-    /// Several candidates because <c>Program.InferSentinels</c>'s type-declaration match is a
-    /// regex, not a parser, and one bad guess would otherwise block readiness for the run.
+    /// Whether any of a project's candidate sentinels resolves to a hit the project accepts —
+    /// see <see cref="Sentinel.Accepts"/> for what that scoping is worth. Several candidates
+    /// because <c>Program.InferSentinels</c>'s type-declaration match is a regex, not a
+    /// parser, and one bad guess would otherwise block readiness for the run.
     /// </summary>
     private async Task<bool> ResolvesAsync(Sentinel sentinel, CancellationToken ct)
     {
         foreach (var candidate in sentinel.Candidates)
         {
             var hits = await SymbolsAsync(candidate, ct);
-            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory) &&
-                              !sentinel.Nested.Any(n => Under(h.Location.Uri, n))))
-            {
-                return true;
-            }
+            if (hits.Any(h => sentinel.Accepts(h.Location.Uri))) return true;
         }
 
         return false;
@@ -213,16 +208,6 @@ internal sealed class LspClient : IAsyncDisposable
         ", ",
         sentinels.Select(s => Path.GetFileName(s.Directory.TrimEnd(
             Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
-
-    private static bool Under(string uri, string directory)
-    {
-        if (PathUri.IsGenerated(uri)) return false;
-
-        var path = Path.GetFullPath(PathUri.ToPath(uri));
-        var dir = Path.GetFullPath(directory).TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return path.StartsWith(dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-    }
 
     public async Task<IReadOnlyList<SymbolInformation>> SymbolsAsync(string query, CancellationToken ct)
     {
@@ -378,6 +363,73 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// The <c>.csproj</c> a document belongs to, or null if the server will not say. Only a
+    /// source-generated document needs asking: a file URI already carries its own path, and
+    /// the generated URI's query names the <em>generator</em> assembly, never the project
+    /// consuming it — so one generator applied to several projects yields several distinct
+    /// documents whose labels are otherwise identical.
+    /// <para>
+    /// <c>textDocument/_vs_getProjectContexts</c> is a VS protocol extension rather than LSP,
+    /// and the server neither advertises it nor requires a matching client capability
+    /// (verified against 5.12.0-1.26426.8, 2026-09-06). <c>_vs_id</c> is
+    /// <c>&lt;projectId guid&gt;|&lt;absolute .csproj&gt; ($&lt;tfm&gt;)</c>: the guid is
+    /// regenerated per load and the path is not, so only the path is read. A multi-targeted
+    /// document has one context per TFM, all naming one <c>.csproj</c>, and
+    /// <c>_vs_defaultIndex</c> picks among them.
+    /// </para>
+    /// <para>
+    /// Failure is not fatal: an unanswerable label falls back to the generator-only form,
+    /// which is what every label looked like before this existed. Cached because a generated
+    /// document usually contributes several hits to one answer.
+    /// </para>
+    /// </summary>
+    public async Task<string?> ProjectOfAsync(string uri, CancellationToken ct)
+    {
+        if (_projects.TryGetValue(uri, out var cached)) return cached;
+
+        string? project = null;
+        try
+        {
+            var list = await _rpc.InvokeWithParameterObjectAsync<ProjectContextList?>(
+                "textDocument/_vs_getProjectContexts",
+                new ProjectContextParams(new TextDocumentIdentifier(uri)),
+                ct);
+
+            var contexts = list?.Contexts ?? [];
+            var index = list is not null && list.DefaultIndex >= 0 && list.DefaultIndex < contexts.Length
+                ? list.DefaultIndex
+                : 0;
+            if (contexts.Length > 0) project = ProjectFile(contexts[index].Id);
+        }
+        catch (RemoteRpcException)
+        {
+            // RemoteRpcException, not RemoteInvocationException: a server that drops the
+            // extension answers RemoteMethodNotFoundException, which is a sibling of the
+            // latter, not a subclass -- catching the narrower type would turn a coarser label
+            // into a crash. The generator-only label is a correct if coarser answer.
+        }
+
+        _projects[uri] = project;
+        return project;
+    }
+
+    /// <summary>
+    /// The path half of a <c>_vs_id</c>, with the <c>($tfm)</c> suffix the id carries for a
+    /// multi-targeted project removed. Anything else shaped unexpectedly yields null rather
+    /// than a guess: a wrong project in the label is worse than no project.
+    /// </summary>
+    private static string? ProjectFile(string id)
+    {
+        var bar = id.IndexOf('|');
+        if (bar < 0) return null;
+
+        var path = id[(bar + 1)..].Trim();
+        var tfm = path.LastIndexOf(" ($", StringComparison.Ordinal);
+        if (tfm > 0 && path.EndsWith(')')) path = path[..tfm];
+        return path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ? path : null;
+    }
+
+    /// <summary>
     /// Whether the thin client gave up on the daemon and started its own server. It does that
     /// silently — a fallback run answers correctly, just cold, and these two lines on stderr
     /// are the only difference — so an agent would otherwise blame the latency on us. Read
@@ -517,4 +569,26 @@ internal sealed class LspClient : IAsyncDisposable
 /// projects nested inside this one, which a hit must <em>not</em> sit under.
 /// </summary>
 internal sealed record Sentinel(
-    string Directory, IReadOnlyList<string> Candidates, IReadOnlyList<string> Nested);
+    string Directory, IReadOnlyList<string> Candidates, IReadOnlyList<string> Nested)
+{
+    /// <summary>
+    /// Whether a sentinel hit proves <em>this</em> project loaded. Inside the directory and
+    /// not inside a project nested within it: without that second half, <c>Web/</c> and
+    /// <c>Web/Tests/</c> both declaring <c>Program</c> — the ordinary shape — lets Tests
+    /// loading mark Web ready, which is the every-project-loaded guarantee failing quietly.
+    /// A generated document is never accepted: it has no on-disk path to scope, and
+    /// <c>ToPath</c> would answer a path-shaped lie for it.
+    /// </summary>
+    public bool Accepts(string uri) =>
+        Under(uri, Directory) && !Nested.Any(n => Under(uri, n));
+
+    private static bool Under(string uri, string directory)
+    {
+        if (PathUri.IsGenerated(uri)) return false;
+
+        var path = Path.GetFullPath(PathUri.ToPath(uri));
+        var dir = Path.GetFullPath(directory).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return path.StartsWith(dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+}

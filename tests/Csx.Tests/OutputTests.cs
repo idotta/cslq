@@ -17,14 +17,20 @@ public class OutputTests
             PathUri.FromPath(Path.Combine(Root, file.Replace('/', Path.DirectorySeparatorChar))),
             new Range(new Position(line - 1, 0), new Position(line - 1, 4))), container);
 
-    private static string Capture(Action action)
+    /// <summary>
+    /// No project lookup: these cases render file URIs, which carry their own path. The
+    /// generated-document label is <see cref="PathUriTests"/>'s, where no capture is needed.
+    /// </summary>
+    private static readonly Func<string, Task<string?>> NoProject = _ => Task.FromResult<string?>(null);
+
+    private static async Task<string> CaptureAsync(Func<Task> action)
     {
         var original = Console.Out;
         var buffer = new StringWriter();
         Console.SetOut(buffer);
         try
         {
-            action();
+            await action();
         }
         finally
         {
@@ -40,7 +46,7 @@ public class OutputTests
     /// first would have dropped Zed, the exact match.
     /// </summary>
     [Fact]
-    public void Truncation_happens_in_relevance_order_and_display_in_alphabetical_order()
+    public async Task Truncation_happens_in_relevance_order_and_display_in_alphabetical_order()
     {
         var symbols = new[]
         {
@@ -49,7 +55,7 @@ public class OutputTests
             Symbol("AbcZed", "Core/AbcZed.cs"),
         };
 
-        var lines = Capture(() => Output.WriteSymbols(Root, symbols, max: 2, json: false))
+        var lines = (await CaptureAsync(() => Output.WriteSymbolsAsync(Root, symbols, max: 2, json: false, NoProject)))
             .Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
         Assert.Contains("Zed ", lines[0], StringComparison.Ordinal);
@@ -59,30 +65,33 @@ public class OutputTests
     }
 
     [Fact]
-    public void Truncation_says_how_many_were_dropped_and_how_to_see_them()
+    public async Task Truncation_says_how_many_were_dropped_and_how_to_see_them()
     {
         var symbols = new[] { Symbol("A", "Core/A.cs"), Symbol("B", "Core/B.cs"), Symbol("C", "Core/C.cs") };
 
-        var text = Capture(() => Output.WriteSymbols(Root, symbols, max: 1, json: false));
+        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, symbols, max: 1, json: false, NoProject));
 
         Assert.Contains("... 2 more (use --max 3 to see all)", text, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void An_empty_answer_says_so_rather_than_printing_nothing()
+    public async Task An_empty_answer_says_so_rather_than_printing_nothing()
     {
-        Assert.Equal("no results", Capture(() => Output.WriteSymbols(Root, [], 50, json: false)).Trim());
+        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, [], 50, json: false, NoProject));
+
+        Assert.Equal("no results", text.Trim());
     }
 
     /// <summary>
     /// Positions are one-based on the way out and zero-based on the wire, in both renderings.
     /// </summary>
     [Fact]
-    public void Json_reports_one_based_positions_and_whether_it_truncated()
+    public async Task Json_reports_one_based_positions_and_whether_it_truncated()
     {
         var symbols = new[] { Symbol("A", "Core/A.cs", line: 9), Symbol("B", "Core/B.cs") };
 
-        var json = JsonDocument.Parse(Capture(() => Output.WriteSymbols(Root, symbols, max: 1, json: true))).RootElement;
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteSymbolsAsync(Root, symbols, max: 1, json: true, NoProject))).RootElement;
 
         Assert.Equal(2, json.GetProperty("count").GetInt32());
         Assert.True(json.GetProperty("truncated").GetBoolean());

@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Alpha/Alpha.csproj" />
+  <Project Path="Beta/Beta.csproj" />
+  <Project Path="Gen2/Gen2.csproj" />
+</Solution>
