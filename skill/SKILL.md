@@ -112,7 +112,8 @@ as "this implements something".
 ```
 
 Do not reach for `--sentinel` to speed a run up. By default `csx` waits for every project
-under the root to load, one probe per `.csproj`; `--sentinel` replaces that with a single
+under the root to load, one probe per project the root's solution lists — or per `.csproj` when
+the root holds no solution, or more than one. `--sentinel` replaces that with a single
 root-scoped probe and drops the guarantee, so `refs`, `impl` and `sym` can come back missing a
 project's hits at exit 0. It is for a workspace whose layout the scan cannot read.
 
@@ -125,8 +126,13 @@ prints `csx: daemon unreachable`, the answer is still correct — it was just sl
 1. **A root with only a `.csproj` and no solution never loads.** `csx` waits out its whole
    timeout and every query returns nothing. Add a `.sln`/`.slnx`, or point `--root` at a
    directory that has one. This is the most common cause by far.
-2. **Run `dotnet restore` first.** The language server does not restore for you, and anything
+2. **A solution at the root is also what scopes readiness.** `csx` waits for every project the
+   root's `.sln`/`.slnx` lists, and falls back to scanning for `.csproj` when the root does not
+   hold exactly one — none, or several. On a repository carrying template or sample projects the
+   solution excludes, that scan waits for projects the server never loaded, so add the
+   solution or point `--root` below them.
+3. **Run `dotnet restore` first.** The language server does not restore for you, and anything
    needing resolved references comes back empty rather than erroring.
-3. **A source generator has to be built** before its output exists. If a generated symbol is
+4. **A source generator has to be built** before its output exists. If a generated symbol is
    missing, build the analyzer project.
-4. **Check the symbol with `csx def`** before concluding anything about `refs`.
+5. **Check the symbol with `csx def`** before concluding anything about `refs`.

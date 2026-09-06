@@ -11,11 +11,13 @@ the user-facing detail and the evidence behind the dependency choices.
 
 ```
 dotnet build src/Csx/Csx.csproj          # build
-./probes/run.sh                          # the gate: restore, build, ready, run every case
+dotnet test --project tests/Csx.Tests    # the unit tests alone, ~1s (never with --nologo)
+./probes/run.sh                          # the gate: unit tests, restore, build, ready, every case
 ./src/Csx/bin/Debug/net10.0/csx refs Greet --root fixture
 ```
 
-`probes/run.sh` is the only real test suite. Run it before claiming anything works.
+`probes/run.sh` is the gate, and it runs `tests/Csx.Tests` first. Run it before claiming
+anything works: the unit tests alone prove nothing about the server's behaviour.
 
 ## Things that will cost you a session if you rediscover them
 
@@ -126,6 +128,26 @@ dotnet build src/Csx/Csx.csproj          # build
   `GenerateConsoleCtrlEvent` — a throwaway file-based app does it in 40 lines. Measured
   2026-09-06: `csx: interrupted.` and exit 130 within 62 ms, with the fallback run's own server
   tree gone.
+- **`dotnet test --nologo` runs zero tests and exits 5.** `global.json` opts into the MTP mode
+  of `dotnet test` (`"test": {"runner": "Microsoft.Testing.Platform"}`), where `--nologo` is no
+  longer a build-only flag. It fails loudly, but it reads as a broken test project rather than
+  a bad flag, and every other `dotnet` call in `run.sh` passes `--nologo`, so it is the obvious
+  thing to add. Do not.
+- **Project discovery reads the root's solution, and only the root's.** `ProjectDirectories`
+  takes the project list from a single `.sln`/`.slnx` sitting at the top of `--root`, and falls
+  back to the recursive `.csproj` scan when there are none or more than one. A solution one
+  directory down does not count — which is what keeps `fixture/Fixture.slnx` from narrowing a
+  root above it, and what makes `--root fixture` and `--root .` two different workspaces rather
+  than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
+  still a documented limit. This is the fix for the OrchardCore template failure above; scoping
+  `--root` below the templates was only the workaround.
+  Parse failures go through `CsxException`: `Main` catches that and nothing else, so a
+  hand-edited `.slnx` that no longer parses would otherwise exit 127 with a stack trace.
+- **`csx` can now be pointed at its own repo, and `Csx.slnx` is why.** The root solution lists
+  `src/Csx` and `tests/Csx.Tests` and deliberately excludes `fixture/`, whose `App` does not
+  compile on purpose. Put a fixture project in it and `dotnet build` at the root fails by
+  design; leave it out and `csx ready --root .` resolves in ~6 s — the `self-hosted-*` cases.
+  `fixture/` keeps its own `Fixture.slnx`, which `run.sh` restores separately.
 - **The server does not restore your projects.** `dotnet restore` before starting it.
 - **The daemon is the default, and it changes what "ready" means.** `csx` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every
@@ -145,7 +167,7 @@ dotnet build src/Csx/Csx.csproj          # build
     re-asks for up to 10 s. Worse, `refs`, `impl` and `sym` answered *incompletely* — a
     cross-project hit or a whole project's hits simply missing, at exit 0, which no guard
     caught because every one of them watches for an **empty** answer. `WaitReadyAsync` now
-    takes one sentinel per `.csproj` and requires each to resolve to a location under its own
+    takes one sentinel per discovered project and requires each to resolve to a location under its own
     project directory. **Do not match a hit to a project by `containerName`** — it is
     localised display text. It cost a red CI run and two red gate runs that each failed a
     *different* pair of cases, so treat a lone flake of this shape as this, not as noise.
@@ -203,6 +225,13 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
 
 ## Conventions
 
+- **`probes/run.sh` is still the gate, but it is no longer the only suite.**
+  `tests/Csx.Tests` (xunit v3 over MTP) covers the pure logic below the transport -- sentinel
+  inference, `Options.Parse`, `PathUri`, `Output.WriteSymbols` -- and `run.sh` runs it first,
+  before the fixture restore, because it costs under a second. Anything that needs a live
+  server stays in `probes/`; put nothing there that a temp directory and a string could prove.
+  The tested members are `internal`, reached through `<InternalsVisibleTo Include="Csx.Tests" />`
+  in `Csx.csproj`.
 - `probes/run.sh` parses `cases.jsonl` with `sed` alone. **No `jq`** — it does not exist in Git
   Bash on the dev machine. (`python` does, 3.14.6, despite what this file used to claim; the
   `sed`-only rule still stands for the GitHub runner.) Keep `cases.jsonl` to four flat string fields.

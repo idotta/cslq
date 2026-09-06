@@ -9,23 +9,25 @@ change land against it: `sym` now applies `--max` in the server's relevance orde
 only what survives, so a capped broad query keeps the best matches. The rest of the item is
 still a placeholder that names nothing concrete.
 
-55 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+57 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
-that every project did — is closed: `WaitReadyAsync` now takes one sentinel per `.csproj` and
+that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
 requires each to resolve to a location under its own project directory, so an incomplete answer
 at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard and
 `QuerySymbolsAsync`'s retry remain, but neither is load-bearing for it; both watch for an
 *empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
 in one directory, which no path scoping can separate — documented, not scheduled.
 
-Known gap in the gate: `Sentinel.Nested` — the half that keeps a nested project's hit from
-marking its parent ready — is exercised by nothing. All three fixture projects are siblings, so
-every `Nested` list is empty in every case the suite runs, and the `Web/` + `Web/Tests/` shape
-that motivates it is verified by argument only. Pinning it needs a fourth fixture project nested
-under `App/` declaring a duplicate `Program`, at the cost of a project load on all 55 cases and
-of re-baselining every whole-fixture expectation. Not taken; recorded here so nobody assumes
-otherwise.
+Known gap in the gate, now half closed: `Sentinel.Nested` has an inference half and a scoping
+half, and only the first is pinned. `SentinelInferenceTests` builds the `Web/` + `Web/Tests/`
+shape in a temp tree and asserts that Web takes no candidate from Tests and carries Tests in
+its `Nested` list. What is still exercised by nothing is the other half — that `LspClient`
+actually discards a hit under a nested project when deciding the parent is ready. All three
+fixture projects are siblings, so every `Nested` list is empty in every case the suite runs.
+Pinning that needs a fourth fixture project nested under `App/` declaring a duplicate
+`Program`, at the cost of a project load on all 57 cases and of re-baselining every
+whole-fixture expectation. Not taken; recorded here so nobody assumes otherwise.
 
 ## Status
 
@@ -314,6 +316,12 @@ agent to run `csx ready` once at session start.
 - [x] `csx sym` searches the workspace by name, including a source-generated declaration
 - [x] Readiness means every project loaded, not just one, so no command can answer with a
       cross-project hit missing at exit 0
+- [x] The pure logic below the transport is unit-tested, and `probes/run.sh` runs those tests
+      before it starts a server
+- [x] Readiness waits for the projects the root's solution lists, so a repository carrying
+      `.csproj` files the solution excludes does not time out
+- [x] `csx` answers about its own repository: `csx ready --root .` and a `refs` that crosses
+      from `src/Csx` into `tests/`
 
 ## Verified facts, and when
 
@@ -382,6 +390,19 @@ against 5.12.0-1.26426.8 / win-x64.
   are `dotnet new` template content excluded from the solution -- Roslyn never loads them, so
   the `.csproj` scan's over-inclusion is fatal there, not merely wasteful. Scoped below the
   templates, `csx ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
+  Verified 2026-09-06 against 5.12.0-1.26426.8. **Superseded as the workaround:**
+  `ProjectDirectories` now reads the root's solution when there is exactly one, and
+  `OrchardCore.slnx` excludes precisely those template projects, so `--root` no longer has to
+  be pointed below them.
+- **Project discovery reads the root's solution; the `.csproj` scan is now the fallback.**
+  Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list; none or more than
+  one falls back to the recursive scan. A solution one directory down does not count, which is
+  what keeps `fixture/Fixture.slnx` from narrowing a root above it. `.slnf` is not read, a listed
+  project that is not on disk is dropped, and a root whose solution lists no C# project is named
+  in the error rather than reported as "no .csproj under <root>". This also made the repository
+  self-hosting: `Csx.slnx` lists `src/Csx` and `tests/Csx.Tests` and excludes `fixture/`, so
+  `csx ready --root .` resolves in ~6 s where it previously waited out the whole timeout on the
+  three fixture projects Roslyn had not loaded. Cases `self-hosted-ready` and `self-hosted-refs`.
   Verified 2026-09-06 against 5.12.0-1.26426.8.
 - **`workspace/symbol` ranks its answer by relevance, globally.** Measured on a scratch copy of
   `fixture` carrying `Core/AbcZed.cs`, `Core/ZedHelper.cs` and `App/Zed.cs`, chosen so that
