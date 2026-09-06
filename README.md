@@ -120,7 +120,8 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 Paths are relative to `--root`; lines and columns are one-based.
 
 `--sentinel` is an escape hatch, not a neutral override. By default `csx` waits for *every*
-project under the root to load, one readiness probe per `.csproj`; passing `--sentinel` replaces
+project under the root to load, one readiness probe per project the root's solution lists (or per
+`.csproj` when there is no solution); passing `--sentinel` replaces
 that whole set with a single probe scoped to the root, which gives up the guarantee and restores
 the window in which `refs`, `impl` and `sym` can answer incompletely at exit 0. Use it when the
 `.csproj` scan cannot read the workspace layout — including a root with no `.csproj`, which
@@ -270,11 +271,17 @@ weekly bump.
 ./probes/run.sh
 ```
 
-Restores the tool and the fixture, builds `csx`, asserts readiness, then runs every case in
-`probes/cases.jsonl`. Exits non-zero on any mismatch. Fifty-four cases today — forty-nine
-rows, three source-generator staleness legs, the forced non-daemon fallback and a cold-server
-`diag` — including a negative one that pins a query fired before load to a loud failure rather
-than an empty result.
+Runs `tests/Csx.Tests` first, then restores the tool and the fixture, builds `csx`, asserts
+readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
+Fifty-seven cases today — fifty-two rows, three source-generator staleness legs, the forced
+non-daemon fallback and a cold-server `diag` — including a negative one that pins a query
+fired before load to a loud failure rather than an empty result.
+
+The unit tests come first because they cost under a second and need no server: they cover the
+pure logic below the transport — sentinel inference, argument parsing, path and URI rendering,
+and the `sym` cap ordering — including the shapes `fixture/` cannot hold, such as prose in a
+doc comment above the only declaration in a single-file project. Anything that needs a live
+server belongs in a case, not a test.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it

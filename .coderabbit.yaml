@@ -39,6 +39,17 @@ reviews:
         Test fixture code, not production. Its oddities (unused symbols, non-ASCII identifiers
         and strings, a source generator) exist to be queried by the probes. Do not suggest
         cleanups, error handling, or style changes here.
+    - path: "tests/**"
+      instructions: >-
+        xunit v3 unit tests for the pure logic below the LSP transport only -- sentinel
+        inference, argument parsing, path and URI rendering, output ordering. Anything needing a
+        live language server belongs in probes/cases.jsonl, not here; do not suggest moving
+        coverage the other way. Long prose doc comments on test methods are deliberate: each one
+        records the measured failure the test pins, and several tests exist only because the
+        fixture cannot hold their shape. Tests build throwaway directory trees under the temp
+        directory because discovery is a filesystem scan; do not suggest mocking the filesystem.
+        Assertions are deliberately exact (whole argument lists, whole candidate lists) so that a
+        change has to be deliberate enough to update the expectation.
     - path: "probes/**"
       instructions: >-
         run.sh must stay POSIX sh parsed with sed only — no jq, no python. cases.jsonl is four

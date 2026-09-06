@@ -112,7 +112,8 @@ as "this implements something".
 ```
 
 Do not reach for `--sentinel` to speed a run up. By default `csx` waits for every project
-under the root to load, one probe per `.csproj`; `--sentinel` replaces that with a single
+under the root to load, one probe per project the root's solution lists — or per `.csproj` when
+there is no solution; `--sentinel` replaces that with a single
 root-scoped probe and drops the guarantee, so `refs`, `impl` and `sym` can come back missing a
 project's hits at exit 0. It is for a workspace whose layout the scan cannot read.
 

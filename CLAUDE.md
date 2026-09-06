@@ -165,7 +165,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     re-asks for up to 10 s. Worse, `refs`, `impl` and `sym` answered *incompletely* — a
     cross-project hit or a whole project's hits simply missing, at exit 0, which no guard
     caught because every one of them watches for an **empty** answer. `WaitReadyAsync` now
-    takes one sentinel per `.csproj` and requires each to resolve to a location under its own
+    takes one sentinel per discovered project and requires each to resolve to a location under its own
     project directory. **Do not match a hit to a project by `containerName`** — it is
     localised display text. It cost a red CI run and two red gate runs that each failed a
     *different* pair of cases, so treat a lone flake of this shape as this, not as noise.

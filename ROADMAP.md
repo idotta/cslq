@@ -9,23 +9,25 @@ change land against it: `sym` now applies `--max` in the server's relevance orde
 only what survives, so a capped broad query keeps the best matches. The rest of the item is
 still a placeholder that names nothing concrete.
 
-55 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+57 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
-that every project did — is closed: `WaitReadyAsync` now takes one sentinel per `.csproj` and
+that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
 requires each to resolve to a location under its own project directory, so an incomplete answer
 at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard and
 `QuerySymbolsAsync`'s retry remain, but neither is load-bearing for it; both watch for an
 *empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
 in one directory, which no path scoping can separate — documented, not scheduled.
 
-Known gap in the gate: `Sentinel.Nested` — the half that keeps a nested project's hit from
-marking its parent ready — is exercised by nothing. All three fixture projects are siblings, so
-every `Nested` list is empty in every case the suite runs, and the `Web/` + `Web/Tests/` shape
-that motivates it is verified by argument only. Pinning it needs a fourth fixture project nested
-under `App/` declaring a duplicate `Program`, at the cost of a project load on all 55 cases and
-of re-baselining every whole-fixture expectation. Not taken; recorded here so nobody assumes
-otherwise.
+Known gap in the gate, now half closed: `Sentinel.Nested` has an inference half and a scoping
+half, and only the first is pinned. `SentinelInferenceTests` builds the `Web/` + `Web/Tests/`
+shape in a temp tree and asserts that Web takes no candidate from Tests and carries Tests in
+its `Nested` list. What is still exercised by nothing is the other half — that `LspClient`
+actually discards a hit under a nested project when deciding the parent is ready. All three
+fixture projects are siblings, so every `Nested` list is empty in every case the suite runs.
+Pinning that needs a fourth fixture project nested under `App/` declaring a duplicate
+`Program`, at the cost of a project load on all 57 cases and of re-baselining every
+whole-fixture expectation. Not taken; recorded here so nobody assumes otherwise.
 
 ## Status
 
@@ -314,6 +316,12 @@ agent to run `csx ready` once at session start.
 - [x] `csx sym` searches the workspace by name, including a source-generated declaration
 - [x] Readiness means every project loaded, not just one, so no command can answer with a
       cross-project hit missing at exit 0
+- [x] The pure logic below the transport is unit-tested, and `probes/run.sh` runs those tests
+      before it starts a server
+- [x] Readiness waits for the projects the root's solution lists, so a repository carrying
+      `.csproj` files the solution excludes does not time out
+- [x] `csx` answers about its own repository: `csx ready --root .` and a `refs` that crosses
+      from `src/Csx` into `tests/`
 
 ## Verified facts, and when
 
