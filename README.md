@@ -156,7 +156,7 @@ Measured on the fixture, Windows 11 / .NET 10.0.301, debug build:
 | `csx def` | ~6.4–7.0 s |
 | `csx outline` | ~5.4–6.2 s |
 | `csx diag <file>` | ~11–12 s |
-| `csx diag` (whole fixture, 6 files) | ~16 s |
+| `csx diag` (whole fixture, 7 files) | ~16 s |
 
 The same suite on `ubuntu-latest` reaches ready in ~12 s and runs six cases in ~39 s.
 
@@ -256,7 +256,7 @@ weekly bump.
 | Async project load returning empty instead of erroring | `WaitReadyAsync` polls one sentinel symbol per project until every one resolves, then fails loudly on timeout. Never `sleep`, and never block on `workspace/projectInitializationComplete` — it never fires for a client attaching to a loaded daemon. |
 | A sentinel that is itself the thing being queried | Sentinels are inferred from type declarations in each project, so "symbol absent" and "workspace not loaded" stay distinguishable. No grace poll on the target: readiness covering every project is what makes an empty answer mean absent. |
 | UTF-16 position encoding | The server does not advertise `positionEncoding`, which per LSP 3.17 means utf-16 — the same unit as a .NET string index. `csx` asserts this at `initialize` and refuses to run if a future build negotiates utf-8. A fixture line carrying an astral-plane character (a surrogate pair, so utf-16 and rune counts differ) pins the reported column at 39 in three cases; an accented letter would pass even on a broken implementation. |
-| A first diagnostic pull answered from the misc-files state | A freshly opened document is bound against whatever the server has at that instant, and for the first one that is the misc-files state, which reports only errors needing no project references. `DiagnosticsAsync` re-pulls until two consecutive reports agree (5 s budget). The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — so a first-response-only implementation reports nothing and the case fails. |
+| A first diagnostic pull answered from the misc-files state | A freshly opened document that *belongs to a project* is bound against whatever the server has at that instant, and for the first one that is the misc-files state, which reports only errors needing no project references. (A document in **no** project is a different case: it reports nothing at all, whatever the error class. See `DESIGN.md`.) `DiagnosticsAsync` re-pulls until two consecutive reports agree (5 s budget). The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — so a first-response-only implementation reports nothing and the case fails. |
 | Roslyn ignoring unopened documents | Every query opens its document via `textDocument/didOpen` first — except source-generated ones, which the server owns and answers for without it. |
 | No auto-restore | `probes/run.sh` runs `dotnet restore` on the fixture before starting the server. |
 | Source-generated symbols rendering as a nonexistent path | Generated documents come back under a `roslyn-source-generated:` URI. `new Uri(u).LocalPath` does not throw for one, it returns `/BuildInfo.g.cs`, so `PathUri.Display` branches on the scheme and labels them `<generated>/<assembly>/<hintName>`. Text comes from `workspace/textDocumentContent`. |
@@ -271,8 +271,8 @@ weekly bump.
 ```
 
 Restores the tool and the fixture, builds `csx`, asserts readiness, then runs every case in
-`probes/cases.jsonl`. Exits non-zero on any mismatch. Forty-four cases today — forty rows,
-three source-generator staleness legs and the forced non-daemon fallback — including a
+`probes/cases.jsonl`. Exits non-zero on any mismatch. Fifty-three cases today — forty-nine
+rows, three source-generator staleness legs and the forced non-daemon fallback — including a
 negative one that pins a query fired before load to a loud failure rather than an empty result.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
