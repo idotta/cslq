@@ -488,6 +488,17 @@ internal static partial class Program
     /// loading mark A ready. That is the every-project-loaded guarantee failing quietly, which
     /// is the whole bug this readiness model exists to close. A project left with no candidate
     /// of its own is reported as unprobed rather than assumed loaded.
+    /// <para>
+    /// <c>Matches</c>, not <c>Match</c>: every declaration in a file, not just its first.
+    /// The regex matches English prose in doc comments — "identifying the class and assembly
+    /// context" yields the candidate <c>and</c> — and taking one match per file let a single
+    /// such sentence mask every real type below it. A project with one source file then had
+    /// exactly one candidate, a word no <c>workspace/symbol</c> query can resolve, and
+    /// readiness burned its whole timeout. Measured 2026-09-06: <c>csx ready</c> on
+    /// OrchardCore v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists
+    /// were <c>'and' / 'and' / 'and'</c>. Three candidates does not cover it — they were drawn
+    /// one per file, so a project with fewer than three files could be entirely prose.
+    /// </para>
     /// </summary>
     private static IReadOnlyList<string> Candidates(string directory, IReadOnlyList<string> projects)
     {
@@ -495,8 +506,7 @@ internal static partial class Program
 
         return SourceFiles(directory)
             .Where(f => !nested.Any(n => IsUnder(f, n)))
-            .Select(f => TypeDeclaration().Match(File.ReadAllText(f)))
-            .Where(m => m.Success)
+            .SelectMany(f => TypeDeclaration().Matches(File.ReadAllText(f)))
             .Select(m => m.Groups["name"].Value)
             .Distinct(StringComparer.Ordinal)
             .Take(3)
