@@ -27,6 +27,16 @@ log() { printf '\n==> %s\n' "$*"; }
 log "dotnet tool restore"
 dotnet tool restore || exit 1
 
+# The unit tests first: they cover the pure logic below the transport -- sentinel
+# inference, argument parsing, path and URI rendering -- and cost under a second, so a
+# regression there fails here rather than after the cold load below.
+#
+# No --nologo. In the MTP mode of `dotnet test` that global.json opts into, it makes the
+# run discover zero tests and exit 5 -- loudly, but for a reason that reads as a broken
+# test project rather than a bad flag.
+log "dotnet test"
+dotnet test --project tests/Csx.Tests/Csx.Tests.csproj || exit 1
+
 # The language server does not restore your projects. Skip this and anything needing
 # resolved references comes back empty rather than erroring -- a silent false pass.
 log "dotnet restore (fixture)"

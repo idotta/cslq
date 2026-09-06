@@ -15,4 +15,11 @@
     <PackageReference Include="StreamJsonRpc" Version="2.25.29" />
   </ItemGroup>
 
+  <!-- The pure logic below the LSP transport - sentinel inference, argument parsing, path
+       and URI rendering - is unit-tested. Everything that needs a live server stays in
+       probes/. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Csx.Tests" />
+  </ItemGroup>
+
 </Project>

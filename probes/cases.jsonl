@@ -48,3 +48,5 @@
 {"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}
 {"name":"no-project-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"csx: no .csproj under"}
 {"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"csx: unknown command|usage:"}
+{"name":"self-hosted-ready","args":"ready --root . --timeout 120","exit":"0","expect":"ready"}
+{"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Csx/Program.cs:|tests/Csx.Tests/"}

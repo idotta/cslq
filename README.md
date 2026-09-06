@@ -284,6 +284,7 @@ Inside `expect`, `'` stands for `"` and `|` separates substrings that must all a
 ## Layout
 
 ```
+Csx.slnx                    src/Csx + tests/Csx.Tests; fixture/ is deliberately not in it
 .config/dotnet-tools.json   the version pin
 .github/workflows/          bump.yml (weekly cron), probe.yml (every PR)
 src/Csx/                    the thin LSP client and CLI
@@ -300,5 +301,6 @@ fixture/                    deliberately tricky solution
   Core/Split*.cs            one type in two documents, plus an overload in one of them
   Core/Empty.cs             a compilable document that declares nothing
   Core/Shape.cs             an interface whose implementers straddle two projects, for `impl`
-probes/                     cases.jsonl + run.sh
+tests/Csx.Tests/            unit tests for the pure logic below the transport
+probes/                     cases.jsonl + run.sh (runs tests/Csx.Tests first)
 ```

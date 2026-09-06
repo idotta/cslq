@@ -85,17 +85,27 @@ failure path instead, so its absence from readiness is visible rather than silen
 be attributed to one of them by path — no scan-based scoping can separate them, so the second
 project is covered only incidentally.
 
-Knowing the projects means scanning for `*.csproj` under the root, because **the server cannot
-be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
-project list. The scan is an approximation and it errs deliberately towards over-inclusion — the
-opposite mistake is the incomplete-answer bug this exists to close. **Over-inclusion is not
-merely wasteful, it is fatal:** a `.csproj` the solution excludes is never loaded, so its types
-are never indexed, its sentinel can never resolve, and readiness burns the whole timeout and
-exits 1. Measured 2026-09-06: `csx ready` on OrchardCore v3.0.1 fails on
+Knowing the projects means reading the root's solution, and scanning for `*.csproj` under the
+root only when there is none, because **the server cannot be asked**:
+`workspace/_roslyn_restorableProjects` is a server-to-client request and carries no project
+list. Either way it is an approximation, and the two err in opposite directions.
+
+The solution is read because **over-inclusion is not merely wasteful, it is fatal:** a `.csproj`
+the solution excludes is never loaded, so its types are never indexed, its sentinel can never
+resolve, and readiness burns the whole timeout and exits 1. Measured 2026-09-06, before the
+solution was read: `csx ready` on OrchardCore v3.0.1 failed on
 `src/Templates/OrchardCore.ProjectTemplates/content/*`, which are `dotnet new` template content
-rather than solution projects. A root containing template or sample `.csproj` files needs
-`--root` pointed below them, or `--sentinel`. A root with no `.csproj` at all fails immediately
-instead of timing out; `--sentinel` bypasses the scan entirely.
+rather than solution projects, and the only way past it was to point `--root` below them.
+
+Exactly one solution counts, and only at the top of the root. Two give no basis for choosing
+between them; a solution in a subdirectory describes that subtree rather than this root, and
+Roslyn would not open it for this root either. Both fall back to the scan, which errs
+deliberately towards over-inclusion — the opposite mistake is the incomplete-answer bug this
+exists to close. A `.slnf` solution filter is not read. A project the solution lists but that is
+not on disk is dropped: waiting on one is the same unresolvable sentinel by another route. A
+root with no project at all fails immediately instead of timing out, naming the solution when
+there is one, because "no .csproj under <root>" would be a lie about a root whose solution
+simply lists no C# project. `--sentinel` bypasses all of it.
 
 `--sentinel` is therefore the weak mode, not a neutral override: it replaces the whole
 per-project set with a single root-scoped probe, giving up the all-projects-loaded guarantee.

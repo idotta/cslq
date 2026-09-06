@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace Csx;
 
@@ -482,13 +483,18 @@ internal static partial class Program
     /// the escape hatch for a layout the scan cannot read.
     /// </para>
     /// </summary>
-    private static IReadOnlyList<Sentinel> InferSentinels(string root)
+    internal static IReadOnlyList<Sentinel> InferSentinels(string root)
     {
         var projects = ProjectDirectories(root);
         if (projects.Count == 0)
         {
-            throw new CsxException(
-                $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
+            // Naming the solution when there is one: "no .csproj under <root>" would be a
+            // lie about a root whose solution simply lists no C# project, and would send the
+            // reader looking for files that are sitting right there.
+            throw new CsxException(SolutionFile(root) is { } solution
+                ? $"{Path.GetFileName(solution)} lists no C# project; point --root at a "
+                    + "workspace or pass --sentinel"
+                : $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
         }
 
         var sentinels = projects
@@ -541,21 +547,88 @@ internal static partial class Program
         StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Every project directory under the root, by <c>.csproj</c> scan. An approximation of what
-    /// Roslyn actually loaded — the server exposes no project list to ask instead
-    /// (<c>workspace/_roslyn_restorableProjects</c> is a server-to-client request carrying
-    /// none) — so a <c>.csproj</c> excluded from a solution would be waited on needlessly. It
-    /// errs that way on purpose: the alternative, missing a project, is the bug this exists to
-    /// close.
+    /// Every project directory under the root: the solution's list when the root holds exactly
+    /// one solution, and a <c>.csproj</c> scan otherwise. Either way it is an approximation of
+    /// what Roslyn actually loaded, because <b>the server cannot be asked</b> —
+    /// <c>workspace/_roslyn_restorableProjects</c> is a server-to-client request and carries no
+    /// project list.
+    /// <para>
+    /// The solution is read rather than ignored because <b>over-inclusion is fatal, not merely
+    /// wasteful</b>: a <c>.csproj</c> the solution excludes is never loaded, so its types are
+    /// never indexed, its sentinel can never resolve, and readiness burns the whole timeout and
+    /// exits 1. Measured 2026-09-06, before this read the solution: <c>csx ready</c> on
+    /// OrchardCore v3.0.1 failed on <c>src/Templates/OrchardCore.ProjectTemplates/content/*</c>,
+    /// which is <c>dotnet new</c> template content the solution excludes, and the only way past
+    /// it was to point <c>--root</c> below the templates.
+    /// </para>
+    /// <para>
+    /// Exactly one solution, and only at the top of the root: two of them give no basis for
+    /// choosing, and the scan — over-inclusive but never short — is the safer answer to a
+    /// question this cannot answer. A project the solution lists but that is not on disk is
+    /// dropped, since waiting on one would be the same unresolvable sentinel by another route.
+    /// A <c>.slnf</c> solution filter is not read; it falls through to the scan.
+    /// </para>
     /// </summary>
-    private static IReadOnlyList<string> ProjectDirectories(string root) => Directory
-        .EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
-        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
-                    !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+    private static IReadOnlyList<string> ProjectDirectories(string root) =>
+        (SolutionFile(root) is { } solution ? SolutionProjects(solution) : ScannedProjects(root))
         .Select(f => Path.GetFullPath(Path.GetDirectoryName(f)!))
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .Order(StringComparer.OrdinalIgnoreCase)
         .ToList();
+
+    /// <summary>
+    /// The root's own solution, if there is exactly one. Top-level only: a solution in a
+    /// subdirectory describes that subtree rather than this root, and Roslyn would not open it
+    /// for this root either.
+    /// </summary>
+    private static string? SolutionFile(string root)
+    {
+        var solutions = Directory
+            .EnumerateFiles(root, "*.sln*", SearchOption.TopDirectoryOnly)
+            .Where(f => Path.GetExtension(f) is ".sln" or ".slnx")
+            .Take(2)
+            .ToList();
+
+        return solutions.Count == 1 ? solutions[0] : null;
+    }
+
+    /// <summary>
+    /// The C# projects a solution lists. <c>.slnx</c> is XML that nests projects under folder
+    /// elements, so every descendant is taken rather than the direct children; <c>.sln</c> is
+    /// the older line format, whose project entries also cover solution folders and non-C#
+    /// projects, which the extension filter drops. Paths are solution-relative, and <c>.sln</c>
+    /// writes them with a backslash, which off Windows is a filename character rather than a
+    /// separator.
+    /// </summary>
+    private static IEnumerable<string> SolutionProjects(string solution)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(solution))!;
+        var listed = Path.GetExtension(solution).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
+            ? XDocument.Load(solution).Descendants("Project").Select(e => (string?)e.Attribute("Path"))
+            : SolutionEntry().Matches(File.ReadAllText(solution)).Select(m => m.Groups["path"].Value);
+
+        return listed
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => Path.GetFullPath(
+                Path.Combine(directory, p!.Replace('\\', Path.DirectorySeparatorChar))))
+            .Where(p => p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && File.Exists(p));
+    }
+
+    // `Project("{type guid}") = "Name", "Relative\Path.csproj", "{project guid}"`.
+    [GeneratedRegex(@"^Project\(""\{[^}]*\}""\)\s*=\s*""[^""]*"",\s*""(?<path>[^""]+)""",
+        RegexOptions.Multiline)]
+    private static partial Regex SolutionEntry();
+
+    /// <summary>
+    /// The fallback when the root has no solution to read. Over-inclusive by construction — it
+    /// cannot know what a project file is excluded from — but never short, which is the error
+    /// worth making: missing a project is the incomplete-answer-at-exit-0 bug that readiness
+    /// exists to close.
+    /// </summary>
+    private static IEnumerable<string> ScannedProjects(string root) => Directory
+        .EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
+        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                    !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"));
 
     /// <summary>
     /// The workspace's own C# files. Sorted because
@@ -569,7 +642,7 @@ internal static partial class Program
                     !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
         .Order(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record Options(
+    internal sealed record Options(
         string Command,
         string? Argument,
         string Root,
