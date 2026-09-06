@@ -13,13 +13,18 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly StringBuilder _stderr;
     private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string[]> _lines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly bool _daemon;
+    private readonly CancellationToken _ct;
 
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(10);
 
     public string Root { get; }
 
-    private LspClient(string root, Process proc, JsonRpc rpc, Endpoints endpoints, StringBuilder stderr)
-        => (Root, _proc, _rpc, _endpoints, _stderr) = (root, proc, rpc, endpoints, stderr);
+    private LspClient(
+        string root, Process proc, JsonRpc rpc, Endpoints endpoints, StringBuilder stderr,
+        bool daemon, CancellationToken ct)
+        => (Root, _proc, _rpc, _endpoints, _stderr, _daemon, _ct)
+            = (root, proc, rpc, endpoints, stderr, daemon, ct);
 
     public static async Task<LspClient> StartAsync(string root, string logLevel, bool daemon, CancellationToken ct)
     {
@@ -53,7 +58,7 @@ internal sealed class LspClient : IAsyncDisposable
         rpc.AddLocalRpcTarget(endpoints);
         rpc.StartListening();
 
-        var client = new LspClient(root, proc, rpc, endpoints, stderr);
+        var client = new LspClient(root, proc, rpc, endpoints, stderr, daemon, ct);
         try
         {
             await client.InitializeAsync(ct);
@@ -125,7 +130,8 @@ internal sealed class LspClient : IAsyncDisposable
     /// ready before we connected. The notification is kept only as diagnostic detail on the
     /// failure path.
     /// <para>
-    /// One sentinel per project, and every one of them has to resolve. A single sentinel only
+    /// One sentinel per project, and every project that has one has to resolve it — see the
+    /// last paragraph for the ones that have none. A single sentinel only
     /// ever proved that <em>some</em> project loaded, which is the race behind every
     /// incomplete answer this client has produced: a cross-project <c>refs</c> or <c>impl</c>
     /// missing the half that had not loaded, and a <c>sym</c> search missing a whole project's
@@ -181,17 +187,23 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether any of a project's candidate sentinels resolves to a location inside it. Several
-    /// candidates because <c>Program.InferSentinels</c>'s type-declaration match is not
-    /// syntax-aware — it matches inside a comment or a string literal, and one bad guess would
-    /// otherwise block readiness for the whole run.
+    /// Whether any of a project's candidate sentinels resolves to a location inside it, and
+    /// not inside a project nested within it. Without that second half, <c>Web/</c> and
+    /// <c>Web/Tests/</c> both declaring <c>Program</c> — the ordinary shape — lets Tests
+    /// loading mark Web ready, which is the every-project-loaded guarantee failing quietly.
+    /// Several candidates because <c>Program.InferSentinels</c>'s type-declaration match is a
+    /// regex, not a parser, and one bad guess would otherwise block readiness for the run.
     /// </summary>
     private async Task<bool> ResolvesAsync(Sentinel sentinel, CancellationToken ct)
     {
         foreach (var candidate in sentinel.Candidates)
         {
             var hits = await SymbolsAsync(candidate, ct);
-            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory))) return true;
+            if (hits.Any(h => Under(h.Location.Uri, sentinel.Directory) &&
+                              !sentinel.Nested.Any(n => Under(h.Location.Uri, n))))
+            {
+                return true;
+            }
         }
 
         return false;
@@ -382,6 +394,12 @@ internal sealed class LspClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Whether this run owns its server outright. A daemon run that fell back has a private
+    /// server nothing else will ever attach to, so it is as dedicated as <c>--no-daemon</c>.
+    /// </summary>
+    private bool Dedicated => !_daemon || DaemonFallback;
+
     private static readonly string[] DaemonFallbackMarkers =
     [
         "Falling back to non-daemon mode",
@@ -397,23 +415,40 @@ internal sealed class LspClient : IAsyncDisposable
         return "\n--- server stderr ---\n" + string.Join('\n', tail[Math.Max(0, tail.Length - lines)..]);
     }
 
+    /// <summary>
+    /// Ctrl+C has to be felt at the prompt, so a cancelled teardown skips the polite shutdown
+    /// and does not wait out the exit: the two budgets together cost ~8s, and the token was
+    /// honoured everywhere except here. Only a server this run owns is then killed. The
+    /// shared daemon is a child of the thin client this run started but serves every other
+    /// client on the machine, so killing that process tree would take their workspace down
+    /// with it; it is left to its own keepalive instead.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        try
+        var cancelled = _ct.IsCancellationRequested;
+        if (!cancelled)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await _rpc.InvokeWithParameterObjectAsync<object?>("shutdown", null, cts.Token);
-            await _rpc.NotifyWithParameterObjectAsync("exit");
-        }
-        catch
-        {
-            // A server that is already gone needs no polite shutdown.
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await _rpc.InvokeWithParameterObjectAsync<object?>("shutdown", null, cts.Token);
+                await _rpc.NotifyWithParameterObjectAsync("exit");
+            }
+            catch
+            {
+                // A server that is already gone needs no polite shutdown.
+            }
         }
 
         _rpc.Dispose();
         try
         {
-            if (!_proc.WaitForExit(3000)) _proc.Kill(entireProcessTree: true);
+            if (!_proc.WaitForExit(cancelled ? 250 : 3000) && (Dedicated || !cancelled))
+            {
+                // Tree only when the server is ours. The shared daemon is a child of this
+                // thin client, so a tree kill on the timeout path would take it down too.
+                _proc.Kill(entireProcessTree: Dedicated);
+            }
         }
         catch
         {
@@ -477,7 +512,9 @@ internal sealed class LspClient : IAsyncDisposable
 }
 
 /// <summary>
-/// One project's readiness probe: the directory a resolving hit has to sit under, and the
-/// candidate type names to look for, in the order they were found.
+/// One project's readiness probe: the directory a resolving hit has to sit under, the
+/// candidate type names to look for, in the order they were found, and the directories of
+/// projects nested inside this one, which a hit must <em>not</em> sit under.
 /// </summary>
-internal sealed record Sentinel(string Directory, IReadOnlyList<string> Candidates);
+internal sealed record Sentinel(
+    string Directory, IReadOnlyList<string> Candidates, IReadOnlyList<string> Nested);

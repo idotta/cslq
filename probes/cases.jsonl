@@ -37,9 +37,10 @@
 {"name":"sym-json","args":"sym Area --root fixture --json","exit":"0","expect":"'count': 3|'name': 'Area'|'kind': 'method'|'path': 'Core/Shape.cs'|'column': 9"}
 {"name":"sym-generated","args":"sym BuildInfo --root fixture --json","exit":"0","expect":"'name': 'BuildInfo'|'path': '<generated>/Gen/BuildInfo.g.cs'|'generated': true"}
 {"name":"sym-truncates","args":"sym Area --root fixture --max 2","exit":"0","expect":"method  Area|... 1 more (use --max 3 to see all)"}
+{"name":"sym-truncates-by-relevance","args":"sym Volume --root fixture --max 1","exit":"0","expect":"Core/Volume.cs:9:21|... 1 more (use --max 2 to see all)"}
 {"name":"sym-no-match-fails","args":"sym NoSuchThing --root fixture","exit":"1","expect":"no results"}
 {"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"csx: --max needs an integer"}
-{"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line and column are one-based"}
+{"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line is one-based: 0"}
 {"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"csx: line out of range"}
 {"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
 {"name":"non-project-file-not-indexed","args":"sym Stray --root fixture","exit":"1","expect":"no results"}

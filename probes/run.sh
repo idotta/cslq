@@ -214,12 +214,18 @@ rm -f "$fb_log"
 # App/TypeError.cs open -- a warm document answers correctly whatever the pull count, so
 # none of them can catch a regression here. This leg uses a server that has never seen the
 # document, the only state where answering before the document binds would show up.
+#
+# One named file, not the whole fixture: the whole-fixture walk opens Ambient/Stray.cs,
+# App/Program.cs and App/Square.cs first, so App/TypeError.cs would be the fourth document
+# and the measurement in DESIGN.md -- a cross-project error opened as the *first* document
+# in a never-used server -- would have nothing testing it. The rest of the walk is already
+# covered warm by deliberate-error-diag-workspace.
 cold_log=$(mktemp)
 # --no-daemon, not a private pipe name: a fresh pipe would make this run *launch* a daemon,
 # the daemon inherits stdout, and $(...) then blocks forever waiting for the pipe's last
 # writer. --no-daemon gives a dedicated server that has never seen the document, which is
 # the state under test anyway.
-"$CSX" diag --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
+"$CSX" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
 rc=$?
 out=$(cat "$cold_log")
 rm -f "$cold_log"

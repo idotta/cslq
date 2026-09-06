@@ -31,6 +31,10 @@ internal static partial class Program
     private static readonly string[] Commands =
         ["ready", "refs", "def", "impl", "sym", "outline", "diag"];
 
+    // `outline` is here because it accepts a position too — see OutlineTargetAsync. `sym`
+    // takes a free-text query and `diag` a path, neither of which is position-shaped.
+    private static readonly string[] TakesPosition = ["refs", "def", "impl", "outline"];
+
     private static async Task<int> Main(string[] argv)
     {
         try
@@ -41,6 +45,13 @@ internal static partial class Program
         {
             Console.Error.WriteLine("csx: " + ex.Message);
             return 1;
+        }
+        catch (OperationCanceledException)
+        {
+            // Ctrl+C. Without this the cancellation escapes as an unhandled exception and the
+            // interrupt is answered with a stack trace and exit 134.
+            Console.Error.WriteLine("csx: interrupted.");
+            return 130;
         }
     }
 
@@ -407,7 +418,7 @@ internal static partial class Program
     }
 
     private static int Coordinate(string text, string name) => int.TryParse(text, out var value)
-        ? value > 0 ? value : throw new CsxException("line and column are one-based")
+        ? value > 0 ? value : throw new CsxException($"{name} is one-based: {text}")
         : throw new CsxException($"{name} out of range: {text}");
 
     /// <summary>
@@ -432,6 +443,12 @@ internal static partial class Program
     [GeneratedRegex(@"\b(?:class|struct|record|interface|enum)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)")]
     private static partial Regex TypeDeclaration();
 
+    // Raw strings first, then verbatim, then ordinary: a shorter alternative would otherwise
+    // close a longer literal early. Replaced with a space, not nothing, so `class/*x*/Foo`
+    // does not become the declaration `classFoo`.
+    [GeneratedRegex("\"\"\"[\\s\\S]*?\"\"\"|@\"(?:[^\"]|\"\")*\"|\"(?:\\\\.|[^\"\\\\\n])*\"|'(?:\\\\.|[^'\\\\\n])*'|//[^\n]*|/\\*[\\s\\S]*?\\*/")]
+    private static partial Regex NonCode();
+
     /// <summary>
     /// One readiness probe per project, because a single one only ever proved that
     /// <em>some</em> project had loaded — see <see cref="LspClient.WaitReadyAsync"/> for the
@@ -441,17 +458,17 @@ internal static partial class Program
     /// </summary>
     private static IReadOnlyList<Sentinel> Sentinels(Options opts) =>
         opts.Sentinel is { } explicitSentinel
-            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel])]
+            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel], [])]
             : InferSentinels(opts.Root);
 
     /// <summary>
     /// A project per <c>.csproj</c>, and per project the type names declared in its own files,
     /// most-shallow-file-first. Several candidates rather than one because
-    /// <see cref="TypeDeclaration"/> is a regex, not a parser: it matches inside comments and
-    /// string literals — <c>fixture/Gen/BuildInfoGenerator.cs</c> has a
-    /// <c>public static class BuildInfo</c> inside a raw string literal — and a project whose
-    /// first match is <c>// class Removed</c> would otherwise block readiness forever. Capped
-    /// because the list is a fallback chain, not an index.
+    /// <see cref="TypeDeclaration"/> is a regex, not a parser: even with comments and string
+    /// literals stripped it reads a type out of a file no project compiles, out of an
+    /// excluded <c>#if</c> branch, or out of a <c>using</c> alias, and one such guess would
+    /// otherwise block readiness for the whole run. Capped because the list is a fallback
+    /// chain, not an index.
     /// <para>
     /// A project that declares no type at all — one that is only top-level statements —
     /// contributes no candidate. It is still returned, so that
@@ -474,7 +491,9 @@ internal static partial class Program
                 $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
         }
 
-        var sentinels = projects.Select(d => new Sentinel(d, Candidates(d, projects))).ToList();
+        var sentinels = projects
+            .Select(d => new Sentinel(d, Candidates(d, projects), NestedProjects(d, projects)))
+            .ToList();
 
         return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
@@ -483,35 +502,38 @@ internal static partial class Program
 
     /// <summary>
     /// Type names declared in a project's <em>own</em> files. Own excludes anything under a
-    /// project nested inside this one: <c>LspClient.Under</c> counts a hit for a project when
-    /// it lands anywhere below its directory, so a candidate taken from <c>A/B</c> would let B
-    /// loading mark A ready. That is the every-project-loaded guarantee failing quietly, which
-    /// is the whole bug this readiness model exists to close. A project left with no candidate
+    /// project nested inside this one, so a candidate taken from <c>A/B</c> cannot be what
+    /// marks A ready. That is only half of it: the hit has to be scoped too, which is what
+    /// <see cref="Sentinel.Nested"/> carries — <c>Web/</c> and <c>Web/Tests/</c> both
+    /// declaring <c>Program</c> is the ordinary shape, and a scan of A's own files alone does
+    /// not stop B's <c>Program</c> from answering A's query. A project left with no candidate
     /// of its own is reported as unprobed rather than assumed loaded.
     /// <para>
-    /// <c>Matches</c>, not <c>Match</c>: every declaration in a file, not just its first.
-    /// The regex matches English prose in doc comments — "identifying the class and assembly
-    /// context" yields the candidate <c>and</c> — and taking one match per file let a single
-    /// such sentence mask every real type below it. A project with one source file then had
-    /// exactly one candidate, a word no <c>workspace/symbol</c> query can resolve, and
-    /// readiness burned its whole timeout. Measured 2026-09-06: <c>csx ready</c> on
-    /// OrchardCore v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists
-    /// were <c>'and' / 'and' / 'and'</c>. Three candidates does not cover it — they were drawn
-    /// one per file, so a project with fewer than three files could be entirely prose.
+    /// <see cref="NonCode"/> first, because <see cref="TypeDeclaration"/> matches English
+    /// prose: "identifying the class and assembly context" in a doc comment yields the
+    /// candidate <c>and</c>, a word no <c>workspace/symbol</c> query can resolve. Measured
+    /// 2026-09-06, before the strip: <c>csx ready</c> on OrchardCore v3.0.1 failed after 900s
+    /// on fifteen projects, six of whose candidate lists were <c>'and' / 'and' / 'and'</c> —
+    /// one doc comment can fill all three slots, so capping at three is no defence and taking
+    /// every match per file rather than the first is not one either.
     /// </para>
     /// </summary>
     private static IReadOnlyList<string> Candidates(string directory, IReadOnlyList<string> projects)
     {
-        var nested = projects.Where(p => p != directory && IsUnder(p, directory)).ToList();
+        var nested = NestedProjects(directory, projects);
 
         return SourceFiles(directory)
             .Where(f => !nested.Any(n => IsUnder(f, n)))
-            .SelectMany(f => TypeDeclaration().Matches(File.ReadAllText(f)))
+            .SelectMany(f => TypeDeclaration().Matches(NonCode().Replace(File.ReadAllText(f), " ")))
             .Select(m => m.Groups["name"].Value)
             .Distinct(StringComparer.Ordinal)
             .Take(3)
             .ToList();
     }
+
+    private static IReadOnlyList<string> NestedProjects(
+        string directory, IReadOnlyList<string> projects) =>
+        [.. projects.Where(p => p != directory && IsUnder(p, directory))];
 
     private static bool IsUnder(string path, string directory) => path.StartsWith(
         directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
@@ -608,9 +630,9 @@ internal static partial class Program
 
             // Here rather than in LocateAsync: that runs after StartAsync and WaitReadyAsync,
             // so `file:0:1` would start a server and wait out readiness before printing an
-            // argument error. PositionSpec cannot match a bare symbol name, so checking every
-            // command's argument has no false positives.
-            if (argument is not null) ValidatePosition(argument);
+            // argument error. Only for the commands that accept a position: `sym Foo:1` is a
+            // legitimate query and `diag nope:x` a path, and validating those rejected both.
+            if (argument is not null && TakesPosition.Contains(command)) ValidatePosition(argument);
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,

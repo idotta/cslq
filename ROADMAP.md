@@ -3,19 +3,29 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and ten cases.
+Last updated: 2026-09-06, after the hardening phases closed the readiness window.
 Milestone 3 is done. Milestone 4's remaining item — output tuning — has had one concrete
 change land against it: `sym` now applies `--max` in the server's relevance order and sorts
 only what survives, so a capped broad query keeps the best matches. The rest of the item is
 still a placeholder that names nothing concrete.
 
-53 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+55 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
-missing rather than by erroring. Readiness is now one sentinel per project. This is the known window the sentinel does not
-close — it proves the workspace loaded, not that every project did — and neither the
-`SettleAsync` decompilation guard nor `QuerySymbolsAsync`'s retry catches it, because both
-watch for an *empty* answer and this one is merely *incomplete*. Closing it needs per-project
-readiness, which is its own piece of work.
+missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
+that every project did — is closed: `WaitReadyAsync` now takes one sentinel per `.csproj` and
+requires each to resolve to a location under its own project directory, so an incomplete answer
+at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard and
+`QuerySymbolsAsync`'s retry remain, but neither is load-bearing for it; both watch for an
+*empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
+in one directory, which no path scoping can separate — documented, not scheduled.
+
+Known gap in the gate: `Sentinel.Nested` — the half that keeps a nested project's hit from
+marking its parent ready — is exercised by nothing. All three fixture projects are siblings, so
+every `Nested` list is empty in every case the suite runs, and the `Web/` + `Web/Tests/` shape
+that motivates it is verified by argument only. Pinning it needs a fourth fixture project nested
+under `App/` declaring a duplicate `Program`, at the cost of a project load on all 55 cases and
+of re-baselining every whole-fixture expectation. Not taken; recorded here so nobody assumes
+otherwise.
 
 ## Status
 

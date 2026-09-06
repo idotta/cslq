@@ -72,7 +72,18 @@ waits first. **Ready means every project loaded**, not merely that the server an
 something: one sentinel only ever proved *some* project was up, and the window that leaves open
 produced `refs`, `impl` and `sym` answers that were silently incomplete at exit 0. So `csx`
 takes one sentinel per project and requires each to resolve to a location inside that project's
-own directory — never matched by `containerName`, which is localised display text.
+own directory and **not** inside a project nested within it — never matched by `containerName`,
+which is localised display text. The nested exclusion is not a corner case: `Web/` and
+`Web/Tests/` both declaring `Program` is the ordinary shape, and without it Tests loading marks
+Web ready, which is the exact silently-incomplete failure above.
+
+Two limits are known and deliberate. A project the scan can infer no sentinel for — one that is
+only top-level statements, or only Razor or resources — is **not** waited on: there is nothing
+to ask the server for, and failing on it would break those projects outright. It is named on the
+failure path instead, so its absence from readiness is visible rather than silent. And two
+`.csproj` in one directory collapse to a single entry, because a hit under that directory cannot
+be attributed to one of them by path — no scan-based scoping can separate them, so the second
+project is covered only incidentally.
 
 Knowing the projects means scanning for `*.csproj` under the root, because **the server cannot
 be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
@@ -91,12 +102,15 @@ per-project set with a single root-scoped probe, giving up the all-projects-load
 It is the escape hatch for a layout the scan cannot read.
 
 Sentinel candidates come from a regex, not a parser, and it matches English prose in doc
-comments: "identifying the class and assembly context" yields the candidate `and`. Candidates
-are therefore taken as **every** declaration in a file, in order, not the first one — with one
-per file, a single such sentence masked every real type below it, and a project with one source
-file was left with a candidate no query can resolve. Measured 2026-09-06: `csx ready` against
-OrchardCore v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
-`'and' / 'and' / 'and'`.
+comments: "identifying the class and assembly context" yields the candidate `and`. Comments and
+string literals are therefore stripped before the declaration regex runs. Taking every match in
+a file rather than the first is not sufficient on its own and neither is the cap of three: one
+doc-comment sentence yields `and` / `of` / `for` and fills all three slots, leaving a project
+probed only by words no query can resolve. Measured 2026-09-06: `csx ready` against OrchardCore
+v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
+`'and' / 'and' / 'and'`. Stripping is regex-level, not syntax-aware — parsing would mean a
+Roslyn dependency the README rejects — so several candidates are still kept as a fallback chain
+against a type the regex reads out of an excluded `#if` branch or a file no project compiles.
 
 `diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
 Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to
@@ -111,11 +125,14 @@ until its project references resolve. Measured 2026-09-06 against 5.12.0-1.26426
 premise is false**: `textDocument/diagnostic` does not answer early, it blocks until the document
 is bound. A cross-project error opened as the first document in a never-used daemon returns the
 correct `CS0029` on the first pull — that pull costs ~4.2s and the redundant second one ~0.7s.
+That first-document case is what `cold-server-diag-reports-cross-project-error` runs: one named
+file against `--no-daemon`, because the whole-fixture walk would open three other documents
+first and never exercise it.
 Across six whole-fixture runs, cold daemon and warm, 22 pulls each, the second pull never once
 differed from the first. The loop bought a mandatory 250 ms delay plus a duplicate round trip per
 file, about 45% of warm per-file cost, and nothing else.
 
-Measured cost, fixture (11 files, 3 projects), 2026-09-06: fixed ~2.5s per invocation, then
+Measured cost, fixture (11 files then, 3 projects), 2026-09-06: fixed ~2.5s per invocation, then
 ~560 ms per file warm and ~1080 ms cold. The fixed term is process start, sentinel inference and
 readiness — none of which `diag` controls, and on a 233-project workspace it dominates. Any
 throughput number that is not split at the readiness boundary is measuring the wrong thing.
