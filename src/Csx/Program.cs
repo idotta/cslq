@@ -28,6 +28,9 @@ internal static partial class Program
           --no-daemon       start a dedicated server instead of the shared daemon
         """;
 
+    private static readonly string[] Commands =
+        ["ready", "refs", "def", "impl", "sym", "outline", "diag"];
+
     private static async Task<int> Main(string[] argv)
     {
         try
@@ -106,7 +109,8 @@ internal static partial class Program
                 return await DiagAsync(client, opts, sentinels, ct);
 
             default:
-                throw new CsxException($"unknown command '{opts.Command}'\n\n{Usage}");
+                throw new System.Diagnostics.UnreachableException(
+                    $"Options.Parse admitted '{opts.Command}'");
         }
     }
 
@@ -470,20 +474,39 @@ internal static partial class Program
                 $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
         }
 
-        var sentinels = projects.Select(d => new Sentinel(d, Candidates(d))).ToList();
+        var sentinels = projects.Select(d => new Sentinel(d, Candidates(d, projects))).ToList();
 
         return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
             : throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
     }
 
-    private static IReadOnlyList<string> Candidates(string directory) => SourceFiles(directory)
-        .Select(f => TypeDeclaration().Match(File.ReadAllText(f)))
-        .Where(m => m.Success)
-        .Select(m => m.Groups["name"].Value)
-        .Distinct(StringComparer.Ordinal)
-        .Take(3)
-        .ToList();
+    /// <summary>
+    /// Type names declared in a project's <em>own</em> files. Own excludes anything under a
+    /// project nested inside this one: <c>LspClient.Under</c> counts a hit for a project when
+    /// it lands anywhere below its directory, so a candidate taken from <c>A/B</c> would let B
+    /// loading mark A ready. That is the every-project-loaded guarantee failing quietly, which
+    /// is the whole bug this readiness model exists to close. A project left with no candidate
+    /// of its own is reported as unprobed rather than assumed loaded.
+    /// </summary>
+    private static IReadOnlyList<string> Candidates(string directory, IReadOnlyList<string> projects)
+    {
+        var nested = projects.Where(p => p != directory && IsUnder(p, directory)).ToList();
+
+        return SourceFiles(directory)
+            .Where(f => !nested.Any(n => IsUnder(f, n)))
+            .Select(f => TypeDeclaration().Match(File.ReadAllText(f)))
+            .Where(m => m.Success)
+            .Select(m => m.Groups["name"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(3)
+            .ToList();
+    }
+
+    private static bool IsUnder(string path, string directory) => path.StartsWith(
+        directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar,
+        StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Every project directory under the root, by <c>.csproj</c> scan. An approximation of what
@@ -529,7 +552,13 @@ internal static partial class Program
     {
         public static Options Parse(string[] argv)
         {
-            string command = argv[0];
+            // Here rather than in DispatchAsync's default branch, for the reason the numeric
+            // checks are here: everything between the two starts a server and scans the
+            // workspace, so a typo would be answered by whatever failed first. It was —
+            // `csx bogus --root <dir with no .csproj>` reported the missing project.
+            string command = argv[0] is var c && Commands.Contains(c)
+                ? c
+                : throw new CsxException($"unknown command '{argv[0]}'\n\n{Usage}");
             string? argument = null;
             var root = Directory.GetCurrentDirectory();
             string? sentinel = null;

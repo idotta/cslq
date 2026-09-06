@@ -7,7 +7,7 @@ Last updated: 2026-09-05, after `impl` and `sym` landed with their fixture and t
 Milestone 3 is done. Milestone 4 has one item left — output tuning — and it is a placeholder
 that names nothing concrete; it needs scope before it can be worked.
 
-50 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+53 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. Readiness is now one sentinel per project. This is the known window the sentinel does not
 close — it proves the workspace loaded, not that every project did — and neither the

@@ -42,5 +42,8 @@
 {"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line and column are one-based"}
 {"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"csx: line out of range"}
 {"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
-{"name":"sentinel-skips-non-project-file","args":"ready --root fixture --timeout 20","exit":"0","expect":"ready"}
+{"name":"non-project-file-not-indexed","args":"sym Stray --root fixture","exit":"1","expect":"no results"}
+{"name":"non-project-file-outlines","args":"outline Ambient/Stray.cs --root fixture","exit":"0","expect":"public sealed class Stray"}
+{"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}
 {"name":"no-project-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"csx: no .csproj under"}
+{"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"csx: unknown command|usage:"}

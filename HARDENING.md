@@ -70,10 +70,15 @@ Measured on a scratch copy of `fixture` with `Ambient/Stray.cs` added, against
 **1b was therefore cut down to what the measurements support**: readiness inference stays
 project-scoped (it already was, since 1a), a root with no `.csproj` now fails immediately
 instead of timing out, and `diag`'s file walk is left alone — deliberately, with the reason
-written into `DESIGN.md` so it is not "fixed" later. `fixture/Ambient/Stray.cs` landed anyway,
-with `sentinel-skips-non-project-file`: it no longer pins 1b, but it is a regression guard on
-1c's per-project inference, which would hang on that file if inference ever went back to
-scanning any `.cs` under the root.
+written into `DESIGN.md` so it is not "fixed" later. `fixture/Ambient/Stray.cs` landed anyway, and review corrected what it
+pins. The first attempt, `sentinel-skips-non-project-file`, was vacuous — per-project inference
+has been unable to pick that file since 1a, so the case passed identically with the fixture
+file deleted, which is precisely the `Aux/` mistake this file warned about. It was replaced by
+three cases that go red if the measurement itself drifts: `non-project-file-not-indexed`,
+`non-project-file-outlines` and `non-project-file-no-diagnostics`. The last is the load-bearing
+one — it asserts the workspace `--errors-only` **count**, where
+`deliberate-error-diag-workspace` only greps for a line, so a bump that started reporting
+diagnostics for files in no project would take the count to 2 and go red.
 
 ~~Still open, and still gating 1b: **the misc-files question.** Nothing here established whether
 `workspace/symbol` answers for a file in no project, so the first root-cause bullet and
@@ -331,8 +336,22 @@ established the server exposes no project list to ask for.
 `InferSentinels` throws `no .csproj under <root>; point --root at a workspace or pass
 --sentinel` instead of falling back to a root-scoped sentinel that could never resolve, and the
 scan runs in `RunAsync` **before `StartAsync`**, so that error costs 53 ms and no server — the
-same late-validation lesson as 0a. Pinned by `no-project-root-reports`. The original plan
-follows, struck, because its reasoning is what the measurements overturned.
+same late-validation lesson as 0a. Pinned by `no-project-root-reports`.
+
+Two follow-ups from review of that commit, both landed:
+
+- **The command name is validated in `Options.Parse` too.** Moving the scan ahead of
+  `StartAsync` meant `csx bogus --root <dir with no .csproj>` reported the missing project
+  instead of the typo — whichever check ran first answered. `DispatchAsync`'s default branch is
+  now `UnreachableException`. Pinned by `unknown-command-reports`, which asserts an unquoted
+  substring because `run.sh` rewrites `'` to `"` inside `expect`.
+- **A nested project can no longer satisfy its parent's sentinel.** `Candidates` took the
+  recursive `SourceFiles(d)` and `LspClient.Under` counts any hit below the directory, so with
+  `A/B/B.csproj` inside `A/`, B loading could mark A ready — the every-project-loaded guarantee
+  failing in exactly the quiet way it exists to prevent. Candidates now exclude files under a
+  nested project. Not reachable in the fixture, so not pinned; it was carried in from 1a.
+
+The original plan follows, struck, because its reasoning is what the measurements overturned.
 
 <details><summary>Original 1b plan — superseded</summary>
 
@@ -552,8 +571,8 @@ no way to assert throughput and should not pretend to.
 
 - `dotnet format --verify-no-changes` exits 0.
 - `probes/run.sh` green — 44 legs at the start of Phase 0, 48 after it (0a added three,
-  0c a fourth), **50 after Phase 1** (`sentinel-skips-non-project-file`,
-  `no-project-root-reports`), with **one re-pinned** still to come:
+  0c a fourth), **53 after Phase 1** (three non-project-file cases,
+  `no-project-root-reports`, `unknown-command-reports`), with **one re-pinned** still to come:
   `sym-truncates` (2a). `premature-query-fails-loudly` was the other candidate and survived 1c
   unchanged, because the rewritten message kept both asserted phrases.
 - ~~`CLAUDE.md`: the "sentinel resolving no longer implies every project is loaded" bullet~~ —
