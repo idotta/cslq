@@ -153,15 +153,23 @@ public class SentinelInferenceTests
         Assert.Empty(sentinels.Single(s => s.Directory == app).Candidates);
     }
 
+    /// <summary>
+    /// Two solutions on purpose: that is the only route to the <c>.csproj</c> scan now, and the
+    /// scan is the only thing the <c>bin</c>/<c>obj</c> filter protects. Read off a solution,
+    /// <c>Only/obj/Nested/Nested.csproj</c> would be excluded by not being listed, which pins
+    /// nothing.
+    /// </summary>
     [Fact]
     public void Build_output_is_not_scanned()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         ws.Project("Only");
         ws.Write("Only/Real.cs", "internal class Real;");
         ws.Write("Only/obj/Debug/Generated.cs", "internal class ObjGhost;");
         ws.Write("Only/bin/Debug/Copied.cs", "internal class BinGhost;");
         ws.Write("Only/obj/Nested/Nested.csproj", "<Project />");
+        ws.Write("First.slnx", "<Solution />");
+        ws.Write("Second.slnx", "<Solution />");
 
         var sentinels = Program.InferSentinels(ws.Root);
 
@@ -176,8 +184,12 @@ public class SentinelInferenceTests
     [Fact]
     public void A_root_with_no_project_fails_immediately()
     {
-        using var ws = new Workspace();
+        // Two solutions again: with one, the message names it instead — see
+        // ProjectDiscoveryTests — and with none, the root is rejected before the scan runs.
+        using var ws = new Workspace(solution: false);
         ws.Write("Loose.cs", "internal class Loose;");
+        ws.Write("First.slnx", "<Solution />");
+        ws.Write("Second.slnx", "<Solution />");
 
         var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 

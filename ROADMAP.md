@@ -10,7 +10,7 @@ applies `--max` in the server's relevance order and sorts only what survives, so
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
 
-61 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+63 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
 that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
@@ -343,17 +343,28 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       workflow behind a nuget.org API key secret, with bump PRs also bumping `Version` so a
       new pin is a new release. `--help` should also work in any position; `cslq refs Foo
       --help` is currently `unknown option`.
-- [ ] **First-run failures must be `cslq:` messages, not stack traces.** `Main` catches only
-      `CslqException` and cancellation. With `dotnet` off `PATH`, `Process.Start` escapes as an
+- [x] **First-run failures must be `cslq:` messages, not stack traces.** `Main` catches only
+      `CslqException` and cancellation. With `dotnet` off `PATH`, `Process.Start` escaped as an
       unhandled `Win32Exception` with a stack trace and exit 127 — the first-time-user case
-      exactly. An unrestored tool surfaces the server's stderr tail but never says to run
-      `dotnet tool restore`. And a root with no solution burns the whole timeout before
+      exactly. An unrestored tool surfaced the server's stderr tail but never said to run
+      `dotnet tool restore`. And a root with no solution burned the whole timeout before
       exiting 1 — measured with the scratch solution's `.slnx` removed: two bare `.csproj`
       never loaded, matching the "Verified facts" entry that `--autoLoadProjects` does not
-      discover a bare project. Since `ProjectDirectories` already reads the root's solution,
-      "no solution at `--root`" is knowable before the server starts and should fail fast;
-      the `.csproj`-scan fallback then earns its keep only for roots holding several
-      solutions, which the error should say.
+      discover a bare project.
+      **Done.** Every `dotnet` launch now goes through one `LspClient.StartProcess`, which
+      wraps any start failure in a `CslqException` naming `dotnet` and the .NET 10 SDK, so the
+      server launch and item 1's restore share the wrapping rather than each catching for
+      itself; the restore-failed message now names the directory to run `dotnet tool restore`
+      in, on top of the feed's own first line. And `InferSentinels` rejects a root with no
+      `.sln`/`.slnx` at its top before `LspClient.StartAsync` is reached — 1 s instead of the
+      whole timeout — saying that `cslq` loads the projects the root's solution lists, so
+      `--root` must be the directory holding it. The `.csproj` scan is now reachable only for
+      a root holding more than one solution, which `ProjectDirectories` says in as many words;
+      `Workspace` in the test suite grew an auto-written solution because a solutionless temp
+      tree is no longer a valid workspace, and the two tests that still need the scan write
+      two solutions on purpose. Probe legs `no-solution-root-fails-fast` (which asserts the
+      elapsed time, not just the message) and `dotnet-off-path-reports`; the case
+      `no-project-root-reports` became `no-solution-root-reports`.
 - [ ] **README install section, and stop the docs disagreeing.** README has no
       prerequisites, no clone → `dotnet tool restore` → build → where-the-binary-lands, and no
       note that the first restore is ~300 MB; it opens with `cslq ready` as if `cslq` were on
@@ -433,7 +444,7 @@ started, which stays an accepted cost.
       `Web/Tests/` does not mark `Web/` ready
 - [x] `cslq` installed outside this repository — a global tool or a copied binary — starts and
       answers; `cslq --version` prints the version a release is tagged with
-- [ ] `dotnet` missing, the tool not restored, and a root with no solution each produce a
+- [x] `dotnet` missing, the tool not restored, and a root with no solution each produce a
       one-line `cslq:` message naming the fix, with no stack trace and no timeout
 - [ ] README tells a new user how to install `cslq` and the skill, and README, this file and
       `cases.jsonl` agree on the case count
@@ -516,8 +527,10 @@ against 5.12.0-1.26426.8 / win-x64.
   `OrchardCore.slnx` excludes precisely those template projects, so `--root` no longer has to
   be pointed below them.
 - **Project discovery reads the root's solution; the `.csproj` scan is now the fallback.**
-  Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list; none or more than
-  one falls back to the recursive scan. A solution one directory down does not count, which is
+  Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list; more than one
+  falls back to the recursive scan, and **none is now an error** rather than a third route into
+  the scan — `--autoLoadProjects` does not discover a bare project, so scanning one up only
+  bought a full timeout. A solution one directory down does not count, which is
   what keeps `fixture/Fixture.slnx` from narrowing a root above it. `.slnf` is not read, a listed
   project that is not on disk is dropped, and a root whose solution lists no C# project is named
   in the error rather than reported as "no .csproj under <root>". This also made the repository
