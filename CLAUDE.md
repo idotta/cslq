@@ -1,6 +1,6 @@
-# roslyn-ls-agent
+# cslq
 
-A CLI (`csx`) that gives coding agents semantic C# queries over Microsoft's official
+A CLI (`cslq`) that gives coding agents semantic C# queries over Microsoft's official
 `roslyn-language-server`, with a cron-driven update loop gated by a probe suite.
 
 **Read `ROADMAP.md` first** for milestone state and acceptance criteria, and `DESIGN.md` for the
@@ -10,13 +10,13 @@ the user-facing detail and the evidence behind the dependency choices.
 ## Commands
 
 ```
-dotnet build src/Csx/Csx.csproj          # build
-dotnet test --project tests/Csx.Tests    # the unit tests alone, ~1s (never with --nologo)
+dotnet build src/Cslq/Cslq.csproj          # build
+dotnet test --project tests/Cslq.Tests    # the unit tests alone, ~1s (never with --nologo)
 ./probes/run.sh                          # the gate: unit tests, restore, build, ready, every case
-./src/Csx/bin/Debug/net10.0/csx refs Greet --root fixture
+./src/Cslq/bin/Debug/net10.0/cslq refs Greet --root fixture
 ```
 
-`probes/run.sh` is the gate, and it runs `tests/Csx.Tests` first. Run it before claiming
+`probes/run.sh` is the gate, and it runs `tests/Cslq.Tests` first. Run it before claiming
 anything works: the unit tests alone prove nothing about the server's behaviour.
 
 ## Things that will cost you a session if you rediscover them
@@ -28,15 +28,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   code page 850 — but it fixes nothing and was tried and reverted. .NET writes a real console
   handle with `WriteConsoleW`, so the code page never applies, and redirected stdout is already
   UTF-8. Verified both ways against the emoji fixture line. Mojibake in a PowerShell pipeline
-  (`csx refs ... | Select-String`) is PowerShell decoding our bytes with its own
-  `[Console]::OutputEncoding`, which nothing `csx` sets can change.
+  (`cslq refs ... | Select-String`) is PowerShell decoding our bytes with its own
+  `[Console]::OutputEncoding`, which nothing `cslq` sets can change.
 - **The non-ASCII probe cases are the first host-dependent ones.** Both workflows run
   `ubuntu-latest`, where the encoding question does not arise; a regression here would be green
   on CI and red in Git Bash. Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
   bytes rather than throwing, so a fixture file corrupted to a non-UTF-8 encoding would desync
   the `didOpen` text from what Roslyn parses off disk — silently, except that
   `non-ascii-refs-position` then fails.
-- **Server flags live only in `src/Csx/ServerArgs.cs`.** The thin client forwards options it does
+- **Server flags live only in `src/Cslq/ServerArgs.cs`.** The thin client forwards options it does
   not recognise straight through to the server, so a renamed flag produces no error at all. The
   probes are the only thing that catches it.
 - **Roslyn's `containerName` is localised display text** (`in Greeter (project Core (net10.0))`),
@@ -75,7 +75,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   the use site with CS0433. `fixture2/Alpha` and `fixture2/Beta` reference nothing of each
   other's, so both compilations hold `Fixture2.Generated.Stamp` happily. `run.sh` restores and
   builds both consumers for the same reason it builds `fixture/Core`: an unbuilt analyzer
-  contributes nothing, silently. It is excluded from `Csx.slnx`, so `--root .` never loads it.
+  contributes nothing, silently. It is excluded from `Cslq.slnx`, so `--root .` never loads it.
 - **An unbuilt source generator produces nothing, silently.** With `fixture/Gen/bin` absent
   the workspace still loads, the sentinel still resolves, and only the generated symbol is
   missing — no error, no diagnostic, no CS9057 on the wire. `run.sh` builds `fixture/Gen`
@@ -88,8 +88,8 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   then fatal rather than a clean error.
 - **A `.cs` file no project compiles is half-invisible, and the halves are not the ones you
   would guess.** `workspace/symbol` does not index it and `textDocument/diagnostic` reports
-  **nothing** for it — but `outline` answers, off the syntax tree. So `csx outline` on such a
-  file works while `csx sym` on the type it declares exits 1, and scoping `diag`'s file walk to
+  **nothing** for it — but `outline` answers, off the syntax tree. So `cslq outline` on such a
+  file works while `cslq sym` on the type it declares exits 1, and scoping `diag`'s file walk to
   project directories would suppress no noise whatsoever. The same file **linked in** with
   `<Compile Include="../Elsewhere/File.cs" />` is fully indexed and does report, so that scoping
   would silently drop real errors. Measured 2026-09-05; the reasoning is in `DESIGN.md`.
@@ -97,7 +97,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   it.** The candidate regex matches `class|struct|record|interface|enum` followed by a word, so
   the doc comment "identifying the class and assembly context" yields the candidate `and` — and
   one sentence can yield `and` / `of` / `for` and fill all three slots, leaving a project probed
-  only by words nothing can resolve while readiness burns its entire timeout. `csx ready` on
+  only by words nothing can resolve while readiness burns its entire timeout. `cslq ready` on
   OrchardCore failed this way after 900 s on fifteen projects. `Program.NonCode` therefore
   strips comments and string literals before the declaration regex runs. Keep the fallback
   chain anyway: the regex still reads types out of `#if` branches and uncompiled files. The
@@ -124,7 +124,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   never observes a first document at all. If a bump starts answering
   early, `diag` is where it shows up. Do not restore the loop without re-measuring: the old one
   could not have caught that case anyway, since two equally-wrong pulls agree.
-- **`csx` never sends `didClose`, so daemon document state outlives the client.** `_open` is
+- **`cslq` never sends `didClose`, so daemon document state outlives the client.** `_open` is
   per-process and says nothing about what the shared daemon still has open. Any measurement of
   first-open behaviour must use a fresh `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` or
   `--no-daemon`; a warm daemon shows "no divergence" for the wrong reason. The same effect is
@@ -136,19 +136,19 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   a cold document at all; by the time `deliberate-error-diag-workspace` and
   `non-project-file-no-diagnostics` run it is already open and warm. Reordering the file, or
   running one case against an ambient daemon, disarms that coverage with nothing going red.
-- **Never pipe or command-substitute `csx` output in bash while the daemon is in play.** The
-  daemon inherits the client's stdout, so `csx ... | tail` and `out=$(csx ...)` block forever
+- **Never pipe or command-substitute `cslq` output in bash while the daemon is in play.** The
+  daemon inherits the client's stdout, so `cslq ... | tail` and `out=$(cslq ...)` block forever
   waiting for the pipe's last writer — it looks exactly like a hung cold load. Redirect to a
   file and `cat` it, or pass `--no-daemon`. Only the run that *launches* the daemon can hang,
   which is why `probes/run.sh` captures every case with `$(...)` and never blocks: its cold
-  `csx ready` — the one leg that starts the daemon — is deliberately uncaptured. Keep it that
+  `cslq ready` — the one leg that starts the daemon — is deliberately uncaptured. Keep it that
   way.
 - **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
   it terminates the process without ever raising a console control event, so the handler never
-  runs and the 130 you see is bash's own signal status. To exercise the real path, launch `csx`
+  runs and the 130 you see is bash's own signal status. To exercise the real path, launch `cslq`
   with `CREATE_NEW_PROCESS_GROUP` and send it `CTRL_BREAK_EVENT` with
   `GenerateConsoleCtrlEvent` — a throwaway file-based app does it in 40 lines. Measured
-  2026-09-06: `csx: interrupted.` and exit 130 within 62 ms, with the fallback run's own server
+  2026-09-06: `cslq: interrupted.` and exit 130 within 62 ms, with the fallback run's own server
   tree gone.
 - **`dotnet test --nologo` runs zero tests and exits 5.** `global.json` opts into the MTP mode
   of `dotnet test` (`"test": {"runner": "Microsoft.Testing.Platform"}`), where `--nologo` is no
@@ -163,15 +163,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
   still a documented limit. This is the fix for the OrchardCore template failure above; scoping
   `--root` below the templates was only the workaround.
-  Parse failures go through `CsxException`: `Main` catches that and nothing else, so a
+  Parse failures go through `CslqException`: `Main` catches that and nothing else, so a
   hand-edited `.slnx` that no longer parses would otherwise exit 127 with a stack trace.
-- **`csx` can now be pointed at its own repo, and `Csx.slnx` is why.** The root solution lists
-  `src/Csx` and `tests/Csx.Tests` and deliberately excludes `fixture/`, whose `App` does not
+- **`cslq` can now be pointed at its own repo, and `Cslq.slnx` is why.** The root solution lists
+  `src/Cslq` and `tests/Cslq.Tests` and deliberately excludes `fixture/`, whose `App` does not
   compile on purpose. Put a fixture project in it and `dotnet build` at the root fails by
-  design; leave it out and `csx ready --root .` resolves in ~6 s — the `self-hosted-*` cases.
+  design; leave it out and `cslq ready --root .` resolves in ~6 s — the `self-hosted-*` cases.
   `fixture/` keeps its own `Fixture.slnx`, which `run.sh` restores separately.
 - **The server does not restore your projects.** `dotnet restore` before starting it.
-- **The daemon is the default, and it changes what "ready" means.** `csx` connects to the
+- **The daemon is the default, and it changes what "ready" means.** `cslq` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every
   workspace on the machine, keyed by user and server path rather than by root, and it outlives
   the client that started it. Two consequences bit already:
@@ -194,9 +194,9 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     localised display text. It cost a red CI run and two red gate runs that each failed a
     *different* pair of cases, so treat a lone flake of this shape as this, not as noise.
 - **`probes/run.sh` must scope its own daemon.** It exports
-  `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=csx-probe-$$` and a 60 s keepalive. Without it the
+  `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=cslq-probe-$$` and a 60 s keepalive. Without it the
   gate inherits whatever daemon the developer's session left running — a stale workspace can
-  make the suite lie — and the opening `csx ready` stops being a cold load.
+  make the suite lie — and the opening `cslq ready` stops being a cold load.
 - **The staleness legs write to the fixture.** They rename `Greeter` in
   `fixture/Core/Greeter.cs` and rely on a `trap ... EXIT` to put it back. If `run.sh` is
   interrupted between the rename and the trap, check `git diff fixture/` before believing
@@ -204,7 +204,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **A failure during `initialize` must never escape as a StreamJsonRpc exception.** The thin
   client can die before it answers, and StreamJsonRpc then reports nothing but
   `ConnectionLostException` — the server's stderr is the only thing that says why, and it is
-  discarded unless the failure is wrapped in a `CsxException` carrying `StderrTail()`. That
+  discarded unless the failure is wrapped in a `CslqException` carrying `StderrTail()`. That
   wrapping is what turned "connection lost" into the exact mutex name and `file:line`
   below.
 - **To force the silent non-daemon fallback**, hold a mutex named `Global\<pipeName>.client`
@@ -214,7 +214,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   be created with `CurrentUserOnly = true` to match the server, and with
   `CurrentSessionOnly = false` or .NET rejects the `Global\` prefix. Either one wrong throws
   `WaitHandleCannotBeOpenedException` / `ArgumentException` instead of contending, so the
-  client connects normally and the case fails for a reason that has nothing to do with `csx`.
+  client connects normally and the case fails for a reason that has nothing to do with `cslq`.
   It also needs its own pipe name: the mutex only guards check-server-then-launch, so a client
   that finds a daemon already listening never contends for it. It is the second
   host-dependent case in the suite after the non-ASCII ones — .NET implements named mutexes
@@ -232,7 +232,7 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
   `.editorconfig` yet**, so `dotnet format` enforces its own defaults rather than house style —
   match the surrounding code instead of reformatting a file you touched.
 - **`DateTime.UtcNow`, never `DateTime.Now`.** Every deadline in `LspClient` is UTC.
-- **No `async void`** outside an event handler, and never `.Result` or `.Wait()` — `csx` is async
+- **No `async void`** outside an event handler, and never `.Result` or `.Wait()` — `cslq` is async
   from `Main` down, and a sync-over-async wait here deadlocks against the JSON-RPC read loop.
 - **Reach for C# 14 first:** `extension` blocks rather than `this` extension methods, the `field`
   keyword rather than a hand-written backing field, `x?.P = v` rather than an `if` guard. C# 14
@@ -241,19 +241,19 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
   `<LangVersion>latest</LangVersion>` explicitly.
 - **`[LibraryImport]`, not `[DllImport]`**, if native interop ever appears.
 - **Fix root causes and delete what is dead.** Don't preserve a shape for backwards
-  compatibility — nothing depends on `csx`'s internals yet. Simplify rather than layering.
+  compatibility — nothing depends on `cslq`'s internals yet. Simplify rather than layering.
 - **Never push to a remote, and never commit unless asked.** `bump.yml` is the only thing that
   opens PRs here.
 
 ## Conventions
 
 - **`probes/run.sh` is still the gate, but it is no longer the only suite.**
-  `tests/Csx.Tests` (xunit v3 over MTP) covers the pure logic below the transport -- sentinel
+  `tests/Cslq.Tests` (xunit v3 over MTP) covers the pure logic below the transport -- sentinel
   inference, `Options.Parse`, `PathUri`, `Output.WriteSymbols` -- and `run.sh` runs it first,
   before the fixture restore, because it costs under a second. Anything that needs a live
   server stays in `probes/`; put nothing there that a temp directory and a string could prove.
-  The tested members are `internal`, reached through `<InternalsVisibleTo Include="Csx.Tests" />`
-  in `Csx.csproj`.
+  The tested members are `internal`, reached through `<InternalsVisibleTo Include="Cslq.Tests" />`
+  in `Cslq.csproj`.
 - `probes/run.sh` parses `cases.jsonl` with `sed` alone. **No `jq`** — it does not exist in Git
   Bash on the dev machine. (`python` does, 3.14.6, despite what this file used to claim; the
   `sed`-only rule still stands for the GitHub runner.) Keep `cases.jsonl` to four flat string fields.

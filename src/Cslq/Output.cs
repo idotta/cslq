@@ -1,7 +1,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace Csx;
+namespace Cslq;
 
 /// <summary>
 /// Raw LSP hands back URIs and zero-based line/character ranges, which is close to

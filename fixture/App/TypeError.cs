@@ -3,7 +3,7 @@ using Fixture.Core;
 namespace Fixture.App;
 
 /// <summary>
-/// The deliberate type error for `csx diag`. Three things about it are load-bearing.
+/// The deliberate type error for `cslq diag`. Three things about it are load-bearing.
 /// It is a *cross-project* error: binding it needs Core's reference resolved, so the
 /// misc-files state a freshly opened document is first bound against cannot report it,
 /// which is what makes the re-pull after load testable. It calls `Farewell` rather than

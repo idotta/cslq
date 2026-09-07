@@ -39,17 +39,17 @@
 {"name":"sym-truncates","args":"sym Area --root fixture --max 2","exit":"0","expect":"method  Area|... 1 more (use --max 3 to see all)"}
 {"name":"sym-truncates-by-relevance","args":"sym Volume --root fixture --max 1","exit":"0","expect":"Core/Volume.cs:9:21|... 1 more (use --max 2 to see all)"}
 {"name":"sym-no-match-fails","args":"sym NoSuchThing --root fixture","exit":"1","expect":"no results"}
-{"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"csx: --max needs an integer"}
-{"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"csx: line is one-based: 0"}
-{"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"csx: line out of range"}
+{"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"cslq: --max needs an integer"}
+{"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"cslq: line is one-based: 0"}
+{"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"cslq: line out of range"}
 {"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
 {"name":"non-project-file-not-indexed","args":"sym Stray --root fixture","exit":"1","expect":"no results"}
 {"name":"non-project-file-outlines","args":"outline Ambient/Stray.cs --root fixture","exit":"0","expect":"public sealed class Stray"}
 {"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}
-{"name":"no-project-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"csx: no .csproj under"}
-{"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"csx: unknown command|usage:"}
+{"name":"no-project-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"cslq: no .csproj under"}
+{"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"cslq: unknown command|usage:"}
 {"name":"self-hosted-ready","args":"ready --root . --timeout 120","exit":"0","expect":"ready"}
-{"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Csx/Program.cs:|tests/Csx.Tests/"}
+{"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Cslq/Program.cs:|tests/Cslq.Tests/"}
 {"name":"generated-label-names-consuming-project","args":"sym Stamp --root fixture2","exit":"0","expect":"<generated>/Alpha/Gen2/Stamp.g.cs:3|<generated>/Beta/Gen2/Stamp.g.cs:3"}
 {"name":"generated-label-json","args":"sym Stamp --root fixture2 --json","exit":"0","expect":"'path': '<generated>/Alpha/Gen2/Stamp.g.cs'|'path': '<generated>/Beta/Gen2/Stamp.g.cs'|'generated': true"}
 {"name":"generated-ambiguity-names-consumers","args":"outline Stamp --root fixture2","exit":"1","expect":"declared in several documents|<generated>/Alpha/Gen2/Stamp.g.cs|<generated>/Beta/Gen2/Stamp.g.cs"}

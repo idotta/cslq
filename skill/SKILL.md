@@ -3,7 +3,7 @@ name: csharp-semantic-queries
 description: >-
   Use for ANY question about C# or .NET code in this repository that is about meaning rather
   than text: who calls a method, where a type or member is declared, what is in a file, what
-  the compiler thinks is wrong. Run `csx` instead of grep, ripgrep, Select-String or reading
+  the compiler thinks is wrong. Run `cslq` instead of grep, ripgrep, Select-String or reading
   files to answer them. Trigger on "find all callers", "who uses", "where is X defined",
   "go to definition", "what's in this file", "does this compile", "any errors", "what does
   this class expose", "rename impact", "is this method still used", "dead code", "what
@@ -12,16 +12,16 @@ description: >-
   file, to see the declarations and the callers of what you are about to change.
 ---
 
-# Semantic C# queries with `csx`
+# Semantic C# queries with `cslq`
 
-`csx` is a CLI over Microsoft's `roslyn-language-server` — the same engine as the VS Code C#
+`cslq` is a CLI over Microsoft's `roslyn-language-server` — the same engine as the VS Code C#
 extension. It answers about the compiled semantic model, so it sees cross-project references,
 generic instantiations, source-generated code and `partial` halves. Grep sees none of that.
 
 ## Start every session with this
 
 ```
-csx ready
+cslq ready
 ```
 
 Blocks until the workspace has loaded and exits 0. Everything else waits for readiness on its
@@ -32,13 +32,13 @@ slow first query into a fast one.
 
 | Task | Use this | Do NOT |
 |---|---|---|
-| Every caller / user of a method, type, property | `csx refs <symbol>` | grep the name — misses aliases, hits comments and strings |
-| Where something is declared | `csx def <symbol>` | grep `class X` — misses `partial`, generated and cross-project |
-| What implements an interface or overrides a member | `csx impl <symbol>` | grep `: IThing` — misses indirect and cross-project implementers |
-| Find a symbol when you only know part of the name | `csx sym <query>` | grep the tree — matches comments, strings and unrelated languages |
-| What a file declares, and its nesting | `csx outline <file>` | read the whole file into context |
-| Compiler / analyzer errors in a file or the tree | `csx diag [path]` | `dotnet build` and parse the log |
-| Confirm a symbol still exists at all | `csx def <symbol>` | assume from a grep hit |
+| Every caller / user of a method, type, property | `cslq refs <symbol>` | grep the name — misses aliases, hits comments and strings |
+| Where something is declared | `cslq def <symbol>` | grep `class X` — misses `partial`, generated and cross-project |
+| What implements an interface or overrides a member | `cslq impl <symbol>` | grep `: IThing` — misses indirect and cross-project implementers |
+| Find a symbol when you only know part of the name | `cslq sym <query>` | grep the tree — matches comments, strings and unrelated languages |
+| What a file declares, and its nesting | `cslq outline <file>` | read the whole file into context |
+| Compiler / analyzer errors in a file or the tree | `cslq diag [path]` | `dotnet build` and parse the log |
+| Confirm a symbol still exists at all | `cslq def <symbol>` | assume from a grep hit |
 
 Never answer "who calls this?" or "where is this defined?" from a text search in a C# repo.
 A text search cannot tell a call from a comment, and it cannot see a caller in another project.
@@ -52,7 +52,7 @@ A text search cannot tell a call from a comment, and it cannot see a caller in a
   container as localised display text, not a namespace path. An ambiguous target exits 1 and
   lists the candidates with their locations.
 - **A position:** `App/Program.cs:9:35`, relative to the workspace root, **one-based** line and
-  column, and columns are UTF-16 code units. Paste a position straight out of any `csx` result.
+  column, and columns are UTF-16 code units. Paste a position straight out of any `cslq` result.
 
 `outline` also takes a bare file path. Anything containing a separator or ending `.cs` is
 treated as a file, never as a symbol.
@@ -79,7 +79,7 @@ Roslyn displays it (`in Greeter (project Core (net10.0))`) — display text, not
 path, so do not parse it.
 
 Source-generated locations print as `<generated>/<project>/<assembly>/<hintName>` and have no
-file on disk. That is a real answer, not an error — read the source with `csx outline` on the
+file on disk. That is a real answer, not an error — read the source with `cslq outline` on the
 symbol, not with a file read. The leading segment is the project that consumed the generator,
 which is the only thing separating two documents one generator emitted into two projects.
 
@@ -96,7 +96,7 @@ target was not what you thought. `diag` and `outline` exit 0 on an empty result,
 to report is an answer.
 
 One trap in `impl`: a member with no implementations does **not** come back empty. Roslyn falls
-through to the declaration, so `csx impl` on an ordinary method prints the same thing `csx def`
+through to the declaration, so `cslq impl` on an ordinary method prints the same thing `cslq def`
 would. Read a single result at the symbol's own declaration as "nothing implements this", not
 as "this implements something".
 
@@ -112,22 +112,22 @@ as "this implements something".
 --no-daemon         start a private server instead of sharing the daemon
 ```
 
-Do not reach for `--sentinel` to speed a run up. By default `csx` waits for every project
+Do not reach for `--sentinel` to speed a run up. By default `cslq` waits for every project
 under the root to load, one probe per project the root's solution lists — or per `.csproj` when
 the root holds no solution, or more than one. `--sentinel` replaces that with a single
 root-scoped probe and drops the guarantee, so `refs`, `impl` and `sym` can come back missing a
 project's hits at exit 0. It is for a workspace whose layout the scan cannot read.
 
-`csx` shares one background server (the daemon) across invocations, so a warm query costs a
+`cslq` shares one background server (the daemon) across invocations, so a warm query costs a
 couple of seconds instead of a full solution load. You do not need to manage it. If a run
-prints `csx: daemon unreachable`, the answer is still correct — it was just slow.
+prints `cslq: daemon unreachable`, the answer is still correct — it was just slow.
 
 ## When a query comes back empty
 
-1. **A root with only a `.csproj` and no solution never loads.** `csx` waits out its whole
+1. **A root with only a `.csproj` and no solution never loads.** `cslq` waits out its whole
    timeout and every query returns nothing. Add a `.sln`/`.slnx`, or point `--root` at a
    directory that has one. This is the most common cause by far.
-2. **A solution at the root is also what scopes readiness.** `csx` waits for every project the
+2. **A solution at the root is also what scopes readiness.** `cslq` waits for every project the
    root's `.sln`/`.slnx` lists, and falls back to scanning for `.csproj` when the root does not
    hold exactly one — none, or several. On a repository carrying template or sample projects the
    solution excludes, that scan waits for projects the server never loaded, so add the
@@ -136,4 +136,4 @@ prints `csx: daemon unreachable`, the answer is still correct — it was just sl
    needing resolved references comes back empty rather than erroring.
 4. **A source generator has to be built** before its output exists. If a generated symbol is
    missing, build the analyzer project.
-5. **Check the symbol with `csx def`** before concluding anything about `refs`.
+5. **Check the symbol with `cslq def`** before concluding anything about `refs`.

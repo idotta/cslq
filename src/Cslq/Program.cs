@@ -2,21 +2,21 @@ using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace Csx;
+namespace Cslq;
 
 internal static partial class Program
 {
     private const string Usage = """
-        csx - semantic C# queries over the official roslyn-language-server
+        cslq - semantic C# queries over the official roslyn-language-server
 
         usage:
-          csx ready   [--sentinel <symbol>]
-          csx refs    <symbol | file:line:col> [--max N] [--context N]
-          csx def     <symbol | file:line:col> [--max N] [--context N]
-          csx impl    <symbol | file:line:col> [--max N] [--context N]
-          csx sym     <query> [--max N]
-          csx outline <file | symbol> [--max N]
-          csx diag    [path] [--errors-only] [--max N] [--context N]
+          cslq ready   [--sentinel <symbol>]
+          cslq refs    <symbol | file:line:col> [--max N] [--context N]
+          cslq def     <symbol | file:line:col> [--max N] [--context N]
+          cslq impl    <symbol | file:line:col> [--max N] [--context N]
+          cslq sym     <query> [--max N]
+          cslq outline <file | symbol> [--max N]
+          cslq diag    [path] [--errors-only] [--max N] [--context N]
 
         options:
           --root <dir>      workspace root (default: current directory)
@@ -43,16 +43,16 @@ internal static partial class Program
         {
             return await RunAsync(argv);
         }
-        catch (CsxException ex)
+        catch (CslqException ex)
         {
-            Console.Error.WriteLine("csx: " + ex.Message);
+            Console.Error.WriteLine("cslq: " + ex.Message);
             return 1;
         }
         catch (OperationCanceledException)
         {
             // Ctrl+C. Without this the cancellation escapes as an unhandled exception and the
             // interrupt is answered with a stack trace and exit 134.
-            Console.Error.WriteLine("csx: interrupted.");
+            Console.Error.WriteLine("cslq: interrupted.");
             return 130;
         }
     }
@@ -88,7 +88,7 @@ internal static partial class Program
             if (opts.Daemon && client.DaemonFallback)
             {
                 Console.Error.WriteLine(
-                    "csx: daemon unreachable; this run used its own cold server");
+                    "cslq: daemon unreachable; this run used its own cold server");
             }
         }
     }
@@ -130,7 +130,7 @@ internal static partial class Program
     private static async Task<int> RefsAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CsxException("refs needs a symbol or file:line:col");
+        var target = opts.Argument ?? throw new CslqException("refs needs a symbol or file:line:col");
 
         // Gate on a sentinel that must exist, never on the symbol being asked about:
         // otherwise a genuinely absent symbol is indistinguishable from a workspace that
@@ -148,7 +148,7 @@ internal static partial class Program
     private static async Task<int> DefAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CsxException("def needs a symbol or file:line:col");
+        var target = opts.Argument ?? throw new CslqException("def needs a symbol or file:line:col");
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -170,7 +170,7 @@ internal static partial class Program
     private static async Task<int> ImplAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CsxException("impl needs a symbol or file:line:col");
+        var target = opts.Argument ?? throw new CslqException("impl needs a symbol or file:line:col");
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -191,7 +191,7 @@ internal static partial class Program
     private static async Task<int> SymAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var query = opts.Argument ?? throw new CsxException("sym needs a query");
+        var query = opts.Argument ?? throw new CslqException("sym needs a query");
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -209,7 +209,7 @@ internal static partial class Program
     private static async Task<int> OutlineAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CsxException("outline needs a file or symbol");
+        var target = opts.Argument ?? throw new CslqException("outline needs a file or symbol");
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -236,8 +236,8 @@ internal static partial class Program
         var full = Path.GetFullPath(Path.Combine(root, path));
 
         if (File.Exists(full)) return PathUri.FromPath(full);
-        if (Directory.Exists(full)) throw new CsxException($"outline needs a file, not a directory: {path}");
-        if (LooksLikePath(path)) throw new CsxException($"no such file: {path}");
+        if (Directory.Exists(full)) throw new CslqException($"outline needs a file, not a directory: {path}");
+        if (LooksLikePath(path)) throw new CslqException($"no such file: {path}");
 
         // Overloads are not ambiguity here: several matches that share a document all outline
         // to the same thing, so collapse by document and only complain if they really differ.
@@ -251,7 +251,7 @@ internal static partial class Program
                 rows.Add("  " + await PathUri.DisplayAsync(root, u, x => client.ProjectOfAsync(x, ct)));
             }
 
-            throw new CsxException(
+            throw new CslqException(
                 $"'{target}' is declared in several documents; pick one:\n{string.Join('\n', rows)}");
         }
 
@@ -290,7 +290,7 @@ internal static partial class Program
             }
             else
             {
-                throw new CsxException($"no such file or directory: {target}");
+                throw new CslqException($"no such file or directory: {target}");
             }
         }
         else
@@ -325,7 +325,7 @@ internal static partial class Program
         if (TryParsePosition(target, out var file, out var line, out var column))
         {
             var full = Path.GetFullPath(Path.Combine(root, file));
-            if (!File.Exists(full)) throw new CsxException($"no such file: {file}");
+            if (!File.Exists(full)) throw new CslqException($"no such file: {file}");
             return (PathUri.FromPath(full), new Position(line - 1, column - 1));
         }
 
@@ -339,7 +339,7 @@ internal static partial class Program
                 rows.Add($"  {FullName(m)}  {display}:{m.Location.Range.Start.Line + 1}");
             }
 
-            throw new CsxException(
+            throw new CslqException(
                 $"'{target}' is ambiguous; qualify it further:\n{string.Join('\n', rows)}");
         }
 
@@ -370,7 +370,7 @@ internal static partial class Program
             var seen = candidates.Count == 0
                 ? string.Empty
                 : "\ncandidates:\n" + string.Join('\n', candidates.Select(c => "  " + FullName(c)));
-            throw new CsxException($"no symbol matched '{target}'{seen}");
+            throw new CslqException($"no symbol matched '{target}'{seen}");
         }
 
         return matches;
@@ -419,7 +419,7 @@ internal static partial class Program
     /// matched but the numbers are unusable. Falling through to the symbol resolver instead
     /// would answer "no symbol matched 'Core/Greeter.cs:0:1'" and dump candidates, when the
     /// real answer is that the position is not one. Zero is rejected with overflow: positions
-    /// are one-based everywhere in <c>csx</c>, and <c>line - 1</c> would otherwise hand Roslyn
+    /// are one-based everywhere in <c>cslq</c>, and <c>line - 1</c> would otherwise hand Roslyn
     /// a negative position, which it throws out of as an unhandled RPC fault.
     /// </summary>
     private static bool TryParsePosition(string spec, out string file, out int line, out int column)
@@ -438,8 +438,8 @@ internal static partial class Program
     }
 
     private static int Coordinate(string text, string name) => int.TryParse(text, out var value)
-        ? value > 0 ? value : throw new CsxException($"{name} is one-based: {text}")
-        : throw new CsxException($"{name} out of range: {text}");
+        ? value > 0 ? value : throw new CslqException($"{name} is one-based: {text}")
+        : throw new CslqException($"{name} out of range: {text}");
 
     /// <summary>
     /// Rejects a file-shaped argument that is not a usable position, so it fails at parse time
@@ -456,7 +456,7 @@ internal static partial class Program
         var segment = argument[(argument.LastIndexOfAny(['/', '\\']) + 1)..];
         if (segment.Contains(':'))
         {
-            throw new CsxException($"'{argument}' is not a position: expected file:line:col");
+            throw new CslqException($"'{argument}' is not a position: expected file:line:col");
         }
     }
 
@@ -510,7 +510,7 @@ internal static partial class Program
             // Naming the solution when there is one: "no .csproj under <root>" would be a
             // lie about a root whose solution simply lists no C# project, and would send the
             // reader looking for files that are sitting right there.
-            throw new CsxException(SolutionFile(root) is { } solution
+            throw new CslqException(SolutionFile(root) is { } solution
                 ? $"{Path.GetFileName(solution)} lists no C# project; point --root at a "
                     + "workspace or pass --sentinel"
                 : $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
@@ -522,7 +522,7 @@ internal static partial class Program
 
         return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
-            : throw new CsxException($"could not infer a readiness sentinel under {root}; pass --sentinel");
+            : throw new CslqException($"could not infer a readiness sentinel under {root}; pass --sentinel");
     }
 
     /// <summary>
@@ -537,7 +537,7 @@ internal static partial class Program
     /// <see cref="NonCode"/> first, because <see cref="TypeDeclaration"/> matches English
     /// prose: "identifying the class and assembly context" in a doc comment yields the
     /// candidate <c>and</c>, a word no <c>workspace/symbol</c> query can resolve. Measured
-    /// 2026-09-06, before the strip: <c>csx ready</c> on OrchardCore v3.0.1 failed after 900s
+    /// 2026-09-06, before the strip: <c>cslq ready</c> on OrchardCore v3.0.1 failed after 900s
     /// on fifteen projects, six of whose candidate lists were <c>'and' / 'and' / 'and'</c> —
     /// one doc comment can fill all three slots, so capping at three is no defence and taking
     /// every match per file rather than the first is not one either.
@@ -575,7 +575,7 @@ internal static partial class Program
     /// The solution is read rather than ignored because <b>over-inclusion is fatal, not merely
     /// wasteful</b>: a <c>.csproj</c> the solution excludes is never loaded, so its types are
     /// never indexed, its sentinel can never resolve, and readiness burns the whole timeout and
-    /// exits 1. Measured 2026-09-06, before this read the solution: <c>csx ready</c> on
+    /// exits 1. Measured 2026-09-06, before this read the solution: <c>cslq ready</c> on
     /// OrchardCore v3.0.1 failed on <c>src/Templates/OrchardCore.ProjectTemplates/content/*</c>,
     /// which is <c>dotnet new</c> template content the solution excludes, and the only way past
     /// it was to point <c>--root</c> below the templates.
@@ -635,7 +635,7 @@ internal static partial class Program
 
     /// <summary>
     /// A hand-edited <c>.slnx</c> that no longer parses is a workspace mistake, not a defect,
-    /// and has to arrive as one: <c>Main</c> catches <see cref="CsxException"/> and nothing
+    /// and has to arrive as one: <c>Main</c> catches <see cref="CslqException"/> and nothing
     /// else, so an escaping <see cref="XmlException"/> answers a bad solution file with an
     /// unhandled stack trace and exit 127.
     /// </summary>
@@ -647,7 +647,7 @@ internal static partial class Program
         }
         catch (XmlException ex)
         {
-            throw new CsxException($"{Path.GetFileName(solution)} is not valid XML: {ex.Message}");
+            throw new CslqException($"{Path.GetFileName(solution)} is not valid XML: {ex.Message}");
         }
     }
 
@@ -697,10 +697,10 @@ internal static partial class Program
             // Here rather than in DispatchAsync's default branch, for the reason the numeric
             // checks are here: everything between the two starts a server and scans the
             // workspace, so a typo would be answered by whatever failed first. It was —
-            // `csx bogus --root <dir with no .csproj>` reported the missing project.
+            // `cslq bogus --root <dir with no .csproj>` reported the missing project.
             string command = argv[0] is var c && Commands.Contains(c)
                 ? c
-                : throw new CsxException($"unknown command '{argv[0]}'\n\n{Usage}");
+                : throw new CslqException($"unknown command '{argv[0]}'\n\n{Usage}");
             string? argument = null;
             var root = Directory.GetCurrentDirectory();
             string? sentinel = null;
@@ -729,14 +729,14 @@ internal static partial class Program
                     case "--json": json = true; break;
                     case "--no-daemon": daemon = false; break;
                     default:
-                        if (argv[i].StartsWith('-')) throw new CsxException($"unknown option '{argv[i]}'");
-                        if (argument is not null) throw new CsxException($"unexpected argument '{argv[i]}'");
+                        if (argv[i].StartsWith('-')) throw new CslqException($"unknown option '{argv[i]}'");
+                        if (argument is not null) throw new CslqException($"unexpected argument '{argv[i]}'");
                         argument = argv[i];
                         break;
                 }
             }
 
-            if (!Directory.Exists(root)) throw new CsxException($"no such directory: {root}");
+            if (!Directory.Exists(root)) throw new CslqException($"no such directory: {root}");
 
             // Here rather than in LocateAsync: that runs after StartAsync and WaitReadyAsync,
             // so `file:0:1` would start a server and wait out readiness before printing an
@@ -751,7 +751,7 @@ internal static partial class Program
 
         private static string Next(string[] argv, ref int i)
         {
-            if (++i >= argv.Length) throw new CsxException($"option '{argv[i - 1]}' needs a value");
+            if (++i >= argv.Length) throw new CslqException($"option '{argv[i - 1]}' needs a value");
             return argv[i];
         }
 
@@ -764,12 +764,12 @@ internal static partial class Program
                 // Overflow is not garbage: `--max 99999999999` is a number, just not one that
                 // fits, and "needs an integer" reads as a lie about the input.
                 var magnitude = text.StartsWith('-') ? text[1..] : text;
-                throw new CsxException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
+                throw new CslqException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
                     ? $"{name} out of range: {text}"
                     : $"{name} needs an integer");
             }
 
-            if (value < floor) throw new CsxException($"{name} needs to be {floor} or more");
+            if (value < floor) throw new CslqException($"{name} needs to be {floor} or more");
             return value;
         }
     }

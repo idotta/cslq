@@ -84,7 +84,7 @@ the use site in `App/Program.cs`.
 A query fired before the workspace loads answers empty rather than erroring, so every command
 waits first. **Ready means every project loaded**, not merely that the server answered
 something: one sentinel only ever proved *some* project was up, and the window that leaves open
-produced `refs`, `impl` and `sym` answers that were silently incomplete at exit 0. So `csx`
+produced `refs`, `impl` and `sym` answers that were silently incomplete at exit 0. So `cslq`
 takes one sentinel per project and requires each to resolve to a location inside that project's
 own directory and **not** inside a project nested within it — never matched by `containerName`,
 which is localised display text. The nested exclusion is not a corner case: `Web/` and
@@ -108,7 +108,7 @@ directions.
 The solution is read because **over-inclusion is not merely wasteful, it is fatal:** a `.csproj`
 the solution excludes is never loaded, so its types are never indexed, its sentinel can never
 resolve, and readiness burns the whole timeout and exits 1. Measured 2026-09-06, before the
-solution was read: `csx ready` on OrchardCore v3.0.1 failed on
+solution was read: `cslq ready` on OrchardCore v3.0.1 failed on
 `src/Templates/OrchardCore.ProjectTemplates/content/*`, which are `dotnet new` template content
 rather than solution projects, and the only way past it was to point `--root` below them.
 
@@ -121,7 +121,7 @@ not on disk is dropped: waiting on one is the same unresolvable sentinel by anot
 root with no project at all fails immediately instead of timing out, naming the solution when
 there is one, because "no .csproj under <root>" would be a lie about a root whose solution
 simply lists no C# project. A `.slnx` that no longer parses fails the same way rather than as
-an unhandled `XmlException`: `Main` catches `CsxException` and nothing else, so a hand-edited
+an unhandled `XmlException`: `Main` catches `CslqException` and nothing else, so a hand-edited
 solution file would otherwise be answered with a stack trace and exit 127. `--sentinel`
 bypasses all of it.
 
@@ -134,7 +134,7 @@ comments: "identifying the class and assembly context" yields the candidate `and
 string literals are therefore stripped before the declaration regex runs. Taking every match in
 a file rather than the first is not sufficient on its own and neither is the cap of three: one
 doc-comment sentence yields `and` / `of` / `for` and fills all three slots, leaving a project
-probed only by words no query can resolve. Measured 2026-09-06: `csx ready` against OrchardCore
+probed only by words no query can resolve. Measured 2026-09-06: `cslq ready` against OrchardCore
 v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
 `'and' / 'and' / 'and'`. Stripping is regex-level, not syntax-aware — parsing would mean a
 Roslyn dependency the README rejects — so several candidates are still kept as a fallback chain
@@ -180,7 +180,7 @@ latestMajor`; `main` has moved to `10.0.302`, which fails against an SDK below i
 
 Scope the *file walk* with a directory argument, not with `--root`: `--root` drives project
 enumeration, so a narrowed root also narrows readiness and stops meaning all-projects-loaded.
-`csx diag <subdir> --root <repo>` keeps the full sentinel set and walks only the subtree.
+`cslq diag <subdir> --root <repo>` keeps the full sentinel set and walks only the subtree.
 
 ## Settled — do not re-litigate
 

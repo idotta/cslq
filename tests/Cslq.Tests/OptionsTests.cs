@@ -1,9 +1,9 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// Argument checking happens before the server starts, deliberately: everything after it
 /// costs a cold load, so a typo answered by whatever failed first is answered minutes late
-/// and about the wrong thing. <c>csx bogus --root &lt;dir with no .csproj&gt;</c> once
+/// and about the wrong thing. <c>cslq bogus --root &lt;dir with no .csproj&gt;</c> once
 /// reported the missing project.
 /// </summary>
 public class OptionsTests
@@ -33,7 +33,7 @@ public class OptionsTests
     [Fact]
     public void An_unknown_command_is_rejected_before_anything_starts()
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["bogus"]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["bogus"]));
 
         Assert.Contains("unknown command 'bogus'", ex.Message, StringComparison.Ordinal);
     }
@@ -41,7 +41,7 @@ public class OptionsTests
     [Fact]
     public void An_unknown_option_is_rejected()
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["refs", "--nope"]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", "--nope"]));
 
         Assert.Contains("unknown option '--nope'", ex.Message, StringComparison.Ordinal);
     }
@@ -49,7 +49,7 @@ public class OptionsTests
     [Fact]
     public void A_second_positional_argument_is_rejected()
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["refs", "A", "B"]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", "A", "B"]));
 
         Assert.Contains("unexpected argument 'B'", ex.Message, StringComparison.Ordinal);
     }
@@ -57,7 +57,7 @@ public class OptionsTests
     [Fact]
     public void An_option_without_a_value_is_rejected()
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["sym", "A", "--max"]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max"]));
 
         Assert.Contains("needs a value", ex.Message, StringComparison.Ordinal);
     }
@@ -72,7 +72,7 @@ public class OptionsTests
     [InlineData("x", "needs an integer")]
     public void A_numeric_option_distinguishes_overflow_from_garbage(string value, string expected)
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["sym", "A", "--max", value]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max", value]));
 
         Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
     }
@@ -80,7 +80,7 @@ public class OptionsTests
     [Fact]
     public void A_max_below_one_is_rejected_but_a_zero_timeout_is_not()
     {
-        Assert.Throws<CsxException>(() => Program.Options.Parse(["sym", "A", "--max", "0"]));
+        Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max", "0"]));
 
         // A zero timeout is how `premature-query-fails-loudly` proves that a query fired
         // before load fails loudly rather than answering empty.
@@ -96,15 +96,15 @@ public class OptionsTests
     [Fact]
     public void A_nonexistent_root_is_rejected()
     {
-        var missing = Path.Combine(Path.GetTempPath(), "csx-tests", Path.GetRandomFileName());
+        var missing = Path.Combine(Path.GetTempPath(), "cslq-tests", Path.GetRandomFileName());
 
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["ready", "--root", missing]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["ready", "--root", missing]));
 
         Assert.Contains("no such directory", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Positions are one-based everywhere in <c>csx</c>. Zero would hand Roslyn a negative
+    /// Positions are one-based everywhere in <c>cslq</c>. Zero would hand Roslyn a negative
     /// position after the <c>line - 1</c>, which it throws out of as an unhandled RPC fault.
     /// </summary>
     [Theory]
@@ -114,7 +114,7 @@ public class OptionsTests
     [InlineData("Core/Greeter.cs:1:", "not a position")]
     public void A_file_shaped_argument_that_is_not_a_position_is_rejected(string spec, string expected)
     {
-        var ex = Assert.Throws<CsxException>(() => Program.Options.Parse(["refs", spec]));
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", spec]));
 
         Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
     }

@@ -8,7 +8,7 @@ namespace Fixture2.Gen;
 /// <summary>
 /// One generator, two consumers, one identical emitted document. That is the whole point of
 /// this fixture: the generated document's URI names the generator assembly and the hint name
-/// -- both identical for Alpha and Beta -- so before csx asked the server which project
+/// -- both identical for Alpha and Beta -- so before cslq asked the server which project
 /// consumed it, the two distinct documents rendered under one label.
 /// </summary>
 [Generator]

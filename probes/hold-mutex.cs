@@ -1,7 +1,7 @@
 // Holds the thin client's daemon-startup mutex so that the next client times out waiting for
 // it and takes its silent non-daemon fallback. That fallback is the whole point: a run that
 // takes it still answers correctly, just cold, and nothing but one stderr line distinguishes
-// it -- so `csx` watches for it, and this is how the watching gets tested.
+// it -- so `cslq` watches for it, and this is how the watching gets tested.
 //
 // A file-based app rather than a project. It needs to be a .NET process because the name and
 // both options belong to the server, not to us: it creates Global\<pipeName>.client with

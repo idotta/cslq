@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/Csx/Csx.csproj" />
+    <ProjectReference Include="../../src/Cslq/Cslq.csproj" />
   </ItemGroup>
 
   <ItemGroup>

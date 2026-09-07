@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using StreamJsonRpc;
 
-namespace Csx;
+namespace Cslq;
 
 internal sealed class LspClient : IAsyncDisposable
 {
@@ -44,7 +44,7 @@ internal sealed class LspClient : IAsyncDisposable
         // output is the same for an agent regardless of the developer's machine locale.
         psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
-        var proc = Process.Start(psi) ?? throw new CsxException("Failed to start the language server.");
+        var proc = Process.Start(psi) ?? throw new CslqException("Failed to start the language server.");
 
         var stderr = new StringBuilder();
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) { lock (stderr) stderr.AppendLine(e.Data); } };
@@ -64,10 +64,10 @@ internal sealed class LspClient : IAsyncDisposable
         {
             await client.InitializeAsync(ct);
         }
-        catch (Exception ex) when (ex is OperationCanceledException or CsxException)
+        catch (Exception ex) when (ex is OperationCanceledException or CslqException)
         {
             // Escapes unchanged, but not uncleaned: without this the client built above is
-            // dropped with its process and RPC connection still live. A CsxException means
+            // dropped with its process and RPC connection still live. A CslqException means
             // initialize was answered and we rejected the answer — the encoding assertion —
             // so the connection-lost wrapping below would be a lie about a live server.
             await client.DisposeAsync();
@@ -83,7 +83,7 @@ internal sealed class LspClient : IAsyncDisposable
             await Task.WhenAny(proc.WaitForExitAsync(ct), Task.Delay(1000, ct));
             var tail = client.StderrTail();
             await client.DisposeAsync();
-            throw new CsxException(
+            throw new CslqException(
                 $"the language server closed the connection during initialize: {ex.Message}{tail}");
         }
 
@@ -95,7 +95,7 @@ internal sealed class LspClient : IAsyncDisposable
         var uri = PathUri.FromPath(Root);
         var init = new InitializeParams(
             Environment.ProcessId,
-            new ClientInfo("csx", "0.1.0"),
+            new ClientInfo("cslq", "0.1.0"),
             "en",
             uri,
             new ClientCapabilities(
@@ -115,8 +115,8 @@ internal sealed class LspClient : IAsyncDisposable
         var encoding = result.Capabilities.PositionEncoding ?? ServerArgs.ExpectedPositionEncoding;
         if (encoding != ServerArgs.ExpectedPositionEncoding)
         {
-            throw new CsxException(
-                $"Server negotiated positionEncoding '{encoding}'; csx assumes '{ServerArgs.ExpectedPositionEncoding}'.");
+            throw new CslqException(
+                $"Server negotiated positionEncoding '{encoding}'; cslq assumes '{ServerArgs.ExpectedPositionEncoding}'.");
         }
 
         await _rpc.NotifyWithParameterObjectAsync("initialized", new { });
@@ -181,7 +181,7 @@ internal sealed class LspClient : IAsyncDisposable
         var skipped = unprobed.Count == 0
             ? string.Empty
             : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.";
-        throw new CsxException(
+        throw new CslqException(
             $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
             $"returned no symbols for project(s) {Names(pending)} " +
             $"(projectInitializationComplete {fired}).{skipped}{StderrTail()}");
@@ -536,7 +536,7 @@ internal sealed class LspClient : IAsyncDisposable
         [JsonRpcMethod("workspace/_roslyn_restorableProjects", UseSingleObjectParameterDeserialization = true)]
         public string[] OnRestorableProjects(JsonElement _) => [];
 
-        // Refresh requests for source-generated documents. csx is one-shot, so there is
+        // Refresh requests for source-generated documents. cslq is one-shot, so there is
         // nothing to invalidate — but answering beats the alternative: an error response on
         // an unexpected server-to-client call, and a bad payload is already known to take the
         // server's whole request queue down with it.

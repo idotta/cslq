@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// <c>workspace/symbol</c> is ranked by relevance — exact, then prefix, then substring,

@@ -3,7 +3,7 @@ using Fixture.Core;
 namespace Fixture.App;
 
 /// <summary>
-/// The cross-project half of the `csx impl` fixture -- see `Fixture.Core.IShape`. Named to
+/// The cross-project half of the `cslq impl` fixture -- see `Fixture.Core.IShape`. Named to
 /// sort after `Program.cs` so `Program.InferSentinel`, which walks the tree in path order,
 /// keeps picking `Program`.
 /// </summary>

@@ -1,4 +1,4 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// The thin client forwards options it does not recognise straight through to the underlying

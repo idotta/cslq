@@ -3,8 +3,9 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-06, after the generated-document label and the readiness-scoping test
-closed Milestone 4. Every milestone is done. Output tuning held two concrete changes: `sym`
+Last updated: 2026-09-06, after a shippability review opened Milestone 5. Milestones 1-4 are
+done; what remains is everything between "works on this clone" and "someone else can use it",
+listed under Milestone 5 below. Output tuning held two concrete changes: `sym`
 applies `--max` in the server's relevance order and sorts only what survives, so a capped
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
@@ -38,10 +39,11 @@ at all; that stays a one-line coupling at the call site.
 | 2 | The hard fixture cases and the read commands | **done** |
 | 3 | Daemon mode, then `skill/SKILL.md` | **done** |
 | 4 | Remaining commands and output tuning | **done** |
+| 5 | Shippable: install path, first-run errors, metadata symbols, docs, CI | **open** |
 
 ## Milestone 1 — the loop works (done)
 
-`csx ready` and `csx refs`, a fixture with a cross-project reference, six probe cases, and
+`cslq ready` and `cslq refs`, a fixture with a cross-project reference, six probe cases, and
 `bump.yml` / `probe.yml` both green. The full pin → bump → probe → PR loop was exercised against
 a deliberately stale pin and opens a PR carrying a passing `probes` status.
 
@@ -62,7 +64,7 @@ Fixture:
       `--sourceGeneratorExecutionPreference` was not needed at the default `Automatic`, and
       `workspace/_roslyn_refreshSourceGenerators` now has a stub handler. **Still untested:**
       staleness itself, and it is *blocked*, not merely undone — see the Milestone 3 item.
-      `csx` is one-shot: every invocation starts its own server and loads the workspace cold,
+      `cslq` is one-shot: every invocation starts its own server and loads the workspace cold,
       so a probe case that mutates the fixture between two invocations exercises a cold load
       of changed sources and says nothing about whether a cached generated symbol is
       refreshed. Nothing can reach that path until a single server outlives an edit.
@@ -72,14 +74,14 @@ Fixture:
       a surrogate pair catches code that counts runes or UTF-8 bytes.
       `fixture/Core/Party.cs` declares `Cheer` on an emoji-bearing line; `App/Program.cs:11`
       calls it with the emoji *before* the call, putting `Cheer` at UTF-16 column 39 (rune
-      counting gives 38, UTF-8 bytes 41). No code in `csx` counts characters today —
+      counting gives 38, UTF-8 bytes 41). No code in `cslq` counts characters today —
       `LocateAsync` forwards the caller's column and `Output` renders the server's — so these
       cases pin the server staying UTF-16 behaviourally, `didOpen` text matching what Roslyn
       parses off disk, and insurance for `def` / `outline` later. **Known gap:** the position
       case catches a rune-counting error (column 38 lands on the `.` and resolves `Party`, so
       the case fails) but not a UTF-8 one (41 is still inside `Cheer`); the `'column': 39`
       assertion in the JSON case is what covers that direction.
-- [x] One **deliberate type error** for `csx diag`. It must live in **App**, or a new
+- [x] One **deliberate type error** for `cslq diag`. It must live in **App**, or a new
       project — never in Core. `probes/run.sh` compiles Core to arm its `CS9057` guard (the
       analyzer-vs-compiler version mismatch that otherwise degrades to a silently absent
       generated symbol), so an uncompilable Core would disarm that guard permanently.
@@ -93,7 +95,7 @@ Fixture:
 
 Commands:
 
-- [x] `csx def <file>:<line>:<col>` — also accepts `Namespace.Type.Member`. Renders through the
+- [x] `cslq def <file>:<line>:<col>` — also accepts `Namespace.Type.Member`. Renders through the
       same `Output.WriteLocationsAsync` as `refs`; empty exits 1. **Verified on the wire, since
       the plan turned on it:** `textDocument/definition` fired *at* a declaration returns that
       declaration (count 1), not empty, so the symbol form is safe and keeps its server round
@@ -105,14 +107,14 @@ Commands:
       `run.sh` can only assert that a substring *appears*. `def-symbol` cannot be distinguished
       from printing `LocateAsync`'s own answer by any external assertion — the two are
       identical by construction — so it is regression coverage, not endpoint coverage.
-- [x] `csx diag [path] [--errors-only]`. Calls `textDocument/diagnostic` optimistically; the
+- [x] `cslq diag [path] [--errors-only]`. Calls `textDocument/diagnostic` optimistically; the
       dynamic `client/registerCapability` is still accepted and discarded. `workspace/diagnostic`
       was tried and dropped: the server answers it but returns **zero reports**, matching the
       `workspaceDiagnostics: false` in that registration, and the call is specified as a long
       poll, so attempting it only bought a timeout. With no argument, `diag` walks the `.cs`
       files under `--root` instead (`Program.SourceFiles`, shared with the sentinel inference).
       Exit code is 0 whenever the query was answered — a clean file is a successful `diag`.
-- [x] `csx outline <file | symbol>` via `textDocument/documentSymbol`. Hierarchical: the client
+- [x] `cslq outline <file | symbol>` via `textDocument/documentSymbol`. Hierarchical: the client
       declares `hierarchicalDocumentSymbolSupport`, and that capability's property name has to
       serialise to `textDocument.documentSymbol` or the server quietly falls back to the flat
       `SymbolInformation[]` form. Output is the one documented exception to DESIGN.md's output
@@ -162,12 +164,12 @@ staleness is already reachable without any client work.
 - [x] **Decided: daemon on by default, `--no-daemon` to opt out.** ~3.2x on `refs` is the whole
       value for an agent, and the cold path stays reachable for anyone who needs it.
       `probes/run.sh` keeps its cold-load coverage by scoping itself with
-      `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=csx-probe-$$` plus a 60 s keepalive, so the suite
+      `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=cslq-probe-$$` plus a 60 s keepalive, so the suite
       gets a daemon of its own rather than inheriting whatever the developer's session left
       running — a stale daemon would otherwise let the gate lie. Accepted costs: `--log-level`
       against an already-running daemon is silently a no-op (the daemon takes its configuration
       from whoever launched it), and the silent non-daemon fallback is now the *default* path's
-      failure mode, which is why `csx` reports it. `no-daemon-refs` is the one case that
+      failure mode, which is why `cslq` reports it. `no-daemon-refs` is the one case that
       still runs a dedicated server, since the whole suite would otherwise stop covering that
       path — which is also the path a fallback takes.
 - [x] Verify what a second concurrent client gets. It **shares** the first client's daemon; the
@@ -175,7 +177,7 @@ staleness is already reachable without any client work.
       documented design. One daemon served two different `--root`s with no symbol leakage in
       either direction, order-independent; three simultaneous clients all exited 0.
 - [x] Verify the daemon survives killing the first client's whole process tree. It does —
-      `taskkill /T /F` on the `csx` chain left the daemon up and the next client reconnected to
+      `taskkill /T /F` on the `cslq` chain left the daemon up and the next client reconnected to
       the same pid. Our own `shutdown` + `exit` does not kill it either.
 - [x] `--daemonKeepAlive` / `ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE` confirmed: default 900 s
       after the last client disconnects, and the env var propagates by plain inheritance through
@@ -191,17 +193,17 @@ staleness is already reachable without any client work.
       rename does not touch, so absence is never concluded from an unloaded workspace; the
       legs run in order because only restore-and-present proves the daemon is still live. A
       `trap ... EXIT` restores `fixture/Core/Greeter.cs` even on failure.
-- [x] Assert on the silent non-daemon fallback. `csx` **detects** it — `LspClient` scans the
+- [x] Assert on the silent non-daemon fallback. `cslq` **detects** it — `LspClient` scans the
       thin client's stderr for `Falling back to non-daemon mode` /
       `Running language server in non-daemon fallback mode` and prints
-      `csx: daemon unreachable; this run used its own cold server`, read after the command
+      `cslq: daemon unreachable; this run used its own cold server`, read after the command
       rather than right after connecting because the marker races the initialize response.
       `non-daemon-fallback-reported` at the end of `run.sh` **forces** one: the thin client
       falls back when it times out waiting for a mutex named `Global\<pipeName>.client`
       (~20 s), so `probes/hold-mutex.cs` holds it while one client starts. The case needs its
       own pipe name — the mutex only guards check-server-then-launch, so a client that finds a
       daemon already listening never contends for it — and asserts both exit 0 (a fallback run
-      still answers, which is what makes it silent) and the warning (that `csx` noticed).
+      still answers, which is what makes it silent) and the warning (that `cslq` noticed).
       **No new project was needed**, which was the reason this was briefly deferred: .NET 10
       runs a bare `.cs` file, and `dotnet run probes/hold-mutex.cs` compiles in under a second.
       Two traps in that holder, both of which look like the mechanism not working rather than
@@ -227,7 +229,7 @@ Three client bugs surfaced while measuring, all fixed here:
   docstring had already noticed the warm case; the code had not acted on it. `--timeout 0`
   still issues no query at all, so `premature-query-fails-loudly` still pins the timeout guard.
 - **An initialize-time connection loss escaped as an unhandled `ConnectionLostException`** and
-  discarded the server's stderr — the only thing that says why. It is now a `CsxException`
+  discarded the server's stderr — the only thing that says why. It is now a `CslqException`
   carrying `StderrTail()`, after a bounded wait for the process to finish exiting so stderr is
   flushed. This is what turned the fallback experiment above from "connection lost" into the
   exact mutex name and file:line.
@@ -246,11 +248,11 @@ Three client bugs surfaced while measuring, all fixed here:
 the entire triggering mechanism and should lean pushy, since skills under-trigger. Body under
 ~500 lines, command reference inline. Include an explicit "task → use this command → do NOT use
 grep/read for this" table, which is the part that actually changes agent behaviour. Tell the
-agent to run `csx ready` once at session start.
+agent to run `cslq ready` once at session start.
 
 ## Milestone 4 — the rest
 
-- [x] `csx impl <symbol | file:line:col>` via `textDocument/implementation`. Structurally
+- [x] `cslq impl <symbol | file:line:col>` via `textDocument/implementation`. Structurally
       `DefAsync`: same `LocateAsync`, same `SettleAsync` decompilation guard, same
       `Output.WriteLocationsAsync`. No `Protocol.cs` edit — `TextDocumentPositionParams`
       already existed — and no two-shape reader, for a stronger reason than `def` has: the
@@ -270,7 +272,7 @@ agent to run `csx ready` once at session start.
       one compilation and passes even with cross-project binding broken. Neither file touches
       `Greet`, `Farewell` or `Cheer`, so every pinned reference count is undisturbed, and
       `Square.cs` sorts after `Program.cs` so `InferSentinel` still picks `Program`.
-- [x] `csx sym <query>` — `workspace/symbol` was already wired up in `LspClient.SymbolsAsync`.
+- [x] `cslq sym <query>` — `workspace/symbol` was already wired up in `LspClient.SymbolsAsync`.
       A search, not a resolution: the query goes to the server as written, with no dotted
       narrowing, no ambiguity error and no candidate dump, since several matches are the
       point. Renders through a new `Output.WriteSymbols` — see the DESIGN.md note on why it
@@ -303,16 +305,107 @@ agent to run `csx ready` once at session start.
       way it does `fixture/Core`.
       Nothing else was ever written down under this item, so it closes with it.
 
+## Milestone 5 — shippable
+
+Opened 2026-09-06 from a review of what a user who is not this repository would hit. Every
+finding below was reproduced on a scratch two-project solution outside the repo, driven by the
+Debug binary from `src/Cslq/bin`, unless it says otherwise. The order is the order to do them in:
+nothing after item 1 matters to a user who cannot start `cslq`.
+
+- [ ] **Resolve the server pin from somewhere an installed binary can reach.**
+      `ServerArgs.ToolManifestRoot` walks up from `AppContext.BaseDirectory` — the *binary's*
+      directory, not the cwd or `--root` — for `.config/dotnet-tools.json`, and `LspClient`
+      uses that as the server's working directory. So `cslq` works from any cwd today, but only
+      while the binary still sits under this repository; copied to `~/.dotnet/tools` or
+      anywhere else it throws at startup, and no packaging is meaningful until this is settled.
+      **Decided: ship the manifest inside the tool package.** A global tool's binary lands at
+      `~/.dotnet/tools/.store/<id>/<v>/<id>/<v>/tools/net10.0/any/`, and a local install has
+      the same `tools/net10.0/any/` shape in the NuGet cache; pack `.config/dotnet-tools.json`
+      into that directory (`<None Include="../../.config/dotnet-tools.json" Pack="true"
+      PackagePath="tools/net10.0/any/.config/" />`) and the existing `ToolManifestRoot` walk
+      finds it on its first step, with `LspClient` already using that directory as the
+      server's working directory. The pin then travels with the `cslq` version — a bump PR
+      bumps both and a release ships both — and the user never types `--prerelease` or learns
+      the server exists. On the not-restored failure, run `dotnet tool restore` in that
+      directory once and retry; it is idempotent, and the message should name the one-time
+      ~300 MB download. Rejected: resolving the manifest from `--root` (every target repo
+      would have to carry the server pin), a separately installed global
+      `roslyn-language-server` (loses the pin, so the probe gate guards nothing), a
+      self-contained single-file binary (the server needs `dotnet` regardless), and
+      referencing the server package directly (`DotnetTool` packages cannot be referenced).
+      The tool was `csx` until 2026-09-06 and was renamed for this: `.csx` is the C# script
+      extension, `dotnet-script` owns the word, and the nuget ID was already taken (2.0.3).
+      `cslq` was free on nuget.org that day, so `PackageId` and `ToolCommandName` are both
+      `cslq`; check again before the first push.
+      Then `PackAsTool` / `Version` / licence metadata in `Cslq.csproj`, a `--version` flag
+      (the only version string today is the hard-coded `ClientInfo("cslq", "0.1.0")` in
+      `initialize`, never printed), and a tag-triggered `dotnet pack` + `dotnet nuget push`
+      workflow behind a nuget.org API key secret, with bump PRs also bumping `Version` so a
+      new pin is a new release. `--help` should also work in any position; `cslq refs Foo
+      --help` is currently `unknown option`.
+- [ ] **First-run failures must be `cslq:` messages, not stack traces.** `Main` catches only
+      `CslqException` and cancellation. With `dotnet` off `PATH`, `Process.Start` escapes as an
+      unhandled `Win32Exception` with a stack trace and exit 127 — the first-time-user case
+      exactly. An unrestored tool surfaces the server's stderr tail but never says to run
+      `dotnet tool restore`. And a root with no solution burns the whole timeout before
+      exiting 1 — measured with the scratch solution's `.slnx` removed: two bare `.csproj`
+      never loaded, matching the "Verified facts" entry that `--autoLoadProjects` does not
+      discover a bare project. Since `ProjectDirectories` already reads the root's solution,
+      "no solution at `--root`" is knowable before the server starts and should fail fast;
+      the `.csproj`-scan fallback then earns its keep only for roots holding several
+      solutions, which the error should say.
+- [ ] **README install section, and stop the docs disagreeing.** README has no
+      prerequisites, no clone → `dotnet tool restore` → build → where-the-binary-lands, and no
+      note that the first restore is ~300 MB; it opens with `cslq ready` as if `cslq` were on
+      `PATH`, and `skill/SKILL.md` assumes the same without saying how it gets there. README's
+      status line still says Milestone 4 is in progress; its probe count ("fifty-seven") and
+      this file's ("60") both disagree with `cases.jsonl` (55 rows plus the staleness and
+      fallback legs); its latency tables are dated 2026-09-04 and labelled "debug build" while
+      the gate builds Release; and this file cited `Program.QuerySymbolsAsync`, which no longer
+      exists — `MatchSymbolsAsync` does one query. `SKILL.md` should also surface the two
+      known readiness limits from DESIGN.md rather than attributing every empty answer to
+      user setup. `TestResults/` belongs in `.gitignore`: MTP writes there and it is only
+      untracked today because it is empty.
+- [ ] **Metadata symbols answer instead of being suppressed, and there is a way to ask what
+      something is.** `def` at `Console.WriteLine` waited ~12 s in `SettleAsync`'s
+      decompilation guard, then once returned `no results` at exit 1 and once returned a
+      machine-absolute `MetadataAsSource` temp path; `outline System.Console` exits 1.
+      `PathUri.IsDecompiled` treats every metadata answer as the not-yet-loaded fingerprint,
+      which was right for a `ProjectReference` still bound to a built assembly and wrong for a
+      framework or NuGet type, where decompiled *is* the answer. The two need telling apart —
+      the sentinel-per-project readiness makes the first case rare enough that the guard may
+      now be doing more harm than good, but re-measure before removing it. Separately, no
+      command answers "what type is this, what are the parameters": no `textDocument/hover`
+      or `signatureHelp` is wired, and it is the most common question an agent has. Also in
+      this bucket, because they are contract holes an agent trips on: `ready` prints the
+      literal `ready` under `--json`, breaking the `{count, truncated, results}` envelope on
+      the one command every session runs first; the two ambiguity candidate dumps in `Program`
+      ignore `--max`, so a broad ambiguous target floods the context the output rules exist to
+      protect; and `ProjectOfAsync` already resolves which project compiles a file and its
+      TFM but is only called for generated URIs — a `cslq project <file>` is nearly free.
+- [ ] **A Windows CI leg, a format gate, and a `permissions:` block.** Both workflows run
+      `ubuntu-latest` only, while the non-ASCII and mutex cases are the two host-dependent
+      ones and the Git Bash console is where they would go red. `dotnet format
+      --verify-no-changes` runs nowhere in CI. `probe.yml` declares no `permissions:`. And
+      `IsUnder` plus the URI dictionaries compare paths `OrdinalIgnoreCase` on Linux too — a
+      latent bug on the platform CI actually runs, unflagged anywhere. Not worth doing: a
+      separate unit-test job; the tests run in under a second inside `run.sh`, and a second
+      workflow would only duplicate the restore.
+
+Considered and left out: `cslq daemon status/stop` (the daemon is unmanaged by design — see
+README and `SKILL.md`), and any change to what `--log-level` does against a daemon someone else
+started, which stays an accepted cost.
+
 ## Acceptance criteria
 
 - [x] `.config/dotnet-tools.json` pins `roslyn-language-server`; `dotnet tool restore` reproduces it
 - [x] Zero non-Microsoft C#-specific dependencies in the query path
-- [x] `csx refs` on a cross-project symbol returns correct `file:line` plus context
-- [x] `csx refs` on a source-generated symbol resolves
+- [x] `cslq refs` on a cross-project symbol returns correct `file:line` plus context
+- [x] `cslq refs` on a source-generated symbol resolves
 - [x] Column positions correct on the non-ASCII fixture line
-- [x] `csx diag` finds the deliberate error and does *not* report it before load completes
-- [x] `csx def` resolves from a use, a symbol and a source-generated symbol
-- [x] `csx outline` renders a nested document outline, including a generated document
+- [x] `cslq diag` finds the deliberate error and does *not* report it before load completes
+- [x] `cslq def` resolves from a use, a symbol and a source-generated symbol
+- [x] `cslq outline` renders a nested document outline, including a generated document
 - [x] Probe suite fails loudly when the server returns empty due to premature querying
 - [x] `bump.yml` opens a PR that is gated (see the `probes` commit status caveat in the README)
 - [x] Two concurrent clients work (sharing one daemon); daemon survives killing client 1's
@@ -323,21 +416,33 @@ agent to run `csx ready` once at session start.
 - [x] A source-generated symbol disappears when what the generator keys on is renamed on
       disk, and comes back when it is restored, against a daemon that outlives both queries
 - [x] A run that silently fell back to a non-daemon server says so, and a probe forces one
-- [x] `skill/SKILL.md` exists and tells an agent not to grep for what `csx` answers
-- [x] `csx impl` resolves an interface member to implementers in two different projects
-- [x] `csx sym` searches the workspace by name, including a source-generated declaration
+- [x] `skill/SKILL.md` exists and tells an agent not to grep for what `cslq` answers
+- [x] `cslq impl` resolves an interface member to implementers in two different projects
+- [x] `cslq sym` searches the workspace by name, including a source-generated declaration
 - [x] Readiness means every project loaded, not just one, so no command can answer with a
       cross-project hit missing at exit 0
 - [x] The pure logic below the transport is unit-tested, and `probes/run.sh` runs those tests
       before it starts a server
 - [x] Readiness waits for the projects the root's solution lists, so a repository carrying
       `.csproj` files the solution excludes does not time out
-- [x] `csx` answers about its own repository: `csx ready --root .` and a `refs` that crosses
-      from `src/Csx` into `tests/`
+- [x] `cslq` answers about its own repository: `cslq ready --root .` and a `refs` that crosses
+      from `src/Cslq` into `tests/`
 - [x] A generated document's label names the project that consumed the generator, so one
       generator emitting into two projects renders two distinct labels rather than one
 - [x] The nested-project half of readiness scoping is pinned by a test: a hit under
       `Web/Tests/` does not mark `Web/` ready
+- [ ] `cslq` installed outside this repository — a global tool or a copied binary — starts and
+      answers; `cslq --version` prints the version a release is tagged with
+- [ ] `dotnet` missing, the tool not restored, and a root with no solution each produce a
+      one-line `cslq:` message naming the fix, with no stack trace and no timeout
+- [ ] README tells a new user how to install `cslq` and the skill, and README, this file and
+      `cases.jsonl` agree on the case count
+- [ ] `cslq def` on a framework member returns its decompiled declaration without a 10 s
+      stall, and a project-reference-still-bound-to-metadata answer is still told apart
+- [ ] An agent can ask what a symbol is — type and signature — with one command
+- [ ] `cslq ready --json` honours the envelope; ambiguity listings honour `--max`
+- [ ] The probe suite runs green on a Windows runner as well as `ubuntu-latest`, and
+      `dotnet format --verify-no-changes` gates every PR
 
 ## Verified facts, and when
 
@@ -369,9 +474,9 @@ against 5.12.0-1.26426.8 / win-x64.
   before**, where the notification already fired for the previous root and never fires again —
   which is exactly the case the notification cannot be used to close. Verified 2026-09-05.
 - A `.cs` file that **no project compiles** is answered for asymmetrically: `workspace/symbol`
-  does not index it (`csx sym` on a type declared only there exits 1 with `no results`) and
+  does not index it (`cslq sym` on a type declared only there exits 1 with `no results`) and
   `textDocument/diagnostic` reports **nothing** for it, but `textDocument/documentSymbol` still
-  answers off the syntax tree, so `csx outline` works. The same file **linked into** a project
+  answers off the syntax tree, so `cslq outline` works. The same file **linked into** a project
   from outside its directory (`<Compile Include="../Ambient/Stray.cs" />`) is fully indexed and
   reports its errors. This is why readiness inference is scoped to project directories while
   `diag`'s file walk is not: scoping the walk would suppress no noise and would silently drop a
@@ -381,7 +486,7 @@ against 5.12.0-1.26426.8 / win-x64.
   `skill/SKILL.md`'s "a root with only a `.csproj` and no solution never loads". That entry
   already covers `.slnx` and stands. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
-  a server-to-client request and carries none, so `csx` enumerates `.csproj` files instead and
+  a server-to-client request and carries none, so `cslq` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.
 - **`textDocument/diagnostic` does not answer from the misc-files state and then correct
   itself -- it blocks until the document is bound.** A cross-project error opened as the first
@@ -395,17 +500,17 @@ against 5.12.0-1.26426.8 / win-x64.
   Fixture (11 files, 3 projects): ~2.5 s fixed per invocation -- process start, sentinel
   inference, readiness -- then ~560 ms per file warm and ~1080 ms cold. The first `diag` of a
   document in a fresh daemon costs ~4 s more than any later one. Any per-file number taken from
-  an undecomposed wall clock is wrong; `csx` never sends `didClose`, so daemon document state
+  an undecomposed wall clock is wrong; `cslq` never sends `didClose`, so daemon document state
   outlives the client that opened it. Verified 2026-09-06.
 - **Sentinel inference matched English prose, and one bad line could sink a project.**
   Candidates were the *first* regex match per file, and the regex matches
   `class|struct|record|interface|enum` followed by a word -- so "identifying the class and
   assembly context" in a doc comment yielded the candidate `and` and masked the real type below
-  it. `csx ready` on OrchardCore v3.0.1 failed after 900 s on fifteen projects, six with
+  it. `cslq ready` on OrchardCore v3.0.1 failed after 900 s on fifteen projects, six with
   `'and' / 'and' / 'and'`. Taking every match per file instead cut that to two, both of which
   are `dotnet new` template content excluded from the solution -- Roslyn never loads them, so
   the `.csproj` scan's over-inclusion is fatal there, not merely wasteful. Scoped below the
-  templates, `csx ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
+  templates, `cslq ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
   Verified 2026-09-06 against 5.12.0-1.26426.8. **Superseded as the workaround:**
   `ProjectDirectories` now reads the root's solution when there is exactly one, and
   `OrchardCore.slnx` excludes precisely those template projects, so `--root` no longer has to
@@ -416,8 +521,8 @@ against 5.12.0-1.26426.8 / win-x64.
   what keeps `fixture/Fixture.slnx` from narrowing a root above it. `.slnf` is not read, a listed
   project that is not on disk is dropped, and a root whose solution lists no C# project is named
   in the error rather than reported as "no .csproj under <root>". This also made the repository
-  self-hosting: `Csx.slnx` lists `src/Csx` and `tests/Csx.Tests` and excludes `fixture/`, so
-  `csx ready --root .` resolves in ~6 s where it previously waited out the whole timeout on the
+  self-hosting: `Cslq.slnx` lists `src/Cslq` and `tests/Cslq.Tests` and excludes `fixture/`, so
+  `cslq ready --root .` resolves in ~6 s where it previously waited out the whole timeout on the
   three fixture projects Roslyn had not loaded. Cases `self-hosted-ready` and `self-hosted-refs`.
   Verified 2026-09-06 against 5.12.0-1.26426.8.
 - **`workspace/symbol` ranks its answer by relevance, globally.** Measured on a scratch copy of
@@ -468,7 +573,7 @@ flag and env-var names that appear in no `--help`.
 - **The launch chain is four processes deep**, and the middle one is deliberate:
 
   ```
-  csx
+  cslq
    └─ dotnet tool run
        └─ roslyn-language-server.exe --daemon-mode --stdio --autoLoadProjects --logLevel L
            └─ roslyn-language-server.exe --daemon-launch   (bootstrap, exits immediately)
@@ -487,7 +592,7 @@ flag and env-var names that appear in no `--help`.
   server is documented as "run as a multi-client daemon".
 - **The daemon takes its configuration from whoever launched it.** It inherits the *first*
   client's `--autoLoadProjects` and `--logLevel`, both visible in its cmdline; later clients only
-  connect. So `csx --log-level Debug` is silently a no-op against an already-running daemon.
+  connect. So `cslq --log-level Debug` is silently a no-op against an already-running daemon.
   Inferred from the observed cmdline, not separately tested.
 - **`ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=<literal>`** yields a fully isolated daemon under
   that exact name; a client without it starts a separate daemon alongside. This is the per-run
@@ -497,7 +602,7 @@ flag and env-var names that appear in no `--help`.
 - **There is a silent non-daemon fallback.** The dll carries "Falling back to non-daemon mode"
   and "Running language server in non-daemon fallback mode" (a daemon startup-mutex timeout, for
   one). A fallback run still answers correctly, just cold — nothing but latency or that stderr
-  line distinguishes it, which is why `csx` watches for it. Forced deliberately by
+  line distinguishes it, which is why `cslq` watches for it. Forced deliberately by
   `non-daemon-fallback-reported`: the client mutex is named `Global\<pipeName>.client`, created
   with .NET 10's `NamedWaitHandleOptions { CurrentUserOnly = true }` — a same-named mutex
   without that option makes the thin client throw `WaitHandleCannotBeOpenedException` rather

@@ -1,7 +1,7 @@
 namespace Fixture.Core;
 
 /// <summary>
-/// One type declared across two documents. This is the shape `csx outline` has to refuse
+/// One type declared across two documents. This is the shape `cslq outline` has to refuse
 /// rather than pick from, and it is not the same thing as an overload: overloads share a
 /// document and collapse to one outline, so `OutlineTargetAsync` only complains when the
 /// documents differ. Nothing else in the fixture produces more than one declaration of a
