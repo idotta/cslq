@@ -16,7 +16,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_solution_narrows_discovery_to_the_projects_it_lists()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         var included = ws.Project("Included");
         ws.Project("Templates/Content/Excluded");
         ws.Write("Included/Real.cs", "internal class Real;");
@@ -35,7 +35,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_solution_folder_does_not_hide_the_projects_inside_it()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         var app = ws.Project("src/App");
         ws.Project("samples/Sample");
         ws.Write("src/App/Real.cs", "internal class Real;");
@@ -59,7 +59,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void The_older_sln_format_is_read_the_same_way_including_its_backslashes()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         var included = ws.Project("Included");
         ws.Project("Excluded");
         ws.Write("Included/Real.cs", "internal class Real;");
@@ -84,7 +84,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_listed_project_that_is_not_on_disk_is_dropped()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         var real = ws.Project("Real");
         ws.Project("Excluded");
         ws.Write("Real/Thing.cs", "internal class Thing;");
@@ -102,7 +102,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_project_that_is_not_csharp_is_dropped()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         var app = ws.Project("App");
         ws.Project("Excluded");
         ws.Write("App/Real.cs", "internal class Real;");
@@ -120,12 +120,12 @@ public class ProjectDiscoveryTests
 
     /// <summary>
     /// Two solutions give no basis for choosing between them, so the scan — over-inclusive but
-    /// never short — answers instead.
+    /// never short — answers instead. This is the only thing the scan is still for.
     /// </summary>
     [Fact]
     public void Two_solutions_fall_back_to_the_scan()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         ws.Project("One");
         ws.Project("Two");
         ws.Write("One/A.cs", "internal class A;");
@@ -145,14 +145,14 @@ public class ProjectDiscoveryTests
     }
 
     /// <summary>
-    /// A solution in a subdirectory describes that subtree, not this root — which is the
-    /// repository's own shape, where <c>fixture/Fixture.slnx</c> must not narrow a root above
-    /// it.
+    /// A solution in a subdirectory describes that subtree, not this root — so a root holding
+    /// only that is a root with no solution, and says so rather than scanning the projects up
+    /// to it.
     /// </summary>
     [Fact]
     public void A_solution_below_the_root_is_not_the_roots_solution()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         ws.Project("Sub/One");
         ws.Project("Loose");
         ws.Write("Sub/One/A.cs", "internal class A;");
@@ -163,7 +163,46 @@ public class ProjectDiscoveryTests
             </Solution>
             """);
 
-        Assert.Equal(2, Program.InferSentinels(ws.Root).Count);
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
+
+        Assert.Equal(Program.NoSolution(ws.Root), ex.Message);
+    }
+
+    /// <summary>
+    /// The failure this replaced: two bare <c>.csproj</c> under the root loaded the scan's
+    /// projects, then burned the whole timeout, because <c>--autoLoadProjects</c> does not
+    /// discover a bare project. It is knowable before the server starts.
+    /// </summary>
+    [Fact]
+    public void A_root_with_no_solution_fails_before_the_server_starts()
+    {
+        using var ws = new Workspace(solution: false);
+        ws.Project("One");
+        ws.Project("Two");
+        ws.Write("One/A.cs", "internal class A;");
+        ws.Write("Two/B.cs", "internal class B;");
+
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
+
+        Assert.Equal(Program.NoSolution(ws.Root), ex.Message);
+    }
+
+    /// <summary>
+    /// The message has to name the fix, not just the symptom: the root is in the wrong place,
+    /// and the reader has to be told where it belongs. It must not offer <c>--sentinel</c>,
+    /// which does bypass the check but leaves Roslyn loading nothing — the reader would follow
+    /// the hint into the full timeout this error exists to remove.
+    /// </summary>
+    [Fact]
+    public void The_no_solution_message_names_the_root_and_the_fix()
+    {
+        var message = Program.NoSolution("/some/where");
+
+        Assert.Contains("no .sln or .slnx at /some/where", message, StringComparison.Ordinal);
+        Assert.Contains("--root must be the directory holding the .sln/.slnx", message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("--sentinel", message, StringComparison.Ordinal);
+        Assert.Single(message.Split('\n'));
     }
 
     /// <summary>
@@ -174,7 +213,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_solution_that_is_not_valid_xml_fails_as_a_cli_error()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         ws.Project("App");
         ws.Write("App/Real.cs", "internal class Real;");
         ws.Write("Broken.slnx", """
@@ -195,7 +234,7 @@ public class ProjectDiscoveryTests
     [Fact]
     public void A_solution_listing_no_csharp_project_is_named_in_the_error()
     {
-        using var ws = new Workspace();
+        using var ws = new Workspace(solution: false);
         ws.Project("App");
         ws.Write("App/Real.cs", "internal class Real;");
         ws.Write("Only.slnx", """

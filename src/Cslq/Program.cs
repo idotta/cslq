@@ -515,22 +515,26 @@ internal static partial class Program
     /// rather than leaving it silently absent from readiness.
     /// </para>
     /// <para>
-    /// A root with no <c>.csproj</c> under it fails immediately. Roslyn loads nothing for such
-    /// a root, so every sentinel is unresolvable and every query answers empty: waiting out the
-    /// full timeout only delays the same conclusion. <c>--sentinel</c> bypasses this, which is
-    /// the escape hatch for a layout the scan cannot read.
+    /// A root with no solution, or none with a <c>.csproj</c> under it, fails immediately.
+    /// Roslyn loads nothing for such a root, so every sentinel is unresolvable and every query
+    /// answers empty: waiting out the full timeout only delays the same conclusion.
+    /// <c>--sentinel</c> bypasses this, which is the escape hatch for a layout the scan cannot
+    /// read.
     /// </para>
     /// </summary>
     internal static IReadOnlyList<Sentinel> InferSentinels(string root)
     {
-        var projects = ProjectDirectories(root);
+        var solutions = Solutions(root);
+        if (solutions.Count == 0) throw new CslqException(NoSolution(root));
+
+        var projects = ProjectDirectories(root, solutions);
         if (projects.Count == 0)
         {
             // Naming the solution when there is one: "no .csproj under <root>" would be a
             // lie about a root whose solution simply lists no C# project, and would send the
             // reader looking for files that are sitting right there.
-            throw new CslqException(SolutionFile(root) is { } solution
-                ? $"{Path.GetFileName(solution)} lists no C# project; point --root at a "
+            throw new CslqException(solutions.Count == 1
+                ? $"{Path.GetFileName(solutions[0])} lists no C# project; point --root at a "
                     + "workspace or pass --sentinel"
                 : $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
         }
@@ -602,33 +606,47 @@ internal static partial class Program
     /// <para>
     /// Exactly one solution, and only at the top of the root: two of them give no basis for
     /// choosing, and the scan — over-inclusive but never short — is the safer answer to a
-    /// question this cannot answer. A project the solution lists but that is not on disk is
+    /// question this cannot answer. That is now the only thing the scan is for; no solution at
+    /// all is not a third case handled here, because <see cref="InferSentinels"/> rejects such
+    /// a root before it gets this far. A project the solution lists but that is not on disk is
     /// dropped, since waiting on one would be the same unresolvable sentinel by another route.
-    /// A <c>.slnf</c> solution filter is not read; it falls through to the scan.
+    /// A <c>.slnf</c> solution filter is not read, and no longer falls through to the scan: a
+    /// root holding only one is a root with no solution.
     /// </para>
     /// </summary>
-    private static IReadOnlyList<string> ProjectDirectories(string root) =>
-        (SolutionFile(root) is { } solution ? SolutionProjects(solution) : ScannedProjects(root))
+    private static IReadOnlyList<string> ProjectDirectories(string root, IReadOnlyList<string> solutions) =>
+        (solutions.Count == 1 ? SolutionProjects(solutions[0]) : ScannedProjects(root))
         .Select(f => Path.GetFullPath(Path.GetDirectoryName(f)!))
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .Order(StringComparer.OrdinalIgnoreCase)
         .ToList();
 
     /// <summary>
-    /// The root's own solution, if there is exactly one. Top-level only: a solution in a
-    /// subdirectory describes that subtree rather than this root, and Roslyn would not open it
-    /// for this root either.
+    /// The root's own solutions. Top-level only: a solution in a subdirectory describes that
+    /// subtree rather than this root, and Roslyn would not open it for this root either.
+    /// Capped at two, which is all the caller distinguishes.
     /// </summary>
-    private static string? SolutionFile(string root)
-    {
-        var solutions = Directory
-            .EnumerateFiles(root, "*.sln*", SearchOption.TopDirectoryOnly)
-            .Where(f => Path.GetExtension(f) is ".sln" or ".slnx")
-            .Take(2)
-            .ToList();
+    private static IReadOnlyList<string> Solutions(string root) => Directory
+        .EnumerateFiles(root, "*.sln*", SearchOption.TopDirectoryOnly)
+        .Where(f => Path.GetExtension(f) is ".sln" or ".slnx")
+        .Take(2)
+        .ToList();
 
-        return solutions.Count == 1 ? solutions[0] : null;
-    }
+    /// <summary>
+    /// A root with no solution never becomes ready: <c>--autoLoadProjects</c> does not discover
+    /// a bare <c>.csproj</c>, so <c>projectInitializationComplete</c> never fires and every
+    /// query answers empty for the whole timeout. Knowable before the server starts, so it is
+    /// said instantly instead.
+    /// <para>
+    /// Deliberately no "or pass <c>--sentinel</c>" here, though <see cref="Sentinels"/> does
+    /// bypass this check: Roslyn still loads nothing for such a root, so the hint would send
+    /// the reader straight into the timeout this exists to remove. The other two failures in
+    /// <see cref="InferSentinels"/> keep it, because there the workspace does load.
+    /// </para>
+    /// </summary>
+    internal static string NoSolution(string root) =>
+        $"no .sln or .slnx at {root}; cslq loads the projects the root's solution lists, so "
+        + "--root must be the directory holding the .sln/.slnx";
 
     /// <summary>
     /// The C# projects a solution lists. <c>.slnx</c> is XML that nests projects under folder

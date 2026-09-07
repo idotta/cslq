@@ -8,8 +8,17 @@ namespace Cslq.Tests;
 /// </summary>
 internal sealed class Workspace : IDisposable
 {
-    public Workspace()
+    private readonly bool _solution;
+    private readonly List<string> _projects = [];
+
+    /// <param name="solution">
+    /// Whether <see cref="Project"/> keeps a root <c>Workspace.slnx</c> listing everything it
+    /// has created. On by default because a root with no solution is now rejected outright;
+    /// pass <c>false</c> when the test supplies its own solutions, or means to have none.
+    /// </param>
+    public Workspace(bool solution = true)
     {
+        _solution = solution;
         Root = Path.Combine(Path.GetTempPath(), "cslq-tests", Path.GetRandomFileName());
         Directory.CreateDirectory(Root);
     }
@@ -21,9 +30,20 @@ internal sealed class Workspace : IDisposable
     {
         var dir = Path.Combine(Root, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(dir);
-        File.WriteAllText(
-            Path.Combine(dir, Path.GetFileName(dir) + ".csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var project = Path.Combine(dir, Path.GetFileName(dir) + ".csproj");
+        File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+        _projects.Add(Path.GetRelativePath(Root, project).Replace(Path.DirectorySeparatorChar, '/'));
+        if (_solution)
+        {
+            File.WriteAllText(
+                Path.Combine(Root, "Workspace.slnx"),
+                string.Join(Environment.NewLine,
+                    ["<Solution>",
+                     .. _projects.Select(p => $"  <Project Path=\"{p}\" />"),
+                     "</Solution>"]));
+        }
+
         return Path.GetFullPath(dir);
     }
 

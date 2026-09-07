@@ -157,7 +157,11 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   thing to add. Do not.
 - **Project discovery reads the root's solution, and only the root's.** `ProjectDirectories`
   takes the project list from a single `.sln`/`.slnx` sitting at the top of `--root`, and falls
-  back to the recursive `.csproj` scan when there are none or more than one. A solution one
+  back to the recursive `.csproj` scan only when there is more than one. **No solution at all is
+  an error**, thrown before the server starts, because `--autoLoadProjects` never discovers a
+  bare `.csproj` and the scan would only buy a full timeout — so every temp tree a unit test
+  builds now needs a solution, which `Workspace` writes for it, and the two tests that still
+  mean to exercise the scan write two solutions on purpose. A solution one
   directory down does not count — which is what keeps `fixture/Fixture.slnx` from narrowing a
   root above it, and what makes `--root fixture` and `--root .` two different workspaces rather
   than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
@@ -170,6 +174,13 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   compile on purpose. Put a fixture project in it and `dotnet build` at the root fails by
   design; leave it out and `cslq ready --root .` resolves in ~6 s — the `self-hosted-*` cases.
   `fixture/` keeps its own `Fixture.slnx`, which `run.sh` restores separately.
+- **To test `dotnet` off `PATH`, empty `PATH` and set `DOTNET_ROOT` — do not filter it.**
+  Stripping "dotnet-shaped" entries out of `PATH` is host-dependent nonsense: on this machine
+  `dotnet` lives in `C:\Program Files\dotnet`, on `ubuntu-latest` it is `/usr/bin/dotnet`, and
+  dropping `/usr/bin` there breaks everything else. `PATH=""` plus `DOTNET_ROOT` pointed at the
+  SDK's real directory (`dirname` of `readlink -f "$(command -v dotnet)"`, through `pwd -W` on
+  Git Bash) leaves the apphost able to find its own runtime while `Process.Start("dotnet")`
+  fails — which is the failure under test. `dotnet-off-path-reports` is the leg.
 - **The server does not restore your projects.** `dotnet restore` before starting it.
 - **The daemon is the default, and it changes what "ready" means.** `cslq` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every

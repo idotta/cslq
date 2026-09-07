@@ -327,5 +327,81 @@ else
   fail=$((fail + 1))
 fi
 
+# The three first-run failures a user who is not this repository hits, two of which are
+# checkable without a server. Both capture with $(...), which is only safe because neither
+# reaches a daemon: one fails in the filesystem scan before LspClient.StartAsync, the other
+# fails at Process.Start.
+#
+# A root with no solution. --autoLoadProjects does not discover a bare .csproj, so this used
+# to load nothing, answer empty and exit 1 only after the whole timeout. The elapsed check is
+# the point of the leg: the message alone would pass just as well after 300 s.
+log "first-run failures"
+ns_tmp=$(mktemp -d)
+mkdir -p "$ns_tmp/Lib"
+printf '<Project Sdk="Microsoft.NET.Sdk" />' > "$ns_tmp/Lib/Lib.csproj"
+printf 'internal class Thing;' > "$ns_tmp/Lib/Thing.cs"
+mkdir -p "$ns_tmp/App"
+printf '<Project Sdk="Microsoft.NET.Sdk" />' > "$ns_tmp/App/App.csproj"
+# MSYS hands a native .NET process a Windows path only if it is given one.
+ns_abs=$( cd "$ns_tmp" && { pwd -W 2>/dev/null || pwd; } )
+
+ns_start=$(date +%s)
+out=$("$CSLQ" ready --root "$ns_abs" --timeout 300 2>&1)
+rc=$?
+ns_elapsed=$(( $(date +%s) - ns_start ))
+rm -rf "$ns_tmp"
+
+ok=1
+[ "$rc" = 1 ] || ok=0
+[ "$ns_elapsed" -lt 30 ] || ok=0
+case "$out" in
+  *"cslq: no .sln or .slnx at"*) ;;
+  *) ok=0 ;;
+esac
+case "$out" in
+  *"--root must be the directory holding the .sln/.slnx"*) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "no-solution-root-fails-fast"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 in well under the timeout)\n'     "no-solution-root-fails-fast" "$rc" "$ns_elapsed"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# `dotnet` off PATH. The binary is an apphost and finds its own runtime through DOTNET_ROOT,
+# so exporting that to the SDK's real directory -- symlinks resolved, which is what /usr/bin
+# on a runner needs -- leaves the launch of the *server* as the only thing PATH is still
+# needed for. Emptying PATH rather than filtering it out of dotnet directories: on a runner
+# `dotnet` lives in /usr/bin, so there is no dotnet-shaped entry to drop.
+dotnet_real=$(command -v dotnet)
+dotnet_real=$(readlink -f "$dotnet_real" 2>/dev/null || printf '%s' "$dotnet_real")
+dotnet_root=$( cd "$(dirname "$dotnet_real")" && { pwd -W 2>/dev/null || pwd; } )
+
+out=$(DOTNET_ROOT="$dotnet_root" PATH="" "$CSLQ" ready --root fixture --timeout 300 2>&1)
+rc=$?
+ok=$([ "$rc" = 1 ] && echo 1 || echo 0)
+case "$out" in
+  *"cslq: could not start the language server"*) ;;
+  *) ok=0 ;;
+esac
+case "$out" in
+  *".NET 10 SDK must be installed and on PATH"*) ;;
+  *) ok=0 ;;
+esac
+case "$out" in
+  *"   at "*|*"   em "*) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "dotnet-off-path-reports"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s, wanted 1 and a one-line cslq: message)\n' "dotnet-off-path-reports" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

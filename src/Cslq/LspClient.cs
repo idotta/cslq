@@ -70,19 +70,7 @@ internal sealed class LspClient : IAsyncDisposable
         foreach (var a in ServerArgs.Restore()) psi.ArgumentList.Add(a);
         psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
-        Process proc;
-        try
-        {
-            proc = Process.Start(psi) ?? throw new CslqException("could not start 'dotnet tool restore'.");
-        }
-        catch (Exception ex) when (ex is not CslqException and not OperationCanceledException)
-        {
-            // Win32Exception with `dotnet` off PATH, among others. Anything escaping here is
-            // a stack trace on a first run, which is the failure this whole path exists for.
-            throw new CslqException($"could not run 'dotnet tool restore' in {manifestRoot}: {ex.Message}");
-        }
-
-        using (proc)
+        using (var proc = StartProcess(psi, $"restore the pinned language server in {manifestRoot}"))
         {
             var stdout = proc.StandardOutput.ReadToEndAsync(ct);
             var stderr = proc.StandardError.ReadToEndAsync(ct);
@@ -112,8 +100,30 @@ internal sealed class LspClient : IAsyncDisposable
                 var why = (await stderr).Trim();
                 if (why.Length == 0) why = (await stdout).Trim();
                 throw new CslqException(
-                    $"'dotnet tool restore' failed in {manifestRoot} (exit {proc.ExitCode}): {Firstline(why)}");
+                    $"'dotnet tool restore' failed in {manifestRoot} (exit {proc.ExitCode}): {Firstline(why)} "
+                    + $"Run 'dotnet tool restore' in {manifestRoot} once that is fixed.");
             }
+        }
+    }
+
+    /// <summary>
+    /// Every <c>dotnet</c> launch goes through here. <see cref="Process.Start(ProcessStartInfo)"/>
+    /// throws <see cref="System.ComponentModel.Win32Exception"/> when <c>dotnet</c> is off
+    /// <c>PATH</c> — the first-time-user case exactly — and that escaped as a stack trace and
+    /// exit 127 rather than as a <c>cslq:</c> line naming the fix.
+    /// </summary>
+    private static Process StartProcess(ProcessStartInfo psi, string what)
+    {
+        try
+        {
+            return Process.Start(psi) ?? throw new CslqException($"could not {what}: no process started.");
+        }
+        catch (Exception ex) when (ex is not CslqException and not OperationCanceledException)
+        {
+            throw new CslqException(
+                $"could not {what}: {Firstline(ex.Message)} "
+                + $"cslq runs the language server with '{ServerArgs.Command}', so the .NET 10 SDK "
+                + "must be installed and on PATH.");
         }
     }
 
@@ -141,7 +151,7 @@ internal sealed class LspClient : IAsyncDisposable
         // output is the same for an agent regardless of the developer's machine locale.
         psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
-        var proc = Process.Start(psi) ?? throw new CslqException("Failed to start the language server.");
+        var proc = StartProcess(psi, "start the language server");
 
         var stderr = new StringBuilder();
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) { lock (stderr) stderr.AppendLine(e.Data); } };
