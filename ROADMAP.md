@@ -3,14 +3,14 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-06, after a shippability review opened Milestone 5. Milestones 1-4 are
+Last updated: 2026-09-06, after Milestone 5 item 1 shipped the install path. Milestones 1-4 are
 done; what remains is everything between "works on this clone" and "someone else can use it",
 listed under Milestone 5 below. Output tuning held two concrete changes: `sym`
 applies `--max` in the server's relevance order and sorts only what survives, so a capped
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
 
-60 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+61 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
 that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
@@ -312,7 +312,7 @@ finding below was reproduced on a scratch two-project solution outside the repo,
 Debug binary from `src/Cslq/bin`, unless it says otherwise. The order is the order to do them in:
 nothing after item 1 matters to a user who cannot start `cslq`.
 
-- [ ] **Resolve the server pin from somewhere an installed binary can reach.**
+- [x] **Resolve the server pin from somewhere an installed binary can reach.**
       `ServerArgs.ToolManifestRoot` walks up from `AppContext.BaseDirectory` — the *binary's*
       directory, not the cwd or `--root` — for `.config/dotnet-tools.json`, and `LspClient`
       uses that as the server's working directory. So `cslq` works from any cwd today, but only
@@ -431,7 +431,7 @@ started, which stays an accepted cost.
       generator emitting into two projects renders two distinct labels rather than one
 - [x] The nested-project half of readiness scoping is pinned by a test: a hit under
       `Web/Tests/` does not mark `Web/` ready
-- [ ] `cslq` installed outside this repository — a global tool or a copied binary — starts and
+- [x] `cslq` installed outside this repository — a global tool or a copied binary — starts and
       answers; `cslq --version` prints the version a release is tagged with
 - [ ] `dotnet` missing, the tool not restored, and a root with no solution each produce a
       one-line `cslq:` message naming the fix, with no stack trace and no timeout

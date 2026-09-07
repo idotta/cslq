@@ -37,6 +37,12 @@ internal static class ServerArgs
     ];
 
     /// <summary>
+    /// Restores the pinned server into the manifest above the running binary. Idempotent,
+    /// and the first run downloads the ~300 MB RID payload behind the tool.
+    /// </summary>
+    public static string[] Restore() => ["tool", "restore"];
+
+    /// <summary>
     /// LSP 3.17 position encoding. The server does not advertise
     /// <c>positionEncoding</c> in its initialize result, which per spec means
     /// utf-16 — the same unit as a .NET string index. Anything else would break

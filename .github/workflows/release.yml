@@ -1,0 +1,54 @@
+name: release
+
+# Tag-triggered, so a release is `git tag v0.1.0 && git push --tags`. The gate runs first:
+# nothing reaches nuget.org that has not survived probes/run.sh on this runner.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The tag is what names the package, so a tag that disagrees with <Version> would
+      # publish a version nobody asked for. Checked before the gate: it costs nothing.
+      - name: tag matches <Version>
+        run: |
+          version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match <Version>$version</Version> in src/Cslq/Cslq.csproj" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # The RID payload behind the tool is ~300 MB; the pin is the cache key so a bump
+      # misses on purpose.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('.config/dotnet-tools.json', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - run: ./probes/run.sh
+
+      - run: dotnet pack src/Cslq/Cslq.csproj -c Release -o artifacts --nologo
+
+      # Idle until a NUGET_API_KEY secret exists: with none set the key is empty and the
+      # push fails, which is the intended state before the first release is authorised.
+      - name: push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

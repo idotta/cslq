@@ -11,8 +11,28 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>cslq</ToolCommandName>
+    <PackageId>cslq</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>iuri dotta</Authors>
+    <Description>Semantic C# queries over the official roslyn-language-server, for coding agents.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/idotta/cslq</RepositoryUrl>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="StreamJsonRpc" Version="2.25.29" />
+  </ItemGroup>
+
+  <!-- The server pin travels with the tool. ServerArgs.ToolManifestRoot walks up from
+       AppContext.BaseDirectory, which for an installed tool is this same
+       tools/net10.0/any/ directory, so the walk finds the manifest on its first step and
+       LspClient runs the server there. Without this an installed binary cannot resolve the
+       pin at all - there is no repository above it. -->
+  <ItemGroup>
+    <None Include="../../.config/dotnet-tools.json" Pack="true" PackagePath="tools/net10.0/any/.config/" />
   </ItemGroup>
 
   <!-- The pure logic below the LSP transport - sentinel inference, argument parsing, path

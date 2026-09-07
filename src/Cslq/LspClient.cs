@@ -27,11 +27,108 @@ internal sealed class LspClient : IAsyncDisposable
         => (Root, _proc, _rpc, _endpoints, _stderr, _daemon, _ct)
             = (root, proc, rpc, endpoints, stderr, daemon, ct);
 
+    /// <summary>
+    /// Starts the server, and on the one failure a first-time user always hits — the pinned
+    /// tool never restored — restores it once and retries. Deliberately not a preflight
+    /// check: `dotnet tool restore` costs a second even when everything is already there,
+    /// and every run would pay it to save the first one.
+    /// </summary>
     public static async Task<LspClient> StartAsync(string root, string logLevel, bool daemon, CancellationToken ct)
+    {
+        var manifestRoot = ServerArgs.ToolManifestRoot();
+        try
+        {
+            return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+        }
+        catch (CslqException ex) when (NotRestored(ex.Message))
+        {
+            Console.Error.WriteLine(
+                $"cslq: the pinned language server is not restored; restoring it in {manifestRoot}. " +
+                "This is a one-time ~300 MB download.");
+            await RestoreAsync(manifestRoot, ct);
+            return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+        }
+    }
+
+    /// <summary>
+    /// The `dotnet tool run` message naming the fix. The prose around it is localised — this
+    /// machine answers in Portuguese without <c>DOTNET_CLI_UI_LANGUAGE</c> — but the quoted
+    /// command inside it is not, so match on that alone.
+    /// </summary>
+    internal static bool NotRestored(string stderr) =>
+        stderr.Contains("dotnet tool restore", StringComparison.Ordinal);
+
+    private static async Task RestoreAsync(string manifestRoot, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {
-            WorkingDirectory = ServerArgs.ToolManifestRoot(),
+            WorkingDirectory = manifestRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var a in ServerArgs.Restore()) psi.ArgumentList.Add(a);
+        psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
+
+        Process proc;
+        try
+        {
+            proc = Process.Start(psi) ?? throw new CslqException("could not start 'dotnet tool restore'.");
+        }
+        catch (Exception ex) when (ex is not CslqException and not OperationCanceledException)
+        {
+            // Win32Exception with `dotnet` off PATH, among others. Anything escaping here is
+            // a stack trace on a first run, which is the failure this whole path exists for.
+            throw new CslqException($"could not run 'dotnet tool restore' in {manifestRoot}: {ex.Message}");
+        }
+
+        using (proc)
+        {
+            var stdout = proc.StandardOutput.ReadToEndAsync(ct);
+            var stderr = proc.StandardError.ReadToEndAsync(ct);
+            try
+            {
+                await proc.WaitForExitAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Ctrl+C mid-restore: the payload behind the pin is ~300 MB, so leaving it
+                // running orphans a download nothing will ever wait on. Tree, as
+                // DisposeAsync does for a dedicated server — the child is ours alone.
+                try
+                {
+                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Already exited.
+                }
+
+                throw;
+            }
+
+            if (proc.ExitCode != 0)
+            {
+                var why = (await stderr).Trim();
+                if (why.Length == 0) why = (await stdout).Trim();
+                throw new CslqException(
+                    $"'dotnet tool restore' failed in {manifestRoot} (exit {proc.ExitCode}): {Firstline(why)}");
+            }
+        }
+    }
+
+    private static string Firstline(string text)
+    {
+        var line = text.Split('\n').FirstOrDefault(l => l.Trim().Length > 0)?.Trim() ?? "no output";
+        return line.Length > 200 ? line[..200] : line;
+    }
+
+    private static async Task<LspClient> StartCoreAsync(
+        string root, string manifestRoot, string logLevel, bool daemon, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo(ServerArgs.Command)
+        {
+            WorkingDirectory = manifestRoot,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -95,7 +192,7 @@ internal sealed class LspClient : IAsyncDisposable
         var uri = PathUri.FromPath(Root);
         var init = new InitializeParams(
             Environment.ProcessId,
-            new ClientInfo("cslq", "0.1.0"),
+            new ClientInfo("cslq", Build.Version),
             "en",
             uri,
             new ClientCapabilities(

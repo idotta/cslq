@@ -32,6 +32,21 @@ jobs:
             printf '\n' >> .config/dotnet-tools.json
           fi
 
+      # A new pin is a new release, so the tool version moves with it. Guarded on the
+      # manifest actually having changed: `dotnet tool update` exits 0 when already
+      # current, and an unconditional bump would open a PR every quiet week.
+      - name: bump the tool version
+        run: |
+          if git diff --quiet .config/dotnet-tools.json; then
+            echo "pin unchanged; leaving Version alone"
+            exit 0
+          fi
+          csproj=src/Cslq/Cslq.csproj
+          current=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' "$csproj" | head -1)
+          next="${current%.*}.$(( ${current##*.} + 1 ))"
+          sed -i "s@<Version>$current</Version>@<Version>$next</Version>@" "$csproj"
+          echo "cslq $current -> $next"
+
       - id: pin
         run: |
           version=$(sed -n 's/.*"version": "\(5\.[^"]*\)".*/\1/p' .config/dotnet-tools.json | head -1)
@@ -47,7 +62,9 @@ jobs:
           title: "bump roslyn-language-server to ${{ steps.pin.outputs.version }}"
           branch: chore/bump-roslyn-ls
           commit-message: "bump roslyn-language-server to ${{ steps.pin.outputs.version }}"
-          add-paths: .config/dotnet-tools.json
+          add-paths: |
+            .config/dotnet-tools.json
+            src/Cslq/Cslq.csproj
           body: |
             Automated weekly bump of the pinned language server.
 
