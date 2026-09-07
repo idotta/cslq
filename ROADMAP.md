@@ -448,7 +448,8 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       --verify-no-changes` runs before the gate in all three workflows, not just `probe.yml`,
       so neither a tag nor a bump PR reaches a publish around it.
       The path comparison is now one pair, `PathUri.PathComparison` / `PathUri.PathComparer`,
-      case-insensitive on Windows and macOS and ordinal on Linux, used at every site that
+      both off `PathUri.PathsAreCaseInsensitive` — case-insensitive on Windows and macOS,
+      ordinal everywhere else — used at every site that
       compares or keys on a file path: `Sentinel.Under`, `LspClient`'s `_open` / `_lines` /
       `_projects`, `PathUri.AnyUnder`, `Program.IsUnder`, and the `Distinct`/`Order` in
       `ProjectDirectories` and `SourceFiles`. Deliberately left case-insensitive everywhere:
@@ -457,8 +458,8 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       spelled rather than which file it is, and `Output`'s display sort, which is
       presentation. `PathUriTests` and `SentinelScopingTests` pin the comparer choice and the
       case-differing behaviour of `AnyUnder` and `Sentinel.Accepts`, asserting both platforms'
-      answers under `OperatingSystem.IsLinux()` rather than skipping one — a comparer that
-      stopped varying then goes red somewhere instead of quietly passing everywhere.
+      answers off that same predicate rather than skipping one — a comparer that stopped
+      varying then goes red somewhere instead of quietly passing everywhere.
 
 Considered and left out: `cslq daemon status/stop` (the daemon is unmanaged by design — see
 README and `SKILL.md`), and any change to what `--log-level` does against a daemon someone else

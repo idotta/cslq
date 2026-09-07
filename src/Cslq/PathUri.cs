@@ -11,6 +11,15 @@ internal static class PathUri
     public const string GeneratedScheme = "roslyn-source-generated";
 
     /// <summary>
+    /// Whether the host resolves file paths case-insensitively: Windows and macOS do,
+    /// everything else is ordinal. Named rather than repeated, so the two properties below and
+    /// the tests that pin them cannot drift apart. Not <c>!IsLinux()</c>, which would make
+    /// every other Unix — FreeBSD, for one — case-insensitive by accident.
+    /// </summary>
+    public static bool PathsAreCaseInsensitive { get; } =
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+
+    /// <summary>
     /// How two file paths are compared for identity. Windows and macOS resolve paths
     /// case-insensitively, Linux does not — and Linux is the platform CI has always run, so
     /// comparing <c>OrdinalIgnoreCase</c> everywhere was a latent bug on the only host nobody
@@ -22,11 +31,11 @@ internal static class PathUri
     /// case-insensitive because it is presentation.
     /// </summary>
     public static StringComparison PathComparison { get; } =
-        OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        PathsAreCaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     /// <summary><see cref="PathComparison"/> as a comparer, for dictionary keys and sorts.</summary>
     public static StringComparer PathComparer { get; } =
-        OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        PathsAreCaseInsensitive ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     public static string FromPath(string path) => new Uri(Path.GetFullPath(path)).AbsoluteUri;
 
