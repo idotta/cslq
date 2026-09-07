@@ -18,6 +18,11 @@ description: >-
 extension. It answers about the compiled semantic model, so it sees cross-project references,
 generic instantiations, source-generated code and `partial` halves. Grep sees none of that.
 
+`cslq` has to be installed before any of this works — a `dotnet tool install` of the `cslq`
+package, which puts it on `PATH` and carries its own pinned copy of the language server. The
+README's **Install** section is the whole procedure; if `cslq` is not found, that is what to
+follow, not a reason to fall back to grep.
+
 ## Start every session with this
 
 ```
@@ -114,9 +119,10 @@ as "this implements something".
 
 Do not reach for `--sentinel` to speed a run up. By default `cslq` waits for every project
 under the root to load, one probe per project the root's solution lists — or per `.csproj` when
-the root holds no solution, or more than one. `--sentinel` replaces that with a single
-root-scoped probe and drops the guarantee, so `refs`, `impl` and `sym` can come back missing a
-project's hits at exit 0. It is for a workspace whose layout the scan cannot read.
+the root holds more than one solution. A root holding none is an error, not a fallback to the
+scan. `--sentinel` replaces that with a single root-scoped probe and drops the guarantee, so
+`refs`, `impl` and `sym` can come back missing a project's hits at exit 0. It is for a
+workspace whose layout the scan cannot read.
 
 `cslq` shares one background server (the daemon) across invocations, so a warm query costs a
 couple of seconds instead of a full solution load. You do not need to manage it. If a run
@@ -124,16 +130,35 @@ prints `cslq: daemon unreachable`, the answer is still correct — it was just s
 
 ## When a query comes back empty
 
-1. **A root with only a `.csproj` and no solution never loads.** `cslq` waits out its whole
-   timeout and every query returns nothing. Add a `.sln`/`.slnx`, or point `--root` at a
-   directory that has one. This is the most common cause by far.
+1. **A root with no solution at its top is now an error, not a hang.** `cslq` exits 1 in about
+   a second with a message saying it loads the projects the root's solution lists, so `--root`
+   must be the directory holding the `.sln`/`.slnx`. A solution one directory down does not
+   count. This is the most common cause by far, and it announces itself — you will not see it
+   as an empty answer.
 2. **A solution at the root is also what scopes readiness.** `cslq` waits for every project the
-   root's `.sln`/`.slnx` lists, and falls back to scanning for `.csproj` when the root does not
-   hold exactly one — none, or several. On a repository carrying template or sample projects the
-   solution excludes, that scan waits for projects the server never loaded, so add the
-   solution or point `--root` below them.
+   root's `.sln`/`.slnx` lists. A root holding *several* solutions gives no basis for choosing
+   one, so it falls back to scanning for `.csproj` — a root holding *none* is the error in item
+   1, not a fallback. On a repository carrying template or sample projects no solution includes,
+   that scan waits for projects the server never loaded, so point `--root` at the directory
+   holding the one solution you mean.
 3. **Run `dotnet restore` first.** The language server does not restore for you, and anything
    needing resolved references comes back empty rather than erroring.
 4. **A source generator has to be built** before its output exists. If a generated symbol is
    missing, build the analyzer project.
 5. **Check the symbol with `cslq def`** before concluding anything about `refs`.
+
+## Two readiness limits that are `cslq`'s, not the user's
+
+`cslq ready` covers every project it can infer a readiness probe for. Two shapes fall outside
+that, and in both of them a query can answer at exit 0 with a project's hits missing. Neither is
+misconfiguration, so do not send the user off to fix their setup over one:
+
+- **A project with no type declaration to probe** — one that is only top-level statements, or
+  only Razor or resources — is not waited on, because there is nothing to ask the server for.
+  It is named on the readiness failure path, so its absence is at least visible.
+- **Two `.csproj` in one directory** collapse to a single probe: a hit under that directory
+  cannot be attributed to one of them by path, so the second project is covered only
+  incidentally.
+
+If a result looks like it is missing a project's hits in either shape, re-run the query — the
+second one is against a fully loaded workspace.
