@@ -10,6 +10,24 @@ internal static class PathUri
     /// </summary>
     public const string GeneratedScheme = "roslyn-source-generated";
 
+    /// <summary>
+    /// How two file paths are compared for identity. Windows and macOS resolve paths
+    /// case-insensitively, Linux does not — and Linux is the platform CI has always run, so
+    /// comparing <c>OrdinalIgnoreCase</c> everywhere was a latent bug on the only host nobody
+    /// was watching: two genuinely different files differing only in case would be treated as
+    /// one, silently. Path <em>identity</em> only: an extension or scheme check
+    /// (<c>.cs</c>, <c>.csproj</c>, <c>.slnx</c>, <c>roslyn-source-generated:</c>) stays
+    /// case-insensitive on every platform, because that is a spelling question rather than a
+    /// question about which file this is, and <see cref="Output"/>'s display sort stays
+    /// case-insensitive because it is presentation.
+    /// </summary>
+    public static StringComparison PathComparison { get; } =
+        OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+    /// <summary><see cref="PathComparison"/> as a comparer, for dictionary keys and sorts.</summary>
+    public static StringComparer PathComparer { get; } =
+        OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+
     public static string FromPath(string path) => new Uri(Path.GetFullPath(path)).AbsoluteUri;
 
     public static string ToPath(string uri) => new Uri(uri).LocalPath;
@@ -75,7 +93,7 @@ internal static class PathUri
 
         return uris.Any(u =>
             !IsGenerated(u) && !IsDecompiled(u) &&
-            Path.GetFullPath(ToPath(u)).StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+            Path.GetFullPath(ToPath(u)).StartsWith(prefix, PathComparison));
     }
 
     /// <summary>Agents want repo-relative forward-slash paths, not absolute paths or URIs.</summary>

@@ -69,6 +69,21 @@ public class SentinelScopingTests
             "?hintName=Program.g.cs&assemblyName=Gen"));
     }
 
+    /// <summary>
+    /// <c>Sentinel.Accepts</c> is the other path-identity site, and readiness is what it
+    /// decides: on Linux a hit under <c>WEB/</c> is a different directory from <c>Web/</c> and
+    /// proves nothing, while on Windows it is the same one. Asserted both ways rather than
+    /// skipped, so a comparer that stopped varying goes red rather than quiet.
+    /// </summary>
+    [Fact]
+    public void A_case_differing_hit_follows_the_platform()
+    {
+        using var ws = Nested();
+        var web = Sentinels(ws).Single(s => Name(s) == "Web");
+
+        Assert.Equal(!OperatingSystem.IsLinux(), web.Accepts(Uri(ws, "WEB/Program.cs")));
+    }
+
     private static Workspace Nested()
     {
         var ws = new Workspace();

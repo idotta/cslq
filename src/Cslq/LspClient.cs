@@ -11,9 +11,9 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly JsonRpc _rpc;
     private readonly Endpoints _endpoints;
     private readonly StringBuilder _stderr;
-    private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string[]> _lines = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, (string? File, string? Tfm)> _projects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _open = new(PathUri.PathComparer);
+    private readonly Dictionary<string, string[]> _lines = new(PathUri.PathComparer);
+    private readonly Dictionary<string, (string? File, string? Tfm)> _projects = new(PathUri.PathComparer);
     private readonly bool _daemon;
     private readonly CancellationToken _ct;
 
@@ -795,6 +795,6 @@ internal sealed record Sentinel(
         var path = Path.GetFullPath(PathUri.ToPath(uri));
         var dir = Path.GetFullPath(directory).TrimEnd(
             Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return path.StartsWith(dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return path.StartsWith(dir + Path.DirectorySeparatorChar, PathUri.PathComparison);
     }
 }
