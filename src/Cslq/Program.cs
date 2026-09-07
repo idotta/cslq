@@ -28,6 +28,8 @@ internal static partial class Program
           --errors-only     diag: drop warnings and below
           --json            machine-readable output
           --no-daemon       start a dedicated server instead of the shared daemon
+          --version         print the cslq version
+          -h, --help        this message
         """;
 
     private static readonly string[] Commands =
@@ -59,10 +61,11 @@ internal static partial class Program
 
     private static async Task<int> RunAsync(string[] argv)
     {
-        if (argv.Length == 0 || argv[0] is "-h" or "--help")
+        switch (Preflight(argv))
         {
-            Console.WriteLine(Usage);
-            return argv.Length == 0 ? 2 : 0;
+            case Immediate.Usage: Console.WriteLine(Usage); return 2;
+            case Immediate.Help: Console.WriteLine(Usage); return 0;
+            case Immediate.Version: Console.WriteLine(Build.Version); return 0;
         }
 
         var opts = Options.Parse(argv);
@@ -91,6 +94,22 @@ internal static partial class Program
                     "cslq: daemon unreachable; this run used its own cold server");
             }
         }
+    }
+
+    internal enum Immediate { None, Usage, Help, Version }
+
+    /// <summary>
+    /// Asking for help or the version is answered wherever it appears, not only in the first
+    /// position: `cslq refs Foo --help` used to be `unknown option`, which is the moment a
+    /// caller most needs the usage text. Nothing here reaches a server, so a query argument
+    /// that happens to be `--help` is a cost worth paying.
+    /// </summary>
+    internal static Immediate Preflight(string[] argv)
+    {
+        if (argv.Length == 0) return Immediate.Usage;
+        if (argv.Any(a => a is "-h" or "--help")) return Immediate.Help;
+        if (argv.Any(a => a is "--version")) return Immediate.Version;
+        return Immediate.None;
     }
 
     private static async Task<int> DispatchAsync(

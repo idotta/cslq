@@ -144,7 +144,16 @@ log "source-generator staleness"
 greeter=fixture/Core/Greeter.cs
 greeter_saved=$(mktemp)
 cp "$greeter" "$greeter_saved"
-trap 'cp "$greeter_saved" "$greeter"; rm -f "$greeter_saved"' EXIT
+# One EXIT hook for the whole run. The rename below has to be undone even on an interrupt --
+# see CLAUDE.md -- and the packaged-tool leg's throwaway tree is cleaned by the same hook.
+install_tmp=""
+cleanup() {
+  cp "$greeter_saved" "$greeter"
+  rm -f "$greeter_saved"
+  [ -n "$install_tmp" ] && rm -rf "$install_tmp"
+  return 0
+}
+trap cleanup EXIT
 
 # The daemon refreshes off its own file watcher, so both directions are eventually
 # consistent -- poll rather than trust the first answer. Each absent attempt already
@@ -264,6 +273,57 @@ else
 '     "cold-server-diag-reports-cross-project-error" "$rc"
   printf '%s
 ' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# The installed tool. Every leg above runs the binary out of src/Cslq/bin, which still sits
+# under this checkout -- ServerArgs.ToolManifestRoot then finds .config/dotnet-tools.json by
+# walking up into the repository, which an installed binary has no way to do. This packs,
+# installs into a throwaway --tool-path and runs from an unrelated cwd, so the only manifest
+# within reach is the one packed into tools/net10.0/any/.
+log "packaged tool install"
+install_tmp=$(mktemp -d)
+version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
+# --root has to be absolute from a foreign cwd, and MSYS hands a native .NET process a
+# Windows path only if it is given one: `pwd -W` on Git Bash, plain `pwd` everywhere else.
+fixture_abs=$( cd fixture && { pwd -W 2>/dev/null || pwd; } )
+
+ok=1
+dotnet pack src/Cslq/Cslq.csproj -c Release -o "$install_tmp/pkg" --nologo -v q || ok=0
+# --source, not --add-source: --add-source only appends the local folder to the feed list, so
+# from the first release onward nuget.org offers the same version and the leg could quietly
+# test the published package instead of the one just packed. --source replaces every feed,
+# and a tool package carries its dependencies, so the local folder is all it needs.
+if [ "$ok" = 1 ]; then
+  dotnet tool install cslq --version "$version" --tool-path "$install_tmp/bin" \
+    --source "$install_tmp/pkg" || ok=0
+fi
+
+installed="$install_tmp/bin/cslq"
+[ -x "$installed" ] || installed="$installed.exe"
+if [ "$ok" = 1 ] && [ -x "$installed" ]; then
+  # Redirected, never captured: this attaches to the suite's daemon rather than launching one,
+  # but the rule in CLAUDE.md is blanket -- the daemon inherits stdout and $(...) then waits
+  # forever for the pipe's last writer.
+  ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 ) \
+    > "$install_tmp/ready.log" 2>&1
+  rc=$?
+  out=$(cat "$install_tmp/ready.log")
+else
+  rc=1
+  out="pack or install failed before the binary could run"
+fi
+
+case "$out" in
+  *ready*) ok=$([ "$rc" = 0 ] && echo 1 || echo 0) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "installed-tool-resolves-its-own-pin"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s, wanted 0 and a ready workspace)\n' "installed-tool-resolves-its-own-pin" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
 

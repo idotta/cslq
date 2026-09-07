@@ -223,6 +223,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **`probes/hold-mutex.cs` is a .NET 10 file-based app, not a project, and that is deliberate.**
   `dotnet run probes/hold-mutex.cs` compiles a bare `.cs` in under a second with no `.csproj`.
   Reach for that before adding a project to the tree for a probe.
+- **The unrestored-tool message is localised; the command inside it is not.** `dotnet tool run`
+  against a manifest whose tool is missing exits 1 with `Run "dotnet tool restore" to make the
+  "<tool>" command available.` — in Portuguese on this machine, since
+  `DOTNET_CLI_UI_LANGUAGE=en` is set on the *server* process and not on the one that prints
+  this. So `LspClient.NotRestored` matches the quoted `dotnet tool restore` alone, which every
+  localisation carries verbatim. To exercise the restore-and-retry path without a 300 MB
+  download, move `~/.dotnet/toolResolverCache/1/roslyn-language-server` aside: the package
+  stays in `~/.nuget/packages`, so the tool reads as unrestored and the retry costs a second.
+
 ## C# and .NET rules
 
 This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, no DI container.
