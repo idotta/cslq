@@ -6,9 +6,28 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    strategy:
+      # The two OSes fail for different reasons — the non-ASCII and mutex cases are the
+      # host-dependent ones and Git Bash is where they would go red — so a Windows-only
+      # failure must not cancel the Linux leg that would have said whether it is platform
+      # specific.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    # `probes/run.sh` is a bash script and the runner's `bash` on Windows is Git Bash, which
+    # is the shell it is written against: it already goes through `pwd -W` for MSYS paths.
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v7
 
@@ -17,11 +36,15 @@ jobs:
           dotnet-version: '10.0.x'
 
       # The RID payload behind the tool is ~300 MB; the pin is the cache key so a bump
-      # misses on purpose.
+      # misses on purpose. `~` is expanded by the runner on both OSes.
       - uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('.config/dotnet-tools.json', '**/*.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
+
+      # Before the gate: it is seconds, and a formatting-only red is cheaper to read on its
+      # own step than mixed into a probe run.
+      - run: dotnet format --verify-no-changes
 
       - run: ./probes/run.sh

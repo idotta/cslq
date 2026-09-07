@@ -132,6 +132,45 @@ public class PathUriTests
         Assert.False(PathUri.AnyUnder(Path.GetTempPath(), [Decompiled("Console.cs"), Generated]));
     }
 
+    /// <summary>
+    /// Path identity is the platform's, not Windows'. Everything here compared
+    /// <c>OrdinalIgnoreCase</c> until Milestone 5 item 5, which is wrong everywhere but
+    /// Windows and macOS — including Linux, the platform CI has always run, so nothing was
+    /// watching. The expectation is asserted on both platforms rather than skipped on one: a
+    /// comparer that stopped varying would then go red somewhere instead of quietly passing
+    /// everywhere.
+    /// </summary>
+    [Fact]
+    public void Path_comparison_is_case_insensitive_only_on_windows_and_macos()
+    {
+        if (PathUri.PathsAreCaseInsensitive)
+        {
+            Assert.Equal(StringComparison.OrdinalIgnoreCase, PathUri.PathComparison);
+            Assert.Same(StringComparer.OrdinalIgnoreCase, PathUri.PathComparer);
+        }
+        else
+        {
+            Assert.Equal(StringComparison.Ordinal, PathUri.PathComparison);
+            Assert.Same(StringComparer.Ordinal, PathUri.PathComparer);
+        }
+    }
+
+    /// <summary>
+    /// <c>temp/repo</c> and <c>temp/REPO</c> are one directory on Windows and macOS and two
+    /// elsewhere, so whether a hit in the second counts as workspace source under the first is
+    /// the platform's answer. Getting this wrong on Linux would call a framework <c>def</c>
+    /// stale on the strength of a same-name-different-case directory and burn the settle
+    /// budget re-asking.
+    /// </summary>
+    [Fact]
+    public void A_hit_under_a_case_differing_root_follows_the_platform()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+        var hit = PathUri.FromPath(Path.Combine(Path.GetTempPath(), "REPO", "Core", "Greeter.cs"));
+
+        Assert.Equal(PathUri.PathsAreCaseInsensitive, PathUri.AnyUnder(root, [hit]));
+    }
+
     [Fact]
     public void A_hit_outside_the_root_does_not()
     {

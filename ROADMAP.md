@@ -3,9 +3,9 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-07, after Milestone 5 item 4 made metadata symbols answer. Milestones 1-4 are
-done; what remains is everything between "works on this clone" and "someone else can use it",
-listed under Milestone 5 below. Output tuning held two concrete changes: `sym`
+Last updated: 2026-09-07, after Milestone 5 item 5 put the gate on a Windows runner. All five
+milestones are done: the distance between "works on this clone" and "someone else can use it"
+was Milestone 5, and it is closed. Output tuning held two concrete changes: `sym`
 applies `--max` in the server's relevance order and sorts only what survives, so a capped
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
@@ -46,7 +46,7 @@ at all; that stays a one-line coupling at the call site.
 | 2 | The hard fixture cases and the read commands | **done** |
 | 3 | Daemon mode, then `skill/SKILL.md` | **done** |
 | 4 | Remaining commands and output tuning | **done** |
-| 5 | Shippable: install path, first-run errors, metadata symbols, docs, CI | **open** |
+| 5 | Shippable: install path, first-run errors, metadata symbols, docs, CI | **done** |
 
 ## Milestone 1 — the loop works (done)
 
@@ -431,14 +431,35 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       one from a type name: `workspace/symbol` indexes source only, and nothing but
       `textDocument/definition` at a use site makes Roslyn write the document at all. `hover` is
       the answer to the question that was really being asked.
-- [ ] **A Windows CI leg, a format gate, and a `permissions:` block.** Both workflows run
+- [x] **A Windows CI leg, a format gate, and a `permissions:` block.** Both workflows ran
       `ubuntu-latest` only, while the non-ASCII and mutex cases are the two host-dependent
       ones and the Git Bash console is where they would go red. `dotnet format
-      --verify-no-changes` runs nowhere in CI. `probe.yml` declares no `permissions:`. And
-      `IsUnder` plus the URI dictionaries compare paths `OrdinalIgnoreCase` on Linux too — a
+      --verify-no-changes` ran nowhere in CI. `probe.yml` declared no `permissions:`. And
+      `IsUnder` plus the URI dictionaries compared paths `OrdinalIgnoreCase` on Linux too — a
       latent bug on the platform CI actually runs, unflagged anywhere. Not worth doing: a
       separate unit-test job; the tests run in under a second inside `run.sh`, and a second
       workflow would only duplicate the restore.
+      **Done.** `probe.yml` is a `fail-fast: false` matrix over `ubuntu-latest` and
+      `windows-latest` with `permissions: contents: read` and `defaults.run.shell: bash`, so
+      the Windows leg drives `./probes/run.sh` through Git Bash — the shell both
+      host-dependent cases were written against, and the one nothing was watching.
+      `fail-fast: false` rather than the default because a Windows-only red must not cancel
+      the Linux leg that says whether it is platform specific. `dotnet format
+      --verify-no-changes` runs before the gate in all three workflows, not just `probe.yml`,
+      so neither a tag nor a bump PR reaches a publish around it.
+      The path comparison is now one pair, `PathUri.PathComparison` / `PathUri.PathComparer`,
+      both off `PathUri.PathsAreCaseInsensitive` — case-insensitive on Windows and macOS,
+      ordinal everywhere else — used at every site that
+      compares or keys on a file path: `Sentinel.Under`, `LspClient`'s `_open` / `_lines` /
+      `_projects`, `PathUri.AnyUnder`, `Program.IsUnder`, and the `Distinct`/`Order` in
+      `ProjectDirectories` and `SourceFiles`. Deliberately left case-insensitive everywhere:
+      the extension and scheme checks (`.cs`, `.csproj`, `.slnx`,
+      `roslyn-source-generated:`, the `MetadataAsSource` segment), which ask how something is
+      spelled rather than which file it is, and `Output`'s display sort, which is
+      presentation. `PathUriTests` and `SentinelScopingTests` pin the comparer choice and the
+      case-differing behaviour of `AnyUnder` and `Sentinel.Accepts`, asserting both platforms'
+      answers off that same predicate rather than skipping one — a comparer that stopped
+      varying then goes red somewhere instead of quietly passing everywhere.
 
 Considered and left out: `cslq daemon status/stop` (the daemon is unmanaged by design — see
 README and `SKILL.md`), and any change to what `--log-level` does against a daemon someone else
@@ -489,7 +510,7 @@ started, which stays an accepted cost.
       stall, and a project-reference-still-bound-to-metadata answer is still told apart
 - [x] An agent can ask what a symbol is — type and signature — with one command
 - [x] `cslq ready --json` honours the envelope; ambiguity listings honour `--max`
-- [ ] The probe suite runs green on a Windows runner as well as `ubuntu-latest`, and
+- [x] The probe suite runs green on a Windows runner as well as `ubuntu-latest`, and
       `dotnet format --verify-no-changes` gates every PR
 
 ## Verified facts, and when

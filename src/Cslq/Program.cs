@@ -645,7 +645,7 @@ internal static partial class Program
     private static bool IsUnder(string path, string directory) => path.StartsWith(
         directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
             Path.DirectorySeparatorChar,
-        StringComparison.OrdinalIgnoreCase);
+        PathUri.PathComparison);
 
     /// <summary>
     /// Every project directory under the root: the solution's list when the root holds exactly
@@ -676,8 +676,8 @@ internal static partial class Program
     private static IReadOnlyList<string> ProjectDirectories(string root, IReadOnlyList<string> solutions) =>
         (solutions.Count == 1 ? SolutionProjects(solutions[0]) : ScannedProjects(root))
         .Select(f => Path.GetFullPath(Path.GetDirectoryName(f)!))
-        .Distinct(StringComparer.OrdinalIgnoreCase)
-        .Order(StringComparer.OrdinalIgnoreCase)
+        .Distinct(PathUri.PathComparer)
+        .Order(PathUri.PathComparer)
         .ToList();
 
     /// <summary>
@@ -773,7 +773,7 @@ internal static partial class Program
         .EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
         .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
                     !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-        .Order(StringComparer.OrdinalIgnoreCase);
+        .Order(PathUri.PathComparer);
 
     internal sealed record Options(
         string Command,

@@ -30,9 +30,12 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   UTF-8. Verified both ways against the emoji fixture line. Mojibake in a PowerShell pipeline
   (`cslq refs ... | Select-String`) is PowerShell decoding our bytes with its own
   `[Console]::OutputEncoding`, which nothing `cslq` sets can change.
-- **The non-ASCII probe cases are the first host-dependent ones.** Both workflows run
-  `ubuntu-latest`, where the encoding question does not arise; a regression here would be green
-  on CI and red in Git Bash. Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
+- **The non-ASCII probe cases are the first host-dependent ones.** They no longer go green on
+  CI and red in Git Bash: since Milestone 5 item 5 `probe.yml` is a `fail-fast: false` matrix
+  over `ubuntu-latest` **and** `windows-latest`, where the job runs `./probes/run.sh` under the
+  runner's `bash` — which on Windows is Git Bash, the shell that raised the encoding question in
+  the first place. `bump.yml` and `release.yml` stay `ubuntu-latest` alone; they gate a
+  publish, and the platform coverage lives on every PR. Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
   bytes rather than throwing, so a fixture file corrupted to a non-UTF-8 encoding would desync
   the `didOpen` text from what Roslyn parses off disk — silently, except that
   `non-ascii-refs-position` then fails.
@@ -262,7 +265,8 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   that finds a daemon already listening never contends for it. It is the second
   host-dependent case in the suite after the non-ASCII ones — .NET implements named mutexes
   over files on Linux — but it **passed on `ubuntu-latest`** in PR #5, so the file-backed
-  implementation contends the same way.
+  implementation contends the same way. Both halves are now watched: the `windows-latest` leg
+  of `probe.yml` runs it against the real Win32 named mutex the code was written for.
 - **`probes/hold-mutex.cs` is a .NET 10 file-based app, not a project, and that is deliberate.**
   `dotnet run probes/hold-mutex.cs` compiles a bare `.cs` in under a second with no `.csproj`.
   Reach for that before adding a project to the tree for a probe.

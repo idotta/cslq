@@ -38,6 +38,9 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('.config/dotnet-tools.json', '**/*.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
 
+      # Before the gate, so no path to a release skips the format check.
+      - run: dotnet format --verify-no-changes
+
       - run: ./probes/run.sh
 
       - run: dotnet pack src/Cslq/Cslq.csproj -c Release -o artifacts --nologo

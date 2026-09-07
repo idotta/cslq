@@ -406,6 +406,14 @@ and the `sym` cap ordering — including the shapes `fixture/` cannot hold, such
 doc comment above the only declaration in a single-file project. Anything that needs a live
 server belongs in a case, not a test.
 
+`probe.yml` runs the gate on every PR and every push to `main`, as a `fail-fast: false` matrix
+over `ubuntu-latest` and `windows-latest`. Both legs run `./probes/run.sh` through the runner's
+`bash`, which on Windows is Git Bash — the two host-dependent cases, the non-ASCII ones and the
+forced non-daemon fallback's named mutex, are the reason the second leg exists, and
+`fail-fast: false` keeps a Windows-only red from cancelling the Linux leg that says whether it
+is platform specific. Each leg runs `dotnet format --verify-no-changes` before the gate;
+`release.yml` and `bump.yml` run it before theirs too, so no path to a release skips it.
+
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it
 running unchanged on a GitHub runner and in Git Bash.
@@ -416,7 +424,7 @@ Inside `expect`, `'` stands for `"` and `|` separates substrings that must all a
 ```
 Cslq.slnx                    src/Cslq + tests/Cslq.Tests; fixture/ is deliberately not in it
 .config/dotnet-tools.json   the version pin
-.github/workflows/          bump.yml (weekly cron), probe.yml (every PR)
+.github/workflows/          bump.yml (weekly cron), probe.yml (every PR, linux + windows)
 src/Cslq/                    the thin LSP client and CLI
   ServerArgs.cs             the only place server flags live
   Protocol.cs               hand-defined LSP payload types
