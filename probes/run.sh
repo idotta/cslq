@@ -7,18 +7,18 @@
 # so the same script runs on a GitHub runner and in Git Bash on Windows. Inside
 # `expect`, ' stands for " and | separates substrings that must all appear in the
 # combined stdout+stderr of the command. That separator means an expectation can never
-# quote a rendered `csx outline` row, whose gutter is also | -- pasting one in silently
+# quote a rendered `cslq outline` row, whose gutter is also | -- pasting one in silently
 # becomes two weaker substring matches. Assert bare declarations instead.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
 root=$(pwd)
-# csx talks to the shared daemon by default, so scope this run to a daemon of its own.
+# cslq talks to the shared daemon by default, so scope this run to a daemon of its own.
 # Without the pipe name the suite would inherit whatever daemon the developer's session
-# left running -- a stale workspace could make the gate lie, and the `csx ready` below
+# left running -- a stale workspace could make the gate lie, and the `cslq ready` below
 # would stop being a cold load. Keepalive is short because this daemon is disposable:
 # the countdown only starts once the last case disconnects.
-export ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="csx-probe-$$"
+export ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="cslq-probe-$$"
 export ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE=60
 
 
@@ -35,7 +35,7 @@ dotnet tool restore || exit 1
 # run discover zero tests and exit 5 -- loudly, but for a reason that reads as a broken
 # test project rather than a bad flag.
 log "dotnet test"
-dotnet test --project tests/Csx.Tests/Csx.Tests.csproj || exit 1
+dotnet test --project tests/Cslq.Tests/Cslq.Tests.csproj || exit 1
 
 # The language server does not restore your projects. Skip this and anything needing
 # resolved references comes back empty rather than erroring -- a silent false pass.
@@ -51,7 +51,7 @@ dotnet restore fixture/Fixture.slnx --nologo -v q || exit 1
 # compiling Core is what arms its <WarningsAsErrors>CS9057</WarningsAsErrors> -- the guard
 # against the analyzer being built against a newer compiler than the one loading it, which
 # otherwise degrades to the same silent nothing. Never the solution: the deliberate type
-# error for `csx diag` is deliberately kept out of Core so this step stays green.
+# error for `cslq diag` is deliberately kept out of Core so this step stays green.
 log "build fixture generator + Core"
 dotnet build fixture/Core/Core.csproj -c Debug --nologo -v q || exit 1
 
@@ -67,18 +67,18 @@ log "build fixture2 generator + consumers"
 dotnet build fixture2/Alpha/Alpha.csproj -c Debug --nologo -v q || exit 1
 dotnet build fixture2/Beta/Beta.csproj -c Debug --nologo -v q || exit 1
 
-log "build csx"
-dotnet build src/Csx/Csx.csproj -c Release --nologo -v q || exit 1
+log "build cslq"
+dotnet build src/Cslq/Cslq.csproj -c Release --nologo -v q || exit 1
 
-CSX="$root/src/Csx/bin/Release/net10.0/csx"
-[ -x "$CSX" ] || CSX="$CSX.exe"
-[ -x "$CSX" ] || { echo "csx not found at $CSX" >&2; exit 1; }
+CSLQ="$root/src/Cslq/bin/Release/net10.0/cslq"
+[ -x "$CSLQ" ] || CSLQ="$CSLQ.exe"
+[ -x "$CSLQ" ] || { echo "cslq not found at $CSLQ" >&2; exit 1; }
 
 # Readiness is asserted before any case runs: project load is async and a query fired
 # too early returns empty results, not an error, so a naive probe reports a false pass.
-log "csx ready"
+log "cslq ready"
 start=$(date +%s)
-"$CSX" ready --root fixture --timeout 300 || exit 1
+"$CSLQ" ready --root fixture --timeout 300 || exit 1
 printf 'cold ready: %ss\n' "$(( $(date +%s) - start ))"
 
 log "cases"
@@ -100,7 +100,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 
   # shellcheck disable=SC2086 -- args is a deliberately word-split argument list.
-  out=$("$CSX" $args 2>&1)
+  out=$("$CSLQ" $args 2>&1)
   got_exit=$?
 
   ok=1
@@ -152,7 +152,7 @@ trap 'cp "$greeter_saved" "$greeter"; rm -f "$greeter_saved"' EXIT
 await_generated() {
   deadline=$(( $(date +%s) + 90 ))
   while :; do
-    out=$("$CSX" def Fixture.Core.Generated.BuildInfo.Stamp --root fixture --sentinel Cheer 2>&1)
+    out=$("$CSLQ" def Fixture.Core.Generated.BuildInfo.Stamp --root fixture --sentinel Cheer 2>&1)
     rc=$?
     if [ "$1" = present ] && [ "$rc" = 0 ]; then
       case "$out" in *"BuildInfo.g.cs"*) return 0 ;; esac
@@ -190,10 +190,10 @@ leg staleness-after-restore-present present
 # already listening never contends for it.
 #
 # Both halves of the assertion matter. Exit 0 pins that a fallback run still answers, which
-# is what makes it silent; the warning pins that csx noticed, which is the only thing between
+# is what makes it silent; the warning pins that cslq noticed, which is the only thing between
 # an agent and blaming the latency on us.
 log "non-daemon fallback"
-fb_pipe="csx-probe-fallback-$$"
+fb_pipe="cslq-probe-fallback-$$"
 fb_log=$(mktemp)
 dotnet run probes/hold-mutex.cs -- "$fb_pipe" 90 > "$fb_log" 2>&1 &
 fb_holder=$!
@@ -211,7 +211,7 @@ if ! grep -q held "$fb_log" 2>/dev/null; then
   sed 's/^/      | /' "$fb_log"
   fail=$((fail + 1))
 else
-  out=$(ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="$fb_pipe" "$CSX" ready --root fixture --timeout 300 2>&1)
+  out=$(ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="$fb_pipe" "$CSLQ" ready --root fixture --timeout 300 2>&1)
   rc=$?
   case "$out" in
     *"daemon unreachable"*) ok=$([ "$rc" = 0 ] && echo 1 || echo 0) ;;
@@ -247,7 +247,7 @@ cold_log=$(mktemp)
 # the daemon inherits stdout, and $(...) then blocks forever waiting for the pipe's last
 # writer. --no-daemon gives a dedicated server that has never seen the document, which is
 # the state under test anyway.
-"$CSX" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
+"$CSLQ" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
 rc=$?
 out=$(cat "$cold_log")
 rm -f "$cold_log"

@@ -1,4 +1,4 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// A throwaway directory tree. Sentinel inference is a filesystem scan, so the only way to
@@ -10,7 +10,7 @@ internal sealed class Workspace : IDisposable
 {
     public Workspace()
     {
-        Root = Path.Combine(Path.GetTempPath(), "csx-tests", Path.GetRandomFileName());
+        Root = Path.Combine(Path.GetTempPath(), "cslq-tests", Path.GetRandomFileName());
         Directory.CreateDirectory(Root);
     }
 

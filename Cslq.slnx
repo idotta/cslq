@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Cslq/Cslq.csproj" />
+  <Project Path="tests/Cslq.Tests/Cslq.Tests.csproj" />
+</Solution>

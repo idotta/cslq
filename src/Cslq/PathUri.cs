@@ -1,4 +1,4 @@
-namespace Csx;
+namespace Cslq;
 
 internal static class PathUri
 {

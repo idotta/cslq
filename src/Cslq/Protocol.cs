@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Csx;
+namespace Cslq;
 
 // Minimal LSP 3.17 subset, hand-defined because no maintained Microsoft package
 // supplies these types:

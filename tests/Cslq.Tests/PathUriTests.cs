@@ -1,4 +1,4 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// Every path helper in .NET lies about a source-generated URI — <c>new Uri(u).LocalPath</c>

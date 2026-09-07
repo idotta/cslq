@@ -1,7 +1,7 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
-/// <see cref="Program.InferSentinels"/> decides what <c>csx</c> waits for before it answers,
+/// <see cref="Program.InferSentinels"/> decides what <c>cslq</c> waits for before it answers,
 /// so a bad candidate does not fail loudly — it burns the whole timeout, or worse, marks a
 /// project ready that has not loaded and lets an incomplete answer out at exit 0. The cases
 /// here are the ones that cost measured time: prose read as a declaration, and a nested
@@ -179,7 +179,7 @@ public class SentinelInferenceTests
         using var ws = new Workspace();
         ws.Write("Loose.cs", "internal class Loose;");
 
-        var ex = Assert.Throws<CsxException>(() => Program.InferSentinels(ws.Root));
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 
         Assert.Contains("no .csproj", ex.Message, StringComparison.Ordinal);
     }
@@ -191,7 +191,7 @@ public class SentinelInferenceTests
         ws.Project("App");
         ws.Write("App/Program.cs", "System.Console.WriteLine(\"hi\");");
 
-        var ex = Assert.Throws<CsxException>(() => Program.InferSentinels(ws.Root));
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 
         Assert.Contains("--sentinel", ex.Message, StringComparison.Ordinal);
     }

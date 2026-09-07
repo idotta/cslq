@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="src/Csx/Csx.csproj" />
-  <Project Path="tests/Csx.Tests/Csx.Tests.csproj" />
-</Solution>

@@ -1,8 +1,8 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// Which projects readiness waits for. Over-inclusion here is fatal rather than wasteful: a
-/// project Roslyn never loaded has a sentinel that can never resolve, so `csx ready` burns
+/// project Roslyn never loaded has a sentinel that can never resolve, so `cslq ready` burns
 /// its whole timeout and exits 1 on a workspace that was fine. Reading the root's solution is
 /// what stops the scan from inventing those projects.
 /// </summary>
@@ -10,7 +10,7 @@ public class ProjectDiscoveryTests
 {
     /// <summary>
     /// The OrchardCore shape: template content sitting under the root as real <c>.csproj</c>
-    /// files that the solution excludes. Before the solution was read, `csx ready` on
+    /// files that the solution excludes. Before the solution was read, `cslq ready` on
     /// OrchardCore v3.0.1 failed after 900 s on exactly this.
     /// </summary>
     [Fact]
@@ -168,7 +168,7 @@ public class ProjectDiscoveryTests
 
     /// <summary>
     /// A hand-edited solution that no longer parses has to arrive as a CLI error. `Main` catches
-    /// `CsxException` and nothing else, so an escaping `XmlException` answered a bad solution
+    /// `CslqException` and nothing else, so an escaping `XmlException` answered a bad solution
     /// file with an unhandled stack trace and exit 127.
     /// </summary>
     [Fact]
@@ -183,7 +183,7 @@ public class ProjectDiscoveryTests
             </Solution>
             """);
 
-        var ex = Assert.Throws<CsxException>(() => Program.InferSentinels(ws.Root));
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 
         Assert.Contains("Broken.slnx is not valid XML", ex.Message, StringComparison.Ordinal);
     }
@@ -204,7 +204,7 @@ public class ProjectDiscoveryTests
             </Solution>
             """);
 
-        var ex = Assert.Throws<CsxException>(() => Program.InferSentinels(ws.Root));
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 
         Assert.Contains("Only.slnx lists no C# project", ex.Message, StringComparison.Ordinal);
     }

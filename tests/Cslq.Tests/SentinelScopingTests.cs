@@ -1,4 +1,4 @@
-namespace Csx.Tests;
+namespace Cslq.Tests;
 
 /// <summary>
 /// The other half of <c>Web/</c> + <c>Web/Tests/</c>. <see cref="SentinelInferenceTests"/>

@@ -1,4 +1,4 @@
-namespace Csx;
+namespace Cslq;
 
 /// <summary>
 /// The one place server invocation lives. The thin client forwards options it does
@@ -55,8 +55,8 @@ internal static class ServerArgs
             dir = dir.Parent;
         }
 
-        throw new CsxException("Could not locate .config/dotnet-tools.json above " + AppContext.BaseDirectory);
+        throw new CslqException("Could not locate .config/dotnet-tools.json above " + AppContext.BaseDirectory);
     }
 }
 
-internal sealed class CsxException(string message) : Exception(message);
+internal sealed class CslqException(string message) : Exception(message);

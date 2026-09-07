@@ -3,8 +3,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <AssemblyName>csx</AssemblyName>
-    <RootNamespace>Csx</RootNamespace>
+    <AssemblyName>cslq</AssemblyName>
+    <RootNamespace>Cslq</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -19,7 +19,7 @@
        and URI rendering - is unit-tested. Everything that needs a live server stays in
        probes/. -->
   <ItemGroup>
-    <InternalsVisibleTo Include="Csx.Tests" />
+    <InternalsVisibleTo Include="Cslq.Tests" />
   </ItemGroup>
 
 </Project>
