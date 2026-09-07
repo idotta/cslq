@@ -83,9 +83,11 @@ cslq ready                                    # block until the workspace has lo
 cslq refs <symbol | file:line:col> [--max N]  # every reference, with context
 cslq def <symbol | file:line:col>             # where it is declared
 cslq impl <symbol | file:line:col>            # what implements or overrides it
+cslq hover <symbol | file:line:col>           # what it is: type, signature, docs
 cslq sym <query> [--max N]                    # search the workspace by name
 cslq outline <file | symbol> [--max N]        # the declarations in one document
 cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
+cslq project <file>                           # which .csproj compiles it, for which TFM
 ```
 
 Add `--no-daemon` to any of them to start a private server instead of sharing the background
@@ -147,6 +149,50 @@ result — which exits 1 — means the position resolved to no symbol at all, no
 implements the symbol.
 
 ```
+$ cslq hover App/Program.cs:9:17 --root fixture
+App/Program.cs:9:17
+void Console.WriteLine(string? value) (+ 19 overloads)
+Writes the specified string value, followed by the current line terminator, to the standard output stream.
+
+Exceptions:
+  IOException
+```
+
+`hover` is the answer to "what is this" — the type, the full signature including parameter
+types, and the doc-comment summary, from a single request. It is the third command to bend the
+output rules and the narrowest bender of the three: the position the hover applies to is still
+a root-relative one-based `path:line:col` header, but the body is prose rather than source, so
+there is no `>` marker, `--context` is inert, and `--max` caps the documentation's *lines*.
+There is no `signatureHelp` command; hover already carries the parameters, and
+`textDocument/signatureHelp` only answers inside an argument list.
+
+```
+$ cslq def App/Program.cs:9:17 --root fixture
+<metadata>/System.Console/Console.cs:825:24
+  824 |     [MethodImpl(MethodImplOptions.NoInlining)]
+> 825 |     public static void WriteLine(string? value)
+  826 |     {
+```
+
+A symbol whose source is not in the workspace — a framework or NuGet type — is answered from
+the document Roslyn decompiles for it, labelled `<metadata>/<assembly>/<TypeName>.cs`. The real
+file is a machine-absolute temp path made of two per-server-instance guids, which is never
+printed; the assembly comes from the `#region Assembly` header Roslyn writes into the document,
+and the context lines come off that file, which does exist on disk. `outline` on a metadata
+document works if you point it at that absolute path, but there is no way to reach one from a
+type name — `outline System.Console` exits 1, because `workspace/symbol` indexes source only
+and nothing but a `def` at a use site makes Roslyn write the document. Ask `hover` instead.
+
+```
+$ cslq project App/Program.cs --root fixture
+App/App.csproj  net10.0
+```
+
+`project` names the `.csproj` that compiles a file and the target framework it compiles it for.
+A file no project compiles answers `no project` at exit 1 — which is also why `sym` cannot see
+the types declared in it and `diag` reports nothing for it.
+
+```
 $ cslq sym Area --root fixture
 method  Area  in Square (project App (net10.0))   App/Square.cs:12:16
 method  Area  in IShape (project Core (net10.0))  Core/Shape.cs:11:9
@@ -173,8 +219,12 @@ answers that endpoint but returns zero reports, which is what the `workspaceDiag
 in its dynamic registration means.
 
 Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (default 50),
-`--context N` (default 1; inert for `outline` and `sym`), `--timeout N` seconds (default 180),
-`--log-level L`, `--errors-only` (`diag` only), `--json`.
+`--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
+(default 180), `--log-level L`, `--errors-only` (`diag` only), `--json`.
+
+`--json` wraps every command in the same `{ count, truncated, results }` envelope, `ready`
+included — one result carrying `ready` and the number of projects waited for. In text mode
+`ready` still prints the single word `ready`, so a shell test stays a string comparison.
 
 Paths are relative to `--root`; lines and columns are one-based.
 
@@ -188,8 +238,8 @@ incompletely at exit 0. Use it when the `.csproj` scan cannot read the workspace
 including a root with no `.csproj`, which otherwise fails immediately.
 
 `refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
-diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl` and
-`sym` follow the same rule.
+diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl`, `sym`
+and `hover` follow the same rule.
 
 `diag` exits 0 whenever the query was answered, findings or not — a clean file is a successful
 `diag`, unlike an empty `refs`, which means the lookup failed. It exits 1 only when the workspace
@@ -201,7 +251,9 @@ A dotted target narrows by **enclosing type**, not by namespace: `Greeter.Greet`
 `Fixture.Core.Greeter.Greet` both work, but the namespace part is not actually checked. Roslyn
 returns `containerName` as a localised display string (`in Greeter (project Core (net10.0))`),
 not a namespace path, so there is nothing to match a namespace against. When a target stays
-ambiguous, `cslq` lists the candidates with their locations so you can switch to `file:line:col`.
+ambiguous, `cslq` lists the candidates with their locations so you can switch to
+`file:line:col`. That listing honours `--max` and says how many it dropped, like every other
+capped output — a broad ambiguous target on a real repository is hundreds of rows otherwise.
 
 `cslq` pins `DOTNET_CLI_UI_LANGUAGE=en` on the server so those display strings do not change with
 the developer's machine locale.
@@ -325,6 +377,7 @@ weekly bump.
 | A first diagnostic pull under-reporting on an unbound document | `textDocument/diagnostic` does not answer from the misc-files state and then correct itself — it **blocks until the document is bound**, so `diag` pulls once and the settle loop that used to wrap it is gone. Measured 2026-09-06: a cross-project error opened as the first document in a never-used server returns the right code on pull #1 (~4.2 s), and a second pull (~0.7 s) never once differed across six whole-fixture runs, cold and warm. (A document in **no** project is a different case: it reports nothing at all, whatever the error class. See `DESIGN.md`.) The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — and `cold-server-diag-reports-cross-project-error` opens it as the first document of a dedicated server, which is the only state where answering early would show. |
 | Roslyn ignoring unopened documents | Every query opens its document via `textDocument/didOpen` first — except source-generated ones, which the server owns and answers for without it. |
 | No auto-restore | `probes/run.sh` runs `dotnet restore` on the fixture before starting the server. |
+| A framework or NuGet symbol rendering as a machine-absolute temp path | Roslyn answers for one from a document it decompiles under `<temp>/MetadataAsSource/<guid>/.../<Type>.cs`. `PathUri.Display` labels it `<metadata>/<assembly>/<TypeName>.cs`, reading the assembly off the `#region Assembly` header in the document, since the URI carries only the type name. `def` at `Console.WriteLine` used to print the raw path — after a 10 s stall in the decompilation guard, which now re-asks only when the workspace also declares that type. See `DESIGN.md`. |
 | Source-generated symbols rendering as a nonexistent path | Generated documents come back under a `roslyn-source-generated:` URI. `new Uri(u).LocalPath` does not throw for one, it returns `/BuildInfo.g.cs`, so `PathUri.Display` branches on the scheme and labels them `<generated>/<project>/<assembly>/<hintName>`. The project comes from `textDocument/_vs_getProjectContexts` — the URI names only the generator, so without it one generator serving several projects renders every one of its documents identically. Text comes from `workspace/textDocumentContent`. |
 | An unbuilt source generator contributing nothing, silently | With the analyzer assembly absent the workspace still loads and the sentinel still resolves; only the generated symbol is missing, with no error or diagnostic anywhere. `probes/run.sh` builds `fixture/Gen` before starting the server, and three cases assert the generated symbol resolves. |
 | Server-to-client requests faulting the connection | `LspClient.Endpoints` answers `workspace/configuration`, `client/registerCapability`, `window/workDoneProgress/create` and friends. |
@@ -339,10 +392,11 @@ weekly bump.
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
 
-**63 legs today = the 55 rows in `cases.jsonl` + 8 scripted ones.** The scripted eight are the
-three source-generator staleness legs, the forced non-daemon fallback, the cold-server `diag`,
-the packaged-tool install, and the two first-run failures (a root with no solution, and `dotnet`
-off `PATH`). Quoting the composition rather than the total is deliberate: the next time the two
+**80 legs today = the 71 rows in `cases.jsonl` + 9 scripted ones.** The scripted nine are the
+three source-generator staleness legs, the framework `def` (whose two failure modes are an
+absence and a duration, neither of which a `expect` substring can pin), the forced non-daemon
+fallback, the cold-server `diag`, the packaged-tool install, and the two first-run failures (a
+root with no solution, and `dotnet` off `PATH`). Quoting the composition rather than the total is deliberate: the next time the two
 halves drift, the sum stops adding up here rather than going quietly stale. The rows include a
 negative case that pins a query fired before load to a loud failure rather than an empty result.
 

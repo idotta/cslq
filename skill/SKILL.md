@@ -7,7 +7,8 @@ description: >-
   files to answer them. Trigger on "find all callers", "who uses", "where is X defined",
   "go to definition", "what's in this file", "does this compile", "any errors", "what does
   this class expose", "rename impact", "is this method still used", "dead code", "what
-  implements this interface", "who overrides this", "find a symbol by name", and on any
+  implements this interface", "who overrides this", "find a symbol by name", "what is this",
+  "what type is this", "what are the parameters", "which project is this in", and on any
   C# identifier the user names without a file path. Also use before editing an unfamiliar C#
   file, to see the declarations and the callers of what you are about to change.
 ---
@@ -40,17 +41,20 @@ slow first query into a fast one.
 | Every caller / user of a method, type, property | `cslq refs <symbol>` | grep the name — misses aliases, hits comments and strings |
 | Where something is declared | `cslq def <symbol>` | grep `class X` — misses `partial`, generated and cross-project |
 | What implements an interface or overrides a member | `cslq impl <symbol>` | grep `: IThing` — misses indirect and cross-project implementers |
+| What something *is* — its type, signature, parameters, docs | `cslq hover <symbol \| file:line:col>` | read the declaration and infer — hover gives the resolved type and the doc summary in one line |
+| Which project compiles a file, and for which framework | `cslq project <file>` | guess from the directory — a linked file is compiled by a project it does not sit under |
 | Find a symbol when you only know part of the name | `cslq sym <query>` | grep the tree — matches comments, strings and unrelated languages |
 | What a file declares, and its nesting | `cslq outline <file>` | read the whole file into context |
 | Compiler / analyzer errors in a file or the tree | `cslq diag [path]` | `dotnet build` and parse the log |
 | Confirm a symbol still exists at all | `cslq def <symbol>` | assume from a grep hit |
+| What a framework or NuGet type looks like | `cslq hover` at a use of it, or `cslq def` | search the web for the signature |
 
 Never answer "who calls this?" or "where is this defined?" from a text search in a C# repo.
 A text search cannot tell a call from a comment, and it cannot see a caller in another project.
 
 ## Targets
 
-`refs`, `def`, `impl` and `outline` take either form:
+`refs`, `def`, `impl`, `hover` and `outline` take either form:
 
 - **A symbol:** `Greet`, `Greeter.Greet`, `Fixture.Core.Greeter.Greet`. Only the last two
   segments are matched — the enclosing type and the member — because Roslyn returns the
@@ -67,21 +71,35 @@ symbol name in the workspace, so a partial name works and several hits are norma
 an error. Use it when you do not know the exact name; use `def` when you do.
 
 `diag` is the exception: it takes a **file or directory path, or nothing at all** — never a
-symbol or a position. With no argument it walks every `.cs` file under `--root`.
+symbol or a position. With no argument it walks every `.cs` file under `--root`. `project` takes
+a **file path** and nothing else.
 
 ## Output
 
 `path:line:col` relative to the workspace root, then the matched line marked `>` with a line of
 context either side. `--max N` caps results (default 50) and `--context N` widens the window.
-`--json` gives `{ count, truncated, results }` for scripting.
+`--json` gives `{ count, truncated, results }` for scripting — every command, `ready`
+included, where the one result carries `ready` and the number of projects waited for. Plain
+`cslq ready` still prints the single word `ready`.
 
 `outline` is the exception: the path once as a header, then one row per declaration indented by
 nesting, no per-row position and no context.
+
+`hover` is the narrowest exception: the position as a header, then the signature and the
+doc-comment summary as plain text — no fences, no source line, no `>` marker. `--context` does
+nothing for it and `--max` caps the documentation's lines.
 
 `sym` is a narrower exception: it keeps `path:line:col` on every row but prints no source line
 and no `>` marker, so `--context` does nothing for it. Its third column is the container as
 Roslyn displays it (`in Greeter (project Core (net10.0))`) — display text, not a namespace
 path, so do not parse it.
+
+A symbol whose source is not in the workspace — a framework or NuGet type — prints as
+`<metadata>/<assembly>/<TypeName>.cs`, with the declaration and its context lines read from the
+document Roslyn decompiled. That is a real answer. The path is a label, not a file you can pass
+back to `cslq`: `outline System.Console` exits 1, because the document only exists once a `def`
+at a use site has made Roslyn write it. Use `cslq hover` at a use of the symbol instead — it
+answers with no document at all.
 
 Source-generated locations print as `<generated>/<project>/<assembly>/<hintName>` and have no
 file on disk. That is a real answer, not an error — read the source with `cslq outline` on the
@@ -96,8 +114,10 @@ which is the only thing separating two documents one generator emitted into two 
 | 1 | The lookup failed: no such symbol, an ambiguous symbol, no references, no definition, no such file, or the workspace never loaded |
 | 2 | No arguments |
 
-`refs`, `def`, `impl` and `sym` exit 1 on an empty result, because an empty answer means the
-target was not what you thought. `diag` and `outline` exit 0 on an empty result, because nothing
+`refs`, `def`, `impl`, `sym` and `hover` exit 1 on an empty result, because an empty answer
+means the target was not what you thought. `project` exits 1 with `no project` for a `.cs` file
+no project compiles — which is also why `sym` cannot find the types in it and `diag` reports
+nothing for it. `diag` and `outline` exit 0 on an empty result, because nothing
 to report is an answer.
 
 One trap in `impl`: a member with no implementations does **not** come back empty. Roslyn falls
@@ -110,7 +130,7 @@ as "this implements something".
 ```
 --root <dir>        workspace root (default: the current directory)
 --max N             cap results (default 50)
---context N         source lines either side of a hit (default 1; inert for outline and sym)
+--context N         source lines either side of a hit (default 1; inert for outline, sym, hover)
 --timeout N         seconds to wait for the workspace to load (default 180)
 --json              machine-readable output
 --sentinel <sym>    escape hatch: probe readiness with this one symbol instead

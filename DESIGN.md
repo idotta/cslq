@@ -22,7 +22,9 @@ near-useless to a model.
 - Print `path:line` plus the matched line and a line of surrounding context.
 - Paths relative to the workspace root. Lines and columns one-based.
 - Cap results by default so one call can't blow the context window.
-- `--json` for the probe harness to assert against.
+- `--json` for the probe harness to assert against. Every row carries `generated` and
+  `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
+  prefix back off `path`.
 - Every new command follows these. They are the reason this is a CLI and not a wrapper.
 
 **`outline` is the one deliberate exception.** It prints the document path once as a header
@@ -33,8 +35,19 @@ on every row and padding each with context lines would make a whole file unreada
 the context window the rules are meant to protect. Everything else still holds: one-based
 lines, root-relative paths, `--max` (over the pre-order flattening, so a truncated tree is
 always a prefix and no node outlives its parent) and the same `{ count, truncated, results }`
-JSON envelope, with `path` and `generated` on the envelope because the whole document is one
-URI.
+JSON envelope, with `path`, `generated` and `metadata` on the envelope because the whole
+document is one URI.
+
+**`hover` breaks the narrowest rule of the three.** Its answer is prose, not a place: the
+position the hover applies to is still a root-relative one-based `path:line:col` header, but the
+body is a signature and a doc-comment summary, so there is no source line, no `>` marker, and
+`--context` is inert. `--max` caps the documentation's *lines*, because the single result is
+never what a cap could usefully trim, and `count` is 1 for a hover and 0 for none. The signature
+already carries the parameter types, which is why no `signatureHelp` command exists:
+`textDocument/signatureHelp` would be a second request for information already in the first, and
+it only answers inside an argument list rather than at a symbol. The client declares
+`contentFormat: ["plaintext"]` for the same reason the rest of this section exists — markdown
+would mean fenced blocks and `&nbsp;` runs that the caller has to undo.
 
 **`sym` breaks one narrower rule.** It prints no source line and no `>` marker, and
 `--context` is inert for it: a search result set is a list of places to go, not a place to
@@ -78,6 +91,38 @@ emits one identical `Stamp.g.cs` into each. They deliberately do not reference e
 both compilations can hold `Fixture2.Generated.Stamp` without CS0433. The shape cannot be added
 to `fixture/` — `App` references `Core`, so a second copy of the generated type would collide at
 the use site in `App/Program.cs`.
+
+Metadata locations are labelled `<metadata>/<assembly>/<TypeName>.cs`, in the same spirit as
+`<generated>/`, and for the same reason: the real URI is unprintable. It is a file URI, but the
+path is `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/<Type>.cs`
+— machine-absolute, and both guids are regenerated per server instance. `def` at
+`Console.WriteLine` used to print exactly that, at exit 0. The type name is the file name; the
+assembly is not in the URI at all and comes off the `#region Assembly` header Roslyn writes into
+the document, which is why the label needs a lookup the way a generated document's does. Context
+lines come off that file, which unlike a generated document is really on disk.
+
+`outline` on such a document works when it is given the absolute path, but `outline
+System.Console` does not and is not made to: `workspace/symbol` indexes source only, and the
+document does not exist until a `textDocument/definition` at a use site makes Roslyn write it,
+so there is no request that turns a type name into one. `hover` answers that question without a
+document at all.
+
+**The decompilation guard is kept, and now asks rather than assumes.** `SettleAsync` re-asks
+while an answer is decompiled metadata, because a `ProjectReference` binds to the referenced
+project's built assembly until that project loads. Measured 2026-09-07 against
+5.12.0-1.26426.8, the two cases it could not tell apart: the stale binding did not occur once in
+four cold runs of a cross-project `def` against `fixture/`, readiness-per-project having closed
+the window it needs, while a framework `def` fired the guard 39 times over its whole 10 s budget
+and then returned the answer it had had on the first query — that document *is* the definition.
+Deleting the guard on an absence of evidence over three projects would have been the wrong
+inference from the right measurement, so the discriminator was added instead: re-ask only when
+the workspace *also* declares the decompiled document's type, which is exactly what separates
+"bound to an assembly whose source is right here" from "bound to an assembly because that is all
+there is". It costs one `workspace/symbol` query on the metadata path where it cost ten seconds,
+and `def` at `Console.WriteLine` went 12.5 s to 2.5 s. A workspace that declares its own
+`Console` pays the budget on a framework `def`; that is the accepted cost of keeping the guard.
+The stale case cannot be reproduced by a probe — that is what the measurement says — so only the
+pure halves of the discriminator are pinned, by `PathUriTests`.
 
 ## Readiness
 

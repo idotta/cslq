@@ -46,6 +46,19 @@ internal sealed record TextDocumentPositionParams(TextDocumentIdentifier TextDoc
 
 internal sealed record DocumentSymbolParams(TextDocumentIdentifier TextDocument);
 
+// textDocument/hover takes the same params as definition and implementation, so the
+// existing shape is reused rather than a second identical record defined: a hand-rolled
+// payload with the wrong shape does not fail cleanly -- it takes the server's whole queue
+// down (see CLAUDE.md), so the fewer distinct payloads the better.
+//
+// `contents` is MarkupContent because the client declares plaintext as its only
+// contentFormat; the deprecated MarkedString and MarkedString[] forms are what a server
+// sends a client that declares neither, and neither deserializes into this, which is a
+// loud failure rather than a half-rendered answer.
+internal sealed record MarkupContent(string? Kind, string Value);
+
+internal sealed record Hover(MarkupContent? Contents, Range? Range);
+
 // Hierarchical form. The flat SymbolInformation[] fallback is what the server sends when
 // hierarchicalDocumentSymbolSupport is missing or misspelled in the client capabilities, and
 // it does not deserialize into this shape -- a loud failure, which is the point.
@@ -106,10 +119,16 @@ internal sealed record DocumentSymbolCapabilities(
     bool DynamicRegistration,
     bool HierarchicalDocumentSymbolSupport);
 
+// contentFormat is plaintext alone, deliberately. Roslyn reads it to choose how to render a
+// hover, and markdown means fenced code blocks and &nbsp; runs that an agent then has to
+// undo. Asking for plaintext is what makes `cslq hover` printable as-is.
+internal sealed record HoverCapabilities(bool DynamicRegistration, string[] ContentFormat);
+
 internal sealed record TextDocumentCapabilities(
     SynchronizationCapabilities Synchronization,
     DiagnosticCapabilities Diagnostic,
-    DocumentSymbolCapabilities DocumentSymbol);
+    DocumentSymbolCapabilities DocumentSymbol,
+    HoverCapabilities Hover);
 
 internal sealed record SymbolCapabilities(bool DynamicRegistration);
 
