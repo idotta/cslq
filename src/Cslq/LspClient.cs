@@ -13,7 +13,7 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly StringBuilder _stderr;
     private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string[]> _lines = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string?> _projects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (string? File, string? Tfm)> _projects = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _daemon;
     private readonly CancellationToken _ct;
 
@@ -210,7 +210,8 @@ internal sealed class LspClient : IAsyncDisposable
                 new TextDocumentCapabilities(
                     new SynchronizationCapabilities(true),
                     new DiagnosticCapabilities(true, true),
-                    new DocumentSymbolCapabilities(true, true)),
+                    new DocumentSymbolCapabilities(true, true),
+                    new HoverCapabilities(true, ["plaintext"])),
                 new WorkspaceCapabilities(true, true, new SymbolCapabilities(true)),
                 new WindowCapabilities(true)),
             [new WorkspaceFolder(uri, Path.GetFileName(Root.TrimEnd(Path.DirectorySeparatorChar)))]);
@@ -368,13 +369,30 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Re-asks while the answer is decompiled metadata. Roslyn binds a <c>ProjectReference</c>
-    /// to the referenced project's built assembly until that project is loaded into the
-    /// workspace, so a query fired in the window between the sentinel resolving and the last
-    /// project loading comes back pointing at a temp file under <c>MetadataAsSource</c> —
-    /// a confident wrong answer, exit 0, no relation to the repo. The daemon is what made that
-    /// window reachable: readiness used to cost a full cold load, which closed it by accident.
-    /// A symbol that really does come from an assembly costs this budget once and then answers.
+    /// Re-asks while the answer is decompiled metadata <em>and</em> the workspace declares the
+    /// type itself. Roslyn binds a <c>ProjectReference</c> to the referenced project's built
+    /// assembly until that project is loaded, so a query fired in the window between the
+    /// sentinel resolving and the last project loading comes back pointing at a temp file under
+    /// <c>MetadataAsSource</c> — a confident wrong answer, exit 0, no relation to the repo.
+    /// <para>
+    /// The second condition is what this used to lack, and the framework case paid for it.
+    /// Measured 2026-09-07 against 5.12.0-1.26426.8: <c>def</c> at <c>Console.WriteLine</c>
+    /// burned the whole 10 s budget over 40 identical queries and then returned the same
+    /// decompiled answer it had on the first — that document <em>is</em> the definition, so
+    /// there was never anything to wait for. The stale-binding case meanwhile did not occur
+    /// once in four cold runs against the fixture, readiness-per-project having closed the
+    /// window it needs; the guard is kept rather than deleted because that is an absence of
+    /// evidence over three projects, and it now costs one <c>workspace/symbol</c> query on the
+    /// metadata path instead of ten seconds.
+    /// </para>
+    /// <para>
+    /// The discriminator is the workspace itself: a decompiled document is named after the type
+    /// it stands for, so asking whether any source file under the root declares that name
+    /// separates "bound to an assembly whose source is right here" from "bound to an assembly
+    /// because that is all there is". A workspace that declares its own <c>Console</c> would
+    /// pay the budget on a framework <c>def</c>, which is the accepted cost of keeping the
+    /// guard.
+    /// </para>
     /// </summary>
     private async Task<IReadOnlyList<Location>> SettleAsync(
         Func<Task<IReadOnlyList<Location>>> query, CancellationToken ct)
@@ -383,12 +401,64 @@ internal sealed class LspClient : IAsyncDisposable
         while (true)
         {
             var locations = await query();
-            if (locations.Count == 0 || !locations.Any(l => PathUri.IsDecompiled(l.Uri))) return locations;
+            var decompiled = locations.Where(l => PathUri.IsDecompiled(l.Uri)).ToList();
+            if (decompiled.Count == 0) return locations;
+            if (!await StaleBindingAsync(decompiled, ct)) return locations;
             if (DateTime.UtcNow >= deadline) return locations;
             await Task.Delay(250, ct);
         }
     }
 
+    /// <summary>
+    /// Whether a decompiled answer is the not-yet-loaded fingerprint rather than the real
+    /// definition — see <see cref="SettleAsync"/>. Asked again on every round rather than
+    /// cached, because the whole point is that the workspace is still changing underneath.
+    /// <para>
+    /// The hits are filtered to an exact ordinal name match first, and that filter is the
+    /// whole guard. <c>workspace/symbol</c> answers prefix and substring matches too, so a
+    /// workspace that merely declares a <c>ConsoleBanner</c> would otherwise make every
+    /// framework <c>def</c> at <c>Console.WriteLine</c> look like a stale binding and burn
+    /// the entire budget — the exact failure the second condition was added to remove.
+    /// </para>
+    /// </summary>
+    private async Task<bool> StaleBindingAsync(IEnumerable<Location> decompiled, CancellationToken ct)
+    {
+        foreach (var name in decompiled
+            .Select(l => PathUri.MetadataTypeName(l.Uri))
+            .Distinct(StringComparer.Ordinal))
+        {
+            var hits = await SymbolsAsync(name, ct);
+            if (PathUri.AnyUnder(
+                Root,
+                hits.Where(h => string.Equals(h.Name, name, StringComparison.Ordinal))
+                    .Select(h => h.Location.Uri))) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The answer to "what is this". Roslyn's hover carries the full signature including
+    /// parameter types and the doc-comment summary, so <c>textDocument/signatureHelp</c> is
+    /// not wired: it would add a second request for information already in this one, and it
+    /// only answers inside an argument list rather than at a symbol. Verified on the wire
+    /// against 5.12.0-1.26426.8, 2026-09-07 — <c>void Console.WriteLine(string? value)
+    /// (+ 19 overloads)</c> plus the summary and the <c>Exceptions:</c> list.
+    /// <para>
+    /// Null for a position that resolves to no symbol, which is how the empty answer arrives:
+    /// the server sends JSON <c>null</c> rather than an empty <c>contents</c>. No
+    /// <see cref="SettleAsync"/> around it — a hover names a type, it does not point at a
+    /// document, so a metadata binding is not a wrong answer here.
+    /// </para>
+    /// </summary>
+    public async Task<Hover?> HoverAsync(string uri, Position position, CancellationToken ct)
+    {
+        await OpenAsync(uri, ct);
+        return await _rpc.InvokeWithParameterObjectAsync<Hover?>(
+            "textDocument/hover",
+            new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
+            ct);
+    }
 
     public async Task<IReadOnlyList<DocumentSymbol>> DocumentSymbolsAsync(string uri, CancellationToken ct)
     {
@@ -470,6 +540,20 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// The assembly a decompiled document was produced from, for its <c>&lt;metadata&gt;</c>
+    /// label. Roslyn writes it into a <c>#region Assembly</c> header at the top of the file,
+    /// which is the only place it exists — the URI is a temp path made of two run-specific
+    /// guids and the type's name. Read through <see cref="LinesAsync"/>, so it costs the same
+    /// single file read the context lines already pay for.
+    /// </summary>
+    public async Task<string?> AssemblyOfAsync(string uri, CancellationToken ct)
+    {
+        if (!PathUri.IsDecompiled(uri)) return null;
+        var lines = await LinesAsync(uri, ct);
+        return PathUri.MetadataAssembly(lines.FirstOrDefault());
+    }
+
+    /// <summary>
     /// The <c>.csproj</c> a document belongs to, or null if the server will not say. Only a
     /// source-generated document needs asking: a file URI already carries its own path, and
     /// the generated URI's query names the <em>generator</em> assembly, never the project
@@ -490,11 +574,20 @@ internal sealed class LspClient : IAsyncDisposable
     /// document usually contributes several hits to one answer.
     /// </para>
     /// </summary>
-    public async Task<string?> ProjectOfAsync(string uri, CancellationToken ct)
+    public async Task<string?> ProjectOfAsync(string uri, CancellationToken ct) =>
+        (await ProjectContextAsync(uri, ct)).File;
+
+    /// <summary>
+    /// The same lookup with the target framework kept. The <c>($tfm)</c> suffix rides on the
+    /// <c>_vs_id</c> and <see cref="ProjectOfAsync"/> throws it away; <c>cslq project</c> is
+    /// the one caller that wants it, because "which project compiles this file" is only half
+    /// answered without the framework a multi-targeted project compiles it for.
+    /// </summary>
+    public async Task<(string? File, string? Tfm)> ProjectContextAsync(string uri, CancellationToken ct)
     {
         if (_projects.TryGetValue(uri, out var cached)) return cached;
 
-        string? project = null;
+        (string? File, string? Tfm) project = (null, null);
         try
         {
             var list = await _rpc.InvokeWithParameterObjectAsync<ProjectContextList?>(
@@ -525,15 +618,21 @@ internal sealed class LspClient : IAsyncDisposable
     /// multi-targeted project removed. Anything else shaped unexpectedly yields null rather
     /// than a guess: a wrong project in the label is worse than no project.
     /// </summary>
-    private static string? ProjectFile(string id)
+    internal static (string? File, string? Tfm) ProjectFile(string id)
     {
         var bar = id.IndexOf('|');
-        if (bar < 0) return null;
+        if (bar < 0) return (null, null);
 
         var path = id[(bar + 1)..].Trim();
-        var tfm = path.LastIndexOf(" ($", StringComparison.Ordinal);
-        if (tfm > 0 && path.EndsWith(')')) path = path[..tfm];
-        return path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ? path : null;
+        string? tfm = null;
+        var suffix = path.LastIndexOf(" ($", StringComparison.Ordinal);
+        if (suffix > 0 && path.EndsWith(')'))
+        {
+            tfm = path[(suffix + 3)..^1];
+            path = path[..suffix];
+        }
+
+        return path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ? (path, tfm) : (null, null);
     }
 
     /// <summary>

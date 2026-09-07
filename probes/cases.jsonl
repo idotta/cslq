@@ -53,3 +53,19 @@
 {"name":"generated-label-names-consuming-project","args":"sym Stamp --root fixture2","exit":"0","expect":"<generated>/Alpha/Gen2/Stamp.g.cs:3|<generated>/Beta/Gen2/Stamp.g.cs:3"}
 {"name":"generated-label-json","args":"sym Stamp --root fixture2 --json","exit":"0","expect":"'path': '<generated>/Alpha/Gen2/Stamp.g.cs'|'path': '<generated>/Beta/Gen2/Stamp.g.cs'|'generated': true"}
 {"name":"generated-ambiguity-names-consumers","args":"outline Stamp --root fixture2","exit":"1","expect":"declared in several documents|<generated>/Alpha/Gen2/Stamp.g.cs|<generated>/Beta/Gen2/Stamp.g.cs"}
+{"name":"def-framework-member","args":"def App/Program.cs:9:17 --root fixture","exit":"0","expect":"<metadata>/System.Console/Console.cs:|public static void WriteLine(string? value)"}
+{"name":"def-framework-member-json","args":"def App/Program.cs:9:17 --root fixture --json","exit":"0","expect":"'count': 1|'path': '<metadata>/System.Console/Console.cs'|'generated': false|'metadata': true"}
+{"name":"def-framework-type","args":"def App/Program.cs:9:9 --root fixture","exit":"0","expect":"<metadata>/System.Console/Console.cs:|public static class Console"}
+{"name":"hover-symbol","args":"hover Fixture.Core.Greeter.Greet --root fixture","exit":"0","expect":"Core/Greeter.cs:5:26|string Greeter.Greet(string name)"}
+{"name":"hover-symbol-json","args":"hover Fixture.Core.Greeter.Greet --root fixture --json","exit":"0","expect":"'count': 1|'path': 'Core/Greeter.cs'|'line': 5|'signature': 'string Greeter.Greet(string name)'"}
+{"name":"hover-generated","args":"hover Fixture.Core.Generated.BuildInfo.Stamp --root fixture","exit":"0","expect":"<generated>/Core/Gen/BuildInfo.g.cs:5|string BuildInfo.Stamp()"}
+{"name":"hover-framework-member","args":"hover App/Program.cs:9:17 --root fixture","exit":"0","expect":"App/Program.cs:9:17|void Console.WriteLine(string? value)|Writes the specified string value"}
+{"name":"hover-framework-member-truncates","args":"hover App/Program.cs:9:17 --root fixture --max 1","exit":"0","expect":"void Console.WriteLine(string? value)|more (use --max"}
+{"name":"hover-no-symbol-fails","args":"hover App/Program.cs:12:1 --root fixture","exit":"1","expect":"no results"}
+{"name":"project-file","args":"project App/Program.cs --root fixture","exit":"0","expect":"App/App.csproj|net10.0"}
+{"name":"project-json","args":"project Core/Greeter.cs --root fixture --json","exit":"0","expect":"'count': 1|'path': 'Core/Greeter.cs'|'project': 'Core/Core.csproj'|'tfm': 'net10.0'"}
+{"name":"project-non-project-file-fails","args":"project Ambient/Stray.cs --root fixture","exit":"1","expect":"no project"}
+{"name":"project-missing-file-fails","args":"project Core/Missing.cs --root fixture","exit":"1","expect":"cslq: no such file: Core/Missing.cs"}
+{"name":"ready-json-honours-the-envelope","args":"ready --root fixture --json","exit":"0","expect":"'count': 1|'truncated': false|'ready': true|'projects': 3"}
+{"name":"ambiguity-honours-max","args":"def Area --root fixture --max 1","exit":"1","expect":"is ambiguous; qualify it further|... 2 more (use --max 3 to see all)"}
+{"name":"generated-ambiguity-honours-max","args":"outline Stamp --root fixture2 --max 1","exit":"1","expect":"declared in several documents|... 1 more (use --max 2 to see all)"}

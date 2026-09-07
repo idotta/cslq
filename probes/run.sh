@@ -131,6 +131,44 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < probes/cases.jsonl
 
+# The framework `def`, which no cases.jsonl row can pin: the two things that went wrong are
+# an absence (the machine-absolute MetadataAsSource path must not appear) and a duration (the
+# decompilation guard used to re-ask 40 times over its whole 10 s budget and then return the
+# answer it already had on the first). `expect` can only require a substring, and the message
+# alone passes just as well after twelve seconds.
+#
+# Warm by construction: `def-framework-member` above is what makes Roslyn write the decompiled
+# document, which cold costs about six seconds on its own. The bound is 10 s because that is
+# exactly what the old guard burned -- a regression cannot come in under it.
+log "framework def"
+fw_start=$(date +%s)
+fw_log=$(mktemp)
+"$CSLQ" def App/Program.cs:9:17 --root fixture > "$fw_log" 2>&1
+rc=$?
+fw_elapsed=$(( $(date +%s) - fw_start ))
+out=$(cat "$fw_log")
+rm -f "$fw_log"
+
+ok=1
+[ "$rc" = 0 ] || ok=0
+[ "$fw_elapsed" -lt 10 ] || ok=0
+case "$out" in
+  *"<metadata>/System.Console/Console.cs:"*) ;;
+  *) ok=0 ;;
+esac
+case "$out" in
+  *MetadataAsSource*) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "framework-def-is-labelled-and-does-not-stall"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 0 under 10s and a <metadata>/ label)\n' \
+    "framework-def-is-labelled-and-does-not-stall" "$rc" "$fw_elapsed"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
 # The only case that mutates the fixture, and the only one that needs a server to outlive
 # an invocation: rename what the generator keys on, then ask a *fresh* client whether the
 # generated symbol went away. It is a shell block rather than a cases.jsonl row for both

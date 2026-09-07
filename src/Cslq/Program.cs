@@ -14,15 +14,17 @@ internal static partial class Program
           cslq refs    <symbol | file:line:col> [--max N] [--context N]
           cslq def     <symbol | file:line:col> [--max N] [--context N]
           cslq impl    <symbol | file:line:col> [--max N] [--context N]
+          cslq hover   <symbol | file:line:col> [--max N]
           cslq sym     <query> [--max N]
           cslq outline <file | symbol> [--max N]
           cslq diag    [path] [--errors-only] [--max N] [--context N]
+          cslq project <file>
 
         options:
           --root <dir>      workspace root (default: current directory)
           --sentinel <sym>  readiness probe symbol (default: inferred from the workspace)
           --max N           cap results (default: 50)
-          --context N       source lines either side of a hit (default: 1; unused by outline, sym)
+          --context N       source lines either side of a hit (default: 1; unused by outline, sym, hover)
           --timeout N       seconds to wait for workspace load (default: 180)
           --log-level L     server log level (default: Warning)
           --errors-only     diag: drop warnings and below
@@ -33,11 +35,12 @@ internal static partial class Program
         """;
 
     private static readonly string[] Commands =
-        ["ready", "refs", "def", "impl", "sym", "outline", "diag"];
+        ["ready", "refs", "def", "impl", "hover", "sym", "outline", "diag", "project"];
 
     // `outline` is here because it accepts a position too — see OutlineTargetAsync. `sym`
-    // takes a free-text query and `diag` a path, neither of which is position-shaped.
-    private static readonly string[] TakesPosition = ["refs", "def", "impl", "outline"];
+    // takes a free-text query and `diag` and `project` a path, none of which is
+    // position-shaped.
+    private static readonly string[] TakesPosition = ["refs", "def", "impl", "hover", "outline"];
 
     private static async Task<int> Main(string[] argv)
     {
@@ -119,7 +122,7 @@ internal static partial class Program
         {
             case "ready":
                 await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
-                Console.WriteLine("ready");
+                Output.WriteReady(sentinels.Count, opts.Json);
                 return 0;
 
             case "refs":
@@ -140,6 +143,12 @@ internal static partial class Program
             case "diag":
                 return await DiagAsync(client, opts, sentinels, ct);
 
+            case "hover":
+                return await HoverAsync(client, opts, sentinels, ct);
+
+            case "project":
+                return await ProjectAsync(client, opts, sentinels, ct);
+
             default:
                 throw new System.Diagnostics.UnreachableException(
                     $"Options.Parse admitted '{opts.Command}'");
@@ -156,11 +165,10 @@ internal static partial class Program
         // has not finished loading, and the caller waits out the whole timeout for it.
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
+        var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
         var locations = await client.ReferencesAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json,
-            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -171,11 +179,10 @@ internal static partial class Program
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
+        var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
         var locations = await client.DefinitionAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json,
-            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -193,12 +200,53 @@ internal static partial class Program
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var (uri, position) = await LocateAsync(client, opts.Root, target, ct);
+        var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
         var locations = await client.ImplementationsAsync(uri, position, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json,
-            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
         return locations.Count == 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// The answer to "what is this": type, full signature, and the doc-comment summary, from
+    /// one <c>textDocument/hover</c>. Empty exits 1, like <c>def</c> — a position that
+    /// resolves to no symbol is a lookup that failed, not a symbol with nothing to say.
+    /// </summary>
+    private static async Task<int> HoverAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
+    {
+        var target = opts.Argument ?? throw new CslqException("hover needs a symbol or file:line:col");
+
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
+
+        var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
+        var hover = await client.HoverAsync(uri, position, ct);
+        await Output.WriteHoverAsync(
+            opts.Root, uri, position, hover, opts.Max, opts.Json, Documents.Of(client, ct));
+        return hover?.Contents?.Value is null ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Which project compiles a file, and for which target framework. A file, never a symbol:
+    /// the question is about a document, and <c>textDocument/_vs_getProjectContexts</c> answers
+    /// it for an ordinary file as readily as for the generated ones it was wired up for. A file
+    /// no project compiles is not an error — <c>no project</c> is the answer, and the reason
+    /// <c>sym</c> cannot see the types in it.
+    /// </summary>
+    private static async Task<int> ProjectAsync(
+        LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
+    {
+        var target = opts.Argument ?? throw new CslqException("project needs a file");
+        var full = Path.GetFullPath(Path.Combine(opts.Root, target));
+        if (!File.Exists(full)) throw new CslqException($"no such file: {target}");
+
+        await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
+
+        var uri = PathUri.FromPath(full);
+        await client.OpenAsync(uri, ct);
+        var (project, tfm) = await client.ProjectContextAsync(uri, ct);
+        Output.WriteProject(opts.Root, full, project, tfm, opts.Json);
+        return project is null ? 1 : 0;
     }
 
     /// <summary>
@@ -216,7 +264,7 @@ internal static partial class Program
 
         var matches = Distinct(await client.SymbolsAsync(query, ct));
         await Output.WriteSymbolsAsync(
-            opts.Root, matches, opts.Max, opts.Json, u => client.ProjectOfAsync(u, ct));
+            opts.Root, matches, opts.Max, opts.Json, Documents.Of(client, ct));
         return matches.Count == 0 ? 1 : 0;
     }
 
@@ -232,11 +280,10 @@ internal static partial class Program
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var uri = await OutlineTargetAsync(client, opts.Root, target, ct);
+        var uri = await OutlineTargetAsync(client, opts.Root, target, opts.Max, ct);
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
         await Output.WriteOutlineAsync(
-            opts.Root, uri, symbols, opts.Max, opts.Json,
-            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
+            opts.Root, uri, symbols, opts.Max, opts.Json, Documents.Of(client, ct));
         return 0;
     }
 
@@ -249,7 +296,7 @@ internal static partial class Program
     /// and a candidate dump, when the answer is that the file is not there.
     /// </summary>
     private static async Task<string> OutlineTargetAsync(
-        LspClient client, string root, string target, CancellationToken ct)
+        LspClient client, string root, string target, int max, CancellationToken ct)
     {
         var path = TryParsePosition(target, out var file, out _, out _) ? file : target;
         var full = Path.GetFullPath(Path.Combine(root, path));
@@ -265,17 +312,29 @@ internal static partial class Program
         if (uris.Count > 1)
         {
             var rows = new List<string>(uris.Count);
-            foreach (var u in uris)
+            foreach (var u in uris.Take(max))
             {
-                rows.Add("  " + await PathUri.DisplayAsync(root, u, x => client.ProjectOfAsync(x, ct)));
+                rows.Add("  " + await PathUri.DisplayAsync(root, u, Documents.Of(client, ct)));
             }
 
             throw new CslqException(
-                $"'{target}' is declared in several documents; pick one:\n{string.Join('\n', rows)}");
+                $"'{target}' is declared in several documents; pick one:\n"
+                + string.Join('\n', rows) + More(uris.Count, rows.Count));
         }
 
         return uris[0];
     }
+
+    /// <summary>
+    /// The truncation footer the output rules require, for the two candidate listings that are
+    /// carried in an exception message rather than printed by <see cref="Output"/>. A broad
+    /// ambiguous target on a real repository dumps hundreds of rows otherwise, which is the
+    /// exact cost <c>--max</c> exists to prevent — and it lands in the caller's context before
+    /// the caller can react to it.
+    /// </summary>
+    private static string More(int total, int shown) => total > shown
+        ? $"\n... {total - shown} more (use --max {total} to see all)"
+        : string.Empty;
 
     private static bool LooksLikePath(string target) =>
         target.Contains('/') || target.Contains('\\') ||
@@ -329,8 +388,7 @@ internal static partial class Program
         }
 
         await Output.WriteDiagnosticsAsync(
-            opts.Root, findings, opts.Max, opts.Context, opts.Json,
-            u => client.LinesAsync(u, ct), u => client.ProjectOfAsync(u, ct));
+            opts.Root, findings, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
         return 0;
     }
 
@@ -339,7 +397,7 @@ internal static partial class Program
     /// one to a path and back silently yields a different, nonexistent document.
     /// </summary>
     private static async Task<(string Uri, Position Position)> LocateAsync(
-        LspClient client, string root, string target, CancellationToken ct)
+        LspClient client, string root, string target, int max, CancellationToken ct)
     {
         if (TryParsePosition(target, out var file, out var line, out var column))
         {
@@ -352,14 +410,15 @@ internal static partial class Program
         if (matches.Count > 1)
         {
             var rows = new List<string>(matches.Count);
-            foreach (var m in matches)
+            foreach (var m in matches.Take(max))
             {
-                var display = await PathUri.DisplayAsync(root, m.Location.Uri, x => client.ProjectOfAsync(x, ct));
+                var display = await PathUri.DisplayAsync(root, m.Location.Uri, Documents.Of(client, ct));
                 rows.Add($"  {FullName(m)}  {display}:{m.Location.Range.Start.Line + 1}");
             }
 
             throw new CslqException(
-                $"'{target}' is ambiguous; qualify it further:\n{string.Join('\n', rows)}");
+                $"'{target}' is ambiguous; qualify it further:\n"
+                + string.Join('\n', rows) + More(matches.Count, rows.Count));
         }
 
         var match = matches[0];

@@ -19,15 +19,64 @@ internal static class PathUri
 
     /// <summary>
     /// Whether a location is Roslyn's decompiled stand-in for a symbol it only has an assembly
-    /// for. Legitimate for a symbol from a NuGet package, and a bug's fingerprint for one whose
-    /// source is in the workspace: a <c>ProjectReference</c> binds to the referenced project's
-    /// *built assembly* until that project is itself loaded, so a query fired too early answers
-    /// with a temp file under <c>MetadataAsSource</c> instead of the repo.
+    /// for. Two things wear this fingerprint and they are not the same answer: for a framework
+    /// or NuGet type the decompiled document <em>is</em> the definition, while for a type whose
+    /// source is in the workspace it means a <c>ProjectReference</c> is still bound to the
+    /// referenced project's built assembly and the answer is about to change. What tells them
+    /// apart is whether the workspace also declares the type — see
+    /// <see cref="LspClient.SettleAsync"/>.
     /// </summary>
     public static bool IsDecompiled(string uri) =>
         !IsGenerated(uri) &&
         ToPath(uri).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             .Contains("MetadataAsSource", StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The type a decompiled document stands for, which is its file name: Roslyn writes one
+    /// file per type, named after it, under two layers of run-specific guid directories that
+    /// carry no other information. That name is the only thing in the URI worth reading, and
+    /// it is what <see cref="LspClient.SettleAsync"/> asks the workspace about.
+    /// </summary>
+    public static string MetadataTypeName(string uri) =>
+        Path.GetFileNameWithoutExtension(ToPath(uri));
+
+    /// <summary>
+    /// The assembly a decompiled document was produced from, read off the header Roslyn writes
+    /// at the top of it (<c>#region Assembly System.Console, Version=10.0.0.0, ...</c>).
+    /// The URI cannot supply it — the temp path is two guids and a file name — so the label
+    /// comes from the document's own text, which for a decompiled document is a real file on
+    /// disk. Null when the header is not there, which renders as <c>?</c> rather than a guess.
+    /// The leading byte-order mark is stripped: Roslyn writes one.
+    /// </summary>
+    public static string? MetadataAssembly(string? firstLine)
+    {
+        var line = firstLine?.TrimStart('\uFEFF').Trim();
+        const string prefix = "#region Assembly ";
+        if (line is null || !line.StartsWith(prefix, StringComparison.Ordinal)) return null;
+
+        var name = line[prefix.Length..];
+        var comma = name.IndexOf(',');
+        if (comma >= 0) name = name[..comma];
+        name = name.Trim();
+        return name.Length == 0 ? null : name;
+    }
+
+    /// <summary>
+    /// Whether any of <paramref name="uris"/> is an ordinary file inside
+    /// <paramref name="root"/>. That is the discriminator between the two decompiled cases: a
+    /// type Roslyn answered for out of an assembly <em>and</em> declares in a workspace file is
+    /// a stale <c>ProjectReference</c> binding, and one it only has the assembly for is a
+    /// framework or package type whose decompiled document is the real answer.
+    /// </summary>
+    public static bool AnyUnder(string root, IEnumerable<string> uris)
+    {
+        var prefix = Path.GetFullPath(root).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+        return uris.Any(u =>
+            !IsGenerated(u) && !IsDecompiled(u) &&
+            Path.GetFullPath(ToPath(u)).StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>Agents want repo-relative forward-slash paths, not absolute paths or URIs.</summary>
     public static string Relative(string root, string path)
@@ -51,27 +100,40 @@ internal static class PathUri
     /// rather than inventing a project.
     /// </para>
     /// </summary>
-    public static string Display(string root, string uri, string? projectFile = null)
+    public static string Display(
+        string root, string uri, string? projectFile = null, string? assembly = null)
     {
+        // Before the file branch: a decompiled document is a file URI, and its path is a
+        // machine-absolute temp path that Relative would hand straight to the caller.
+        if (IsDecompiled(uri))
+        {
+            return $"<metadata>/{assembly ?? "?"}/{MetadataTypeName(uri)}.cs";
+        }
+
         if (!IsGenerated(uri)) return Relative(root, ToPath(uri));
 
         var query = Query(uri);
-        var assembly = query.GetValueOrDefault("assemblyName", "?");
+        var generator = query.GetValueOrDefault("assemblyName", "?");
         var hint = query.GetValueOrDefault("hintName") ?? ToPath(uri).TrimStart('/');
         var project = projectFile is null
             ? string.Empty
             : Relative(root, Path.GetDirectoryName(Path.GetFullPath(projectFile))!) + "/";
-        return $"<generated>/{project}{assembly}/{hint}";
+        return $"<generated>/{project}{generator}/{hint}";
     }
 
     /// <summary>
-    /// <see cref="Display(string, string, string?)"/> with the project lookup attached. The
-    /// lookup is a request, so it is made only for a generated URI — a file URI carries its
-    /// own path and needs nothing asked.
+    /// <see cref="Display(string, string, string?, string?)"/> with the two lookups the label
+    /// needs attached. Both cost a request or a file read, so each is made only for the kind of
+    /// URI that needs it: a generated document needs its consuming project, a decompiled one
+    /// needs its assembly, and an ordinary file URI carries its own path and needs nothing
+    /// asked.
     /// </summary>
-    public static async Task<string> DisplayAsync(
-        string root, string uri, Func<string, Task<string?>> projectOf) =>
-        IsGenerated(uri) ? Display(root, uri, await projectOf(uri)) : Display(root, uri);
+    public static async Task<string> DisplayAsync(string root, string uri, Documents documents)
+    {
+        if (IsDecompiled(uri)) return Display(root, uri, assembly: await documents.Assembly(uri));
+        if (IsGenerated(uri)) return Display(root, uri, await documents.Project(uri));
+        return Display(root, uri);
+    }
 
     private static Dictionary<string, string> Query(string uri)
     {

@@ -37,17 +37,108 @@ public class PathUriTests
     }
 
     /// <summary>
-    /// Roslyn's decompiled stand-in, which a query fired before the referenced project loaded
-    /// answers with instead of the repo. Legitimate for a NuGet symbol, a bug's fingerprint
-    /// for one whose source is in the workspace.
+    /// Roslyn's decompiled stand-in. For a framework or package type that document is the
+    /// definition; for one whose source is in the workspace it means a ProjectReference is
+    /// still bound to a built assembly. Both wear this fingerprint.
     /// </summary>
     [Fact]
     public void A_metadata_as_source_path_is_decompiled()
     {
-        var uri = PathUri.FromPath(
-            Path.Combine(Path.GetTempPath(), "MetadataAsSource", "abc123", "Greeter.cs"));
+        Assert.True(PathUri.IsDecompiled(Decompiled("Greeter.cs")));
+    }
 
-        Assert.True(PathUri.IsDecompiled(uri));
+    /// <summary>
+    /// The temp path is two run-specific guid directories and a file name, and it is
+    /// machine-absolute, so it must never reach the caller — that was the confident wrong
+    /// answer <c>def</c> at a framework member used to print. The assembly cannot come from
+    /// the URI at all; only the type name can.
+    /// </summary>
+    [Fact]
+    public void A_decompiled_uri_displays_as_its_assembly_and_type()
+    {
+        var uri = Decompiled("Console.cs");
+
+        var display = PathUri.Display("/anywhere", uri, assembly: "System.Console");
+
+        Assert.Equal("<metadata>/System.Console/Console.cs", display);
+        Assert.DoesNotContain("MetadataAsSource", display, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unreadable header renders <c>?</c> rather than a guess, the same way an unanswered
+    /// project lookup falls back rather than inventing one — and the temp path still does not
+    /// leak.
+    /// </summary>
+    [Fact]
+    public void An_unknown_assembly_renders_as_a_question_mark()
+    {
+        Assert.Equal(
+            "<metadata>/?/Console.cs", PathUri.Display("/anywhere", Decompiled("Console.cs")));
+    }
+
+    [Fact]
+    public void A_decompiled_uri_names_the_type_it_stands_for()
+    {
+        Assert.Equal("Console", PathUri.MetadataTypeName(Decompiled("Console.cs")));
+    }
+
+    /// <summary>
+    /// The header Roslyn writes at the top of a decompiled document, byte-order mark and all.
+    /// It is the only place the assembly name exists.
+    /// </summary>
+    [Theory]
+    [InlineData(
+        "\uFEFF#region Assembly System.Console, Version=10.0.0.0, Culture=neutral, PublicKeyToken=b0",
+        "System.Console")]
+    [InlineData("#region Assembly Newtonsoft.Json, Version=13.0.0.0", "Newtonsoft.Json")]
+    [InlineData("#region Assembly System.Runtime", "System.Runtime")]
+    public void The_assembly_comes_off_the_decompilation_header(string line, string want)
+    {
+        Assert.Equal(want, PathUri.MetadataAssembly(line));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("using System;")]
+    [InlineData("#region Assembly ")]
+    public void A_document_with_no_such_header_names_no_assembly(string? line)
+    {
+        Assert.Null(PathUri.MetadataAssembly(line));
+    }
+
+    /// <summary>
+    /// The discriminator between the two decompiled cases. A type Roslyn answered for out of
+    /// an assembly and also declares in a workspace file is a stale ProjectReference binding
+    /// worth re-asking about; one it only has the assembly for is the real answer, and
+    /// re-asking cost ten seconds per framework <c>def</c> before this existed.
+    /// </summary>
+    [Fact]
+    public void A_workspace_source_hit_marks_a_decompiled_answer_stale()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+
+        Assert.True(PathUri.AnyUnder(root, [PathUri.FromPath(Path.Combine(root, "Core", "Greeter.cs"))]));
+    }
+
+    /// <summary>
+    /// Neither a decompiled document nor a generated one counts as workspace source, and the
+    /// decompiled one is the trap: its temp path is a real file path, so a plain prefix test
+    /// against a root under the temp directory would call every framework answer stale.
+    /// </summary>
+    [Fact]
+    public void A_metadata_or_generated_hit_does_not()
+    {
+        Assert.False(PathUri.AnyUnder(Path.GetTempPath(), [Decompiled("Console.cs"), Generated]));
+    }
+
+    [Fact]
+    public void A_hit_outside_the_root_does_not()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+        var outside = PathUri.FromPath(Path.Combine(Path.GetTempPath(), "elsewhere", "Greeter.cs"));
+
+        Assert.False(PathUri.AnyUnder(root, [outside]));
     }
 
     [Fact]
@@ -92,31 +183,63 @@ public class PathUriTests
     [Fact]
     public async Task An_unanswered_project_lookup_falls_back_to_the_generator_only_label()
     {
-        var display = await PathUri.DisplayAsync(
-            "/anywhere", Generated, _ => Task.FromResult<string?>(null));
+        var display = await PathUri.DisplayAsync("/anywhere", Generated, Nothing());
 
         Assert.Equal("<generated>/Fixture.App/BuildInfo.g.cs", display);
     }
 
+    [Fact]
+    public async Task A_decompiled_uri_is_labelled_from_its_own_first_line()
+    {
+        var display = await PathUri.DisplayAsync(
+            "/anywhere",
+            Decompiled("Console.cs"),
+            Nothing() with { Assembly = _ => Task.FromResult<string?>("System.Console") });
+
+        Assert.Equal("<metadata>/System.Console/Console.cs", display);
+    }
+
     /// <summary>
-    /// A file URI carries its own path, so the lookup — a round trip to the server — is never
-    /// made for one.
+    /// A file URI carries its own path, so neither lookup — a round trip to the server and a
+    /// file read — is made for one. Each kind of URI pays only for the lookup its own label
+    /// needs, which is the whole reason they are separate.
     /// </summary>
     [Fact]
     public async Task A_file_uri_is_never_looked_up()
     {
-        var asked = false;
+        var asked = new List<string>();
+        var documents = new Documents(
+            _ => Task.FromResult<string[]>([]),
+            _ => { asked.Add("project"); return Task.FromResult<string?>(null); },
+            _ => { asked.Add("assembly"); return Task.FromResult<string?>(null); });
 
         await PathUri.DisplayAsync(
             Path.GetTempPath(),
             PathUri.FromPath(Path.Combine(Path.GetTempPath(), "Greeter.cs")),
-            _ =>
-            {
-                asked = true;
-                return Task.FromResult<string?>(null);
-            });
+            documents);
 
-        Assert.False(asked);
+        Assert.Empty(asked);
+    }
+
+    /// <summary>
+    /// And a generated URI does not pay for the assembly read, nor a decompiled one for the
+    /// project request.
+    /// </summary>
+    [Fact]
+    public async Task Each_label_asks_only_the_lookup_it_needs()
+    {
+        var asked = new List<string>();
+        var documents = new Documents(
+            _ => Task.FromResult<string[]>([]),
+            _ => { asked.Add("project"); return Task.FromResult<string?>(null); },
+            _ => { asked.Add("assembly"); return Task.FromResult<string?>(null); });
+
+        await PathUri.DisplayAsync("/anywhere", Generated, documents);
+        Assert.Equal(["project"], asked);
+
+        asked.Clear();
+        await PathUri.DisplayAsync("/anywhere", Decompiled("Console.cs"), documents);
+        Assert.Equal(["assembly"], asked);
     }
 
     /// <summary>
@@ -134,6 +257,15 @@ public class PathUriTests
         Assert.Equal(outside.Replace(Path.DirectorySeparatorChar, '/'), display);
         Assert.DoesNotContain("..", display, StringComparison.Ordinal);
     }
+
+    private static string Decompiled(string file) => PathUri.FromPath(Path.Combine(
+        Path.GetTempPath(), "MetadataAsSource", "abc123",
+        "DecompilationMetadataAsSourceFileProvider", "def456", file));
+
+    private static Documents Nothing() => new(
+        _ => Task.FromResult<string[]>([]),
+        _ => Task.FromResult<string?>(null),
+        _ => Task.FromResult<string?>(null));
 
     [Fact]
     public void A_round_trip_through_a_file_uri_preserves_the_path()

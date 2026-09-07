@@ -59,6 +59,38 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   implements without advertising a `textDocumentContentProvider` and answers whether or not
   the client declares the matching capability (verified both ways). The older
   `sourceGeneratedDocument/_roslyn_getText` no longer exists.
+- **A decompiled metadata location is a *file* URI, so every path helper answers it happily
+  with a machine-absolute temp path.** `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/Console.cs`
+  is a real file that really exists, which is why this is worse than the generated-URI trap:
+  nothing throws, the context lines render correctly off disk, and the answer is a path no other
+  machine has. `PathUri.Display` therefore checks `IsDecompiled` **before** the file branch, not
+  after — put the checks the other way round and `Relative` hands the caller the temp path. The
+  assembly is not in the URI at all: it comes off the `#region Assembly <name>, Version=...`
+  header Roslyn writes at the top of the document, behind a byte-order mark, so the
+  `<metadata>/<assembly>/<TypeName>.cs` label needs a document read the way a generated
+  document's label needs a request. Only the file name is stable — both guids are per server
+  instance — so **never assert on the raw path, and never assert the line and column of a
+  framework declaration**: those move with the reference assembly.
+- **`PathUri.AnyUnder` has to exclude decompiled and generated URIs explicitly, and the
+  decompiled one is the trap.** It is the discriminator that keeps `SettleAsync`'s guard: a
+  decompiled answer is stale only if the workspace also declares that type. But a decompiled URI
+  is a path under the *temp directory*, so a plain "is this under the root" prefix test would
+  call every framework answer stale for any workspace living under temp — which is every
+  workspace the unit tests build. `PathUriTests` pins it.
+- **The framework `def` cannot be pinned by a `cases.jsonl` row, because both its failure modes
+  are invisible to a substring.** What went wrong was an absence (the temp path must *not*
+  appear) and a duration (the guard burned its whole 10 s budget and then returned the answer it
+  already had). `expect` can only require a substring, and the right message passes just as well
+  after twelve seconds — so `framework-def-is-labelled-and-does-not-stall` is a scripted leg
+  with an elapsed check, like `no-solution-root-fails-fast`. It is warm by construction: the
+  `def-framework-member` row above it is what makes Roslyn write the decompiled document, which
+  cold costs about six seconds on its own. Keep it after the rows.
+- **`textDocument/hover`'s output shape is chosen by the client capability, and plaintext is
+  what makes it printable.** With `contentFormat: ["markdown"]` — or the node missing, which is
+  what the deprecated `MarkedString` forms are for — Roslyn answers fenced code blocks and
+  `&nbsp;` runs that an agent then has to undo. `HoverCapabilities` declares
+  `["plaintext"]` alone, and the answer is then the signature on line one and the doc summary
+  after it. It carries the parameter types, so `signatureHelp` is deliberately not wired.
 - **A generated document's URI names the generator, never the project consuming it.**
   `assemblyName`, `typeName` and `assemblyPath` are all the generator's; the only thing
   separating two projects' copies of one generated document is the authority guid, which is

@@ -3,16 +3,16 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-07, after Milestone 5 item 3 aligned the docs. Milestones 1-4 are
+Last updated: 2026-09-07, after Milestone 5 item 4 made metadata symbols answer. Milestones 1-4 are
 done; what remains is everything between "works on this clone" and "someone else can use it",
 listed under Milestone 5 below. Output tuning held two concrete changes: `sym`
 applies `--max` in the server's relevance order and sorts only what survives, so a capped
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
 
-63 legs pass — the 55 rows in `probes/cases.jsonl` plus 8 scripted legs (three source-generator
-staleness legs, the forced non-daemon fallback, the cold-server `diag`, the packaged-tool
-install, and the two first-run failures). Quote the composition, not the total, so the next
+80 legs pass — the 71 rows in `probes/cases.jsonl` plus 9 scripted legs (three source-generator
+staleness legs, the framework `def`, the forced non-daemon fallback, the cold-server `diag`, the
+packaged-tool install, and the two first-run failures). Quote the composition, not the total, so the next
 drift between the two halves shows up as a sum that no longer adds up.
 
 Getting there took the readiness rewrite below: the suite failed a *different*
@@ -394,7 +394,7 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       empty answer is not attributed to user setup by default, and its solutionless-root entry
       now says that case errors in about a second instead of hanging. `TestResults/` is in
       `.gitignore`.
-- [ ] **Metadata symbols answer instead of being suppressed, and there is a way to ask what
+- [x] **Metadata symbols answer instead of being suppressed, and there is a way to ask what
       something is.** `def` at `Console.WriteLine` waited ~12 s in `SettleAsync`'s
       decompilation guard, then once returned `no results` at exit 1 and once returned a
       machine-absolute `MetadataAsSource` temp path; `outline System.Console` exits 1.
@@ -411,6 +411,26 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       ignore `--max`, so a broad ambiguous target floods the context the output rules exist to
       protect; and `ProjectOfAsync` already resolves which project compiles a file and its
       TFM but is only called for generated URIs — a `cslq project <file>` is nearly free.
+      **Done, and the guard was kept rather than removed** — see the two measurements under
+      "Verified facts" below. It never fired for a `ProjectReference` in four cold runs, but
+      four cold runs over three projects is an absence of evidence, so rather than delete it
+      `SettleAsync` now asks the question the old code assumed the answer to: it re-asks only
+      when the workspace *also* declares the decompiled document's type, which is the one thing
+      separating a stale binding from a framework type. That is one `workspace/symbol` query on
+      the metadata path where it used to be ten seconds, and `def` at `Console.WriteLine` went
+      12.5 s to 2.5 s. Metadata locations render as `<metadata>/<assembly>/<TypeName>.cs`, in
+      the spirit of `<generated>/`; the assembly comes off the `#region Assembly` header Roslyn
+      writes into the document, the URI being two run-specific guid directories and a file name.
+      `cslq hover` answers "what is this" from one `textDocument/hover` — signature with
+      parameter types plus the doc-comment summary, so no `signatureHelp` was needed — and
+      `cslq project <file>` names the `.csproj` and TFM for any file, `no project` for one
+      nothing compiles. `ready --json` emits the envelope carrying `ready` and the project
+      count, and both ambiguity listings honour `--max`. **Left out: `outline System.Console`.**
+      `documentSymbol` does answer for a metadata document — `outline` on the absolute temp
+      path renders all 115 symbols of `System.Console` — but there is no cheap way to *reach*
+      one from a type name: `workspace/symbol` indexes source only, and nothing but
+      `textDocument/definition` at a use site makes Roslyn write the document at all. `hover` is
+      the answer to the question that was really being asked.
 - [ ] **A Windows CI leg, a format gate, and a `permissions:` block.** Both workflows run
       `ubuntu-latest` only, while the non-ASCII and mutex cases are the two host-dependent
       ones and the Git Bash console is where they would go red. `dotnet format
@@ -465,10 +485,10 @@ started, which stays an accepted cost.
       one-line `cslq:` message naming the fix, with no stack trace and no timeout
 - [x] README tells a new user how to install `cslq` and the skill, and README, this file and
       `cases.jsonl` agree on the case count
-- [ ] `cslq def` on a framework member returns its decompiled declaration without a 10 s
+- [x] `cslq def` on a framework member returns its decompiled declaration without a 10 s
       stall, and a project-reference-still-bound-to-metadata answer is still told apart
-- [ ] An agent can ask what a symbol is — type and signature — with one command
-- [ ] `cslq ready --json` honours the envelope; ambiguity listings honour `--max`
+- [x] An agent can ask what a symbol is — type and signature — with one command
+- [x] `cslq ready --json` honours the envelope; ambiguity listings honour `--max`
 - [ ] The probe suite runs green on a Windows runner as well as `ubuntu-latest`, and
       `dotnet format --verify-no-changes` gates every PR
 
@@ -582,6 +602,48 @@ against 5.12.0-1.26426.8 / win-x64.
   and `documentId` are regenerated on every workspace load.
 - `DOTNET_CLI_UI_LANGUAGE=en` pins Roslyn's own display strings, but StreamJsonRpc's error text
   still came back localised (Portuguese on this machine). Do not assert on transport error text.
+- **The decompilation guard never fired for a `ProjectReference`, and cost the framework case
+  its entire budget.** Measured 2026-09-07 against 5.12.0-1.26426.8, with `SettleAsync`
+  instrumented to print every decompiled answer it observed. Four cold runs, each on a fresh
+  `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` — `cslq ready --root fixture` (3.9-5.3 s) then
+  immediately `cslq def App/Program.cs:9:35` (3.5-4.1 s), a cross-project use of
+  `Fixture.Core.Greeter.Greet` — produced **zero** decompiled answers and the correct
+  `Core/Greeter.cs:5:26` every time: readiness-per-project closes the window a stale binding
+  needs. The same guard warm at a framework use, `cslq def App/Program.cs:9:17`
+  (`Console.WriteLine`), fired **39 times** across the full 10 s budget and then returned the
+  identical answer it had had on query #1 — 12.5-13.2 s wall clock over three runs, ending in a
+  machine-absolute
+  `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/Console.cs:16:21`
+  with its context lines rendered off the real file. One case was free and the other was paying
+  ten seconds for nothing. The guard is kept, with the two cases now told apart by whether the
+  workspace declares the decompiled document's type: `def` at `Console.WriteLine` is 2.5 s warm,
+  and a workspace that declares its own `Console` is the accepted cost.
+- **A decompiled document is a real file, and its only self-description is a header.** The URI
+  is `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/<Type>.cs`
+  — both guids are per server instance, so nothing but the file name survives a restart, and
+  the assembly appears nowhere in it. The file itself opens, behind a byte-order mark, with
+  `#region Assembly System.Console, Version=10.0.0.0, Culture=neutral, PublicKeyToken=...`
+  followed by the reference assembly's path and the ICSharpCode decompiler version. That header
+  is where `<metadata>/System.Console/Console.cs` comes from.
+  `textDocument/documentSymbol` answers for such a document once it is `didOpen`ed — 115
+  symbols for `System.Console` — but no request turns a type *name* into one of these
+  documents, so `outline System.Console` stays unanswerable. Verified 2026-09-07.
+- **`textDocument/hover` carries the parameters, so `signatureHelp` is not needed.** With the
+  client declaring `contentFormat: ["plaintext"]`, Roslyn answers a `MarkupContent` whose value
+  is the signature on the first line and the doc-comment summary after it — for
+  `Console.WriteLine`, `void Console.WriteLine(string? value) (+ 19 overloads)`, then the summary
+  and an `Exceptions:` list; for an undocumented member, the signature alone. Declaring plaintext
+  rather than markdown is what keeps fences and `&nbsp;` runs out of it. The hover carries a
+  `range` widened from the queried column to the whole identifier, and a position that resolves
+  to no symbol answers JSON `null` rather than an empty `contents`. It answers for a
+  source-generated document as readily as for a file one. Verified 2026-09-07 against
+  5.12.0-1.26426.8.
+- **`textDocument/_vs_getProjectContexts` answers for an ordinary file too**, not only the
+  generated URIs it was wired up for, and the `($tfm)` suffix on its `_vs_id` is there for a
+  single-targeted project as well — `App/Program.cs` in `fixture/` answers
+  `<guid>|<abs>/App/App.csproj ($net10.0)`. A `.cs` file no project compiles answers with no
+  contexts at all, which is what `cslq project` prints as `no project`, and is the same
+  invisibility that makes `sym` and `diag` silent about it. Verified 2026-09-07.
 
 - **A generated document's consuming project can be asked for, and only one request answers.**
   `textDocument/_vs_getProjectContexts` is a VS protocol extension the server implements
