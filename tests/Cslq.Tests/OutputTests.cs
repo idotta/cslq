@@ -259,6 +259,8 @@ public class OutputTests
         Assert.Equal("App/Program.cs", only.GetProperty("path").GetString());
         Assert.Equal("App/App.csproj", only.GetProperty("project").GetString());
         Assert.Equal("net10.0", only.GetProperty("tfm").GetString());
+        Assert.False(only.GetProperty("generated").GetBoolean());
+        Assert.False(only.GetProperty("metadata").GetBoolean());
     }
 
     /// <summary>

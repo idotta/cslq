@@ -479,18 +479,32 @@ internal static class Output
 
     /// <summary>
     /// The project a file is compiled by, and the target framework it is compiled for. Exits
-    /// through the same envelope as everything else; the <c>.csproj</c> is rendered
-    /// root-relative like every other path.
+    /// through the same envelope as everything else; both paths are rendered through
+    /// <see cref="PathUri.Display(string, string, string?, string?)"/> like every other
+    /// location, so the decompiled and generated branches apply here too rather than being
+    /// bypassed by a raw <c>Relative</c>. The row carries <c>generated</c> and
+    /// <c>metadata</c> for the same reason every other row does: a caller never has to parse
+    /// a label to know what kind of place it names.
     /// </summary>
     public static void WriteProject(string root, string path, string? project, string? tfm, bool json)
     {
-        var display = project is null ? null : PathUri.Relative(root, Path.GetFullPath(project));
+        var display = project is null ? null : PathUri.Display(root, PathUri.FromPath(project));
 
         if (json)
         {
             List<object> results = display is null
                 ? []
-                : [new { path = PathUri.Relative(root, path), project = display, tfm }];
+                :
+                [
+                    new
+                    {
+                        path = PathUri.Display(root, PathUri.FromPath(path)),
+                        project = display,
+                        tfm,
+                        generated = false,
+                        metadata = false,
+                    },
+                ];
             Console.WriteLine(JsonSerializer.Serialize(
                 new { count = results.Count, truncated = false, results },
                 JsonOut));

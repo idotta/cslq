@@ -413,6 +413,13 @@ internal sealed class LspClient : IAsyncDisposable
     /// Whether a decompiled answer is the not-yet-loaded fingerprint rather than the real
     /// definition — see <see cref="SettleAsync"/>. Asked again on every round rather than
     /// cached, because the whole point is that the workspace is still changing underneath.
+    /// <para>
+    /// The hits are filtered to an exact ordinal name match first, and that filter is the
+    /// whole guard. <c>workspace/symbol</c> answers prefix and substring matches too, so a
+    /// workspace that merely declares a <c>ConsoleBanner</c> would otherwise make every
+    /// framework <c>def</c> at <c>Console.WriteLine</c> look like a stale binding and burn
+    /// the entire budget — the exact failure the second condition was added to remove.
+    /// </para>
     /// </summary>
     private async Task<bool> StaleBindingAsync(IEnumerable<Location> decompiled, CancellationToken ct)
     {
@@ -421,7 +428,10 @@ internal sealed class LspClient : IAsyncDisposable
             .Distinct(StringComparer.Ordinal))
         {
             var hits = await SymbolsAsync(name, ct);
-            if (PathUri.AnyUnder(Root, hits.Select(h => h.Location.Uri))) return true;
+            if (PathUri.AnyUnder(
+                Root,
+                hits.Where(h => string.Equals(h.Name, name, StringComparison.Ordinal))
+                    .Select(h => h.Location.Uri))) return true;
         }
 
         return false;
