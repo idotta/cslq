@@ -3,21 +3,28 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-06, after Milestone 5 item 1 shipped the install path. Milestones 1-4 are
+Last updated: 2026-09-07, after Milestone 5 item 3 aligned the docs. Milestones 1-4 are
 done; what remains is everything between "works on this clone" and "someone else can use it",
 listed under Milestone 5 below. Output tuning held two concrete changes: `sym`
 applies `--max` in the server's relevance order and sorts only what survives, so a capped
 broad query keeps the best matches; and a generated document's label now names the project
 that consumed the generator, which the URI never did.
 
-63 cases pass. Getting there took the readiness rewrite below: the suite failed a *different*
+63 legs pass — the 55 rows in `probes/cases.jsonl` plus 8 scripted legs (three source-generator
+staleness legs, the forced non-daemon fallback, the cold-server `diag`, the packaged-tool
+install, and the two first-run failures). Quote the composition, not the total, so the next
+drift between the two halves shows up as a sum that no longer adds up.
+
+Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
 missing rather than by erroring. That window — the sentinel proving the workspace loaded but not
 that every project did — is closed: `WaitReadyAsync` now takes one sentinel per discovered project and
 requires each to resolve to a location under its own project directory, so an incomplete answer
-at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard and
-`QuerySymbolsAsync`'s retry remain, but neither is load-bearing for it; both watch for an
-*empty* answer and that failure was merely *incomplete*. The remaining limit is two `.csproj`
+at exit 0 can no longer get past readiness. The `SettleAsync` decompilation guard remains, but
+it is not load-bearing for it; it watches for an *empty* answer and that failure was merely
+*incomplete*. `MatchSymbolsAsync` fires a single `workspace/symbol` query with no
+retry-while-empty loop, for the same reason — readiness covering every project is what makes an
+empty answer mean absent. The remaining limit is two `.csproj`
 in one directory, which no path scoping can separate — documented, not scheduled.
 
 That gate gap is closed, and not the way this file used to propose. The scoping half of
@@ -279,12 +286,12 @@ agent to run `cslq ready` once at session start.
       is a second, narrower exception to the output rules. It fetches no source text at all,
       so a broad query costs no per-hit round trips; that is also why its JSON has no `text`
       field where `refs` and `outline` have one.
-      The retry-while-empty loop that lived inside `MatchSymbolsAsync` is now
-      `Program.QuerySymbolsAsync`, shared by both. `sym` needs it for the same reason `refs`
-      does: the sentinel proves the workspace loaded, not that every project did, and a query
-      fired in that window answers nothing — indistinguishable from a typo. It retries on the
-      *selection*, not on the raw answer, because a name declared in two projects returns the
-      loaded one's symbols immediately.
+      `refs` and `sym` share one `Program.MatchSymbolsAsync`, which issues a single
+      `workspace/symbol` query and selects from its candidates. The retry-while-empty loop it
+      once needed is gone: it existed because the sentinel proved the workspace loaded and not
+      that every project did, so a query fired in that window answered nothing —
+      indistinguishable from a typo. Sentinel-per-project readiness closed that window, and an
+      empty answer now means absent.
 - [x] Output tuning — the one concrete item under it, DESIGN.md's generated-document label,
       is done. The label now leads with the consuming project's directory
       (`<generated>/Core/Gen/BuildInfo.g.cs`), which comes from
@@ -365,18 +372,28 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       two solutions on purpose. Probe legs `no-solution-root-fails-fast` (which asserts the
       elapsed time, not just the message) and `dotnet-off-path-reports`; the case
       `no-project-root-reports` became `no-solution-root-reports`.
-- [ ] **README install section, and stop the docs disagreeing.** README has no
-      prerequisites, no clone → `dotnet tool restore` → build → where-the-binary-lands, and no
-      note that the first restore is ~300 MB; it opens with `cslq ready` as if `cslq` were on
-      `PATH`, and `skill/SKILL.md` assumes the same without saying how it gets there. README's
-      status line still says Milestone 4 is in progress; its probe count ("fifty-seven") and
-      this file's ("60") both disagree with `cases.jsonl` (55 rows plus the staleness and
-      fallback legs); its latency tables are dated 2026-09-04 and labelled "debug build" while
-      the gate builds Release; and this file cited `Program.QuerySymbolsAsync`, which no longer
-      exists — `MatchSymbolsAsync` does one query. `SKILL.md` should also surface the two
-      known readiness limits from DESIGN.md rather than attributing every empty answer to
-      user setup. `TestResults/` belongs in `.gitignore`: MTP writes there and it is only
-      untracked today because it is empty.
+- [x] **README install section, and stop the docs disagreeing.** README had no
+      prerequisites, no route from a clone to a binary on `PATH`, and no note that the first
+      restore is ~300 MB; it opened with `cslq ready` as if `cslq` were already installed, and
+      `skill/SKILL.md` assumed the same without saying how it got there.
+      **Done.** README opens with an **Install** section before any example: prerequisites, the
+      route that works today (clone → `dotnet pack` → `dotnet tool install -g cslq --source`),
+      that `dotnet tool install -g cslq` from nuget.org is the intended route and **is not
+      published yet**, the automatic first-run `dotnet tool restore` in the tool's own manifest
+      directory with its one-time ~300 MB download, and that `--root` must be the directory
+      holding the `.sln`/`.slnx`. A sub-section says how `skill/SKILL.md` reaches an agent —
+      a copy into a skills directory, no plugin or marketplace — and that other agents take the
+      same file. The disagreements are closed: the status line matches this table; the case
+      count is stated as its composition (55 rows + 8 scripted legs = 63) in both files so the
+      next drift stops adding up rather than going stale; the two references to a
+      `Program.Query*` symbol-retry helper that never existed are gone, since
+      `MatchSymbolsAsync` issues one query and no longer retries; and
+      the latency tables were re-measured against the Release binary on 2026-09-07 and relabelled
+      with the build configuration. `SKILL.md` also surfaces the two readiness limits from
+      DESIGN.md — a project with no type to probe, and two `.csproj` in one directory — so an
+      empty answer is not attributed to user setup by default, and its solutionless-root entry
+      now says that case errors in about a second instead of hanging. `TestResults/` is in
+      `.gitignore`.
 - [ ] **Metadata symbols answer instead of being suppressed, and there is a way to ask what
       something is.** `def` at `Console.WriteLine` waited ~12 s in `SettleAsync`'s
       decompilation guard, then once returned `no results` at exit 1 and once returned a
@@ -446,7 +463,7 @@ started, which stays an accepted cost.
       answers; `cslq --version` prints the version a release is tagged with
 - [x] `dotnet` missing, the tool not restored, and a root with no solution each produce a
       one-line `cslq:` message naming the fix, with no stack trace and no timeout
-- [ ] README tells a new user how to install `cslq` and the skill, and README, this file and
+- [x] README tells a new user how to install `cslq` and the skill, and README, this file and
       `cases.jsonl` agree on the case count
 - [ ] `cslq def` on a framework member returns its decompiled declaration without a 10 s
       stall, and a project-reference-still-bound-to-metadata answer is still told apart
@@ -494,8 +511,9 @@ against 5.12.0-1.26426.8 / win-x64.
   linked file's real diagnostics. Verified 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy
   of the fixture.
 - `fixture/` **does** have a solution — `Fixture.slnx` — so it is not a counterexample to
-  `skill/SKILL.md`'s "a root with only a `.csproj` and no solution never loads". That entry
-  already covers `.slnx` and stands. Verified 2026-09-05.
+  `skill/SKILL.md`'s entry on solutionless roots, which since PR #12 reads that such a root
+  errors in about a second rather than hanging. `.slnx` counts as the solution there exactly as
+  `.sln` does. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
   a server-to-client request and carries none, so `cslq` enumerates `.csproj` files instead and
   accepts that this is an approximation. Verified 2026-09-05.
@@ -623,6 +641,9 @@ flag and env-var names that appear in no `--help`.
 - **A root with only a `.csproj` and no solution never becomes ready**, daemon or not.
   `projectInitializationComplete` never fires and `workspace/symbol` stays empty for the full
   timeout; `--autoLoadProjects` does not discover a bare project. Adding a `.slnx` fixes it
-  immediately. This belongs in `SKILL.md`.
+  immediately. **Superseded as a symptom:** since Milestone 5 item 2 that root is rejected
+  before the server starts, so the timeout is no longer reachable — the underlying fact about
+  `--autoLoadProjects` is what the rejection rests on. `SKILL.md` carries the error, not the
+  hang.
 - `premature-query-fails-loudly` still exits 1 against a warm daemon, because `--timeout 0` means
   `WaitReadyAsync` never issues a query at all. That case pins the timeout guard, not cold load.

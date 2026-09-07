@@ -11,11 +11,70 @@ Two constraints drive the design:
 1. **Official tooling only.** The C#-specific component in the query path is Microsoft-published.
 2. **Always current.** A weekly cron bumps the pin and a probe suite gates the bump.
 
-Status: **Milestone 3 done, Milestone 4 in progress** — `cslq ready`, `cslq refs`, `cslq def`,
+Status: **Milestones 1-4 done, Milestone 5 open** — `cslq ready`, `cslq refs`, `cslq def`,
 `cslq impl`, `cslq sym`, `cslq outline` and `cslq diag`, cross-project fixture, probe gate, both
 workflows, the source-generator, non-ASCII and deliberate-error fixture cases, the shared server
-daemon on by default, source-generator staleness pinned, and `skill/SKILL.md`. Milestone 4's
-remaining item is output tuning. See [ROADMAP.md](ROADMAP.md).
+daemon on by default, source-generator staleness pinned, `skill/SKILL.md`, and output tuning.
+Milestone 5 is what stands between "works on this clone" and "someone else can use it": its
+first two items are done — the tool packs and installs outside this repository, and the
+first-run failures are one-line `cslq:` messages — and metadata symbols, a Windows CI leg and a
+format gate remain. See [ROADMAP.md](ROADMAP.md).
+
+## Install
+
+Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches the language
+server itself on first run.
+
+`cslq` is not on nuget.org yet. Until 0.1.0 is published, install it from a package you build:
+
+```
+git clone https://github.com/idotta/cslq.git
+cd cslq
+dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts
+dotnet tool install -g cslq --source ./artifacts
+cslq --version
+```
+
+`dotnet tool install -g cslq` straight from nuget.org is the intended route, and will replace
+every step above once 0.1.0 is pushed. **It does not work today** — the package has never been
+published — so the `--source` pointing at your own `dotnet pack` output is what makes the
+install work.
+
+The first command that needs the language server restores it for you and says so:
+
+```
+cslq: the pinned language server is not restored; restoring it in <dir>. This is a one-time ~300 MB download.
+```
+
+`<dir>` is the tool's *own* manifest directory — the `.config/dotnet-tools.json` packed
+alongside the binary, which for a global install is under
+`~/.dotnet/tools/.store/cslq/<version>/cslq/<version>/tools/net10.0/any/`. It is never your
+repository: the pin travels with the `cslq` version, so nothing you query has to carry it. The
+restore is idempotent and later runs skip it.
+
+Then, in the repository you want to query:
+
+```
+dotnet restore                 # the server does not restore your projects
+cslq ready --root <dir>
+```
+
+`--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
+that solution lists. A root with no solution at its top is an error, reported in about a second
+rather than after the timeout, and a solution one directory down does not count.
+
+### The skill
+
+`skill/SKILL.md` is what makes an agent reach for `cslq` instead of grep. It is a plain markdown
+file with YAML frontmatter; installing it means putting it where the agent looks.
+
+For Claude Code, copy it to `.claude/skills/csharp-semantic-queries/SKILL.md` in the repository
+you want to query, or to `~/.claude/skills/csharp-semantic-queries/SKILL.md` to have it
+everywhere; the `name` and `description` in its frontmatter are what Claude Code matches
+against. There is no plugin or marketplace to install.
+
+Other agents get the same file — its body names no tool but `cslq`, so paste it into whatever
+that agent reads as standing instructions.
 
 ## Use
 
@@ -121,11 +180,12 @@ Paths are relative to `--root`; lines and columns are one-based.
 
 `--sentinel` is an escape hatch, not a neutral override. By default `cslq` waits for *every*
 project under the root to load, one readiness probe per project the root's solution lists — or
-per `.csproj` when the root holds no solution, or more than one. Passing `--sentinel` replaces
-that whole set with a single probe scoped to the root, which gives up the guarantee and restores
-the window in which `refs`, `impl` and `sym` can answer incompletely at exit 0. Use it when the
-`.csproj` scan cannot read the workspace layout — including a root with no `.csproj`, which
-otherwise fails immediately.
+per `.csproj` when the root holds more than one solution, which gives no basis for choosing
+between them. A root holding *no* solution is an error, not a third route into the scan.
+Passing `--sentinel` replaces that whole set with a single probe scoped to the root, which gives
+up the guarantee and restores the window in which `refs`, `impl` and `sym` can answer
+incompletely at exit 0. Use it when the `.csproj` scan cannot read the workspace layout —
+including a root with no `.csproj`, which otherwise fails immediately.
 
 `refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl` and
@@ -148,34 +208,39 @@ the developer's machine locale.
 
 ## Latency
 
-Measured on the fixture, Windows 11 / .NET 10.0.301, debug build:
+Measured on the fixture, Windows 11 / .NET 10.0.301, **Release build** (the configuration
+`probes/run.sh` builds), three runs per command, 2026-09-07. The cold column is `--no-daemon`,
+one private server per invocation:
 
 | command | cold (per invocation) |
 |---|---|
-| `cslq ready` | ~3.9–4.1 s |
-| `cslq refs` | ~5.9–14.7 s |
-| `cslq def` | ~6.4–7.0 s |
-| `cslq outline` | ~5.4–6.2 s |
-| `cslq diag <file>` | ~11–12 s |
-| `cslq diag` (whole fixture) | ~16 s over the 11 files it then had |
+| `cslq ready` | ~4.4–5.8 s |
+| `cslq refs` | ~7.6–8.8 s |
+| `cslq def` | ~5.4–7.6 s |
+| `cslq outline` | ~6.2–6.4 s |
+| `cslq diag <file>` | ~9.2–10.9 s |
+| `cslq diag` (whole fixture) | ~14.4–15.3 s over 12 files |
 
 The same suite on `ubuntu-latest` reaches ready in ~12 s and runs six cases in ~39 s.
 
 Milestone 1 started a dedicated server per invocation, so every command paid a full solution
 load. Since Milestone 3 `cslq` connects to the shared daemon by default and the cost is a pipe
-round-trip against an already-warm server; `--no-daemon` gets the old behaviour back. Measured
-the same way on 2026-09-04:
+round-trip against an already-warm server; `--no-daemon` gets the old behaviour back. Same
+fixture, same Release binary, 2026-09-07:
 
 | command | non-daemon | daemon warm |
 |---|---|---|
-| `cslq ready` | 7.3 s | 2.3–2.6 s |
-| `cslq refs` | 9.6–10.4 s | 3.1–5.2 s |
-| `cslq def` | — | 2.6–2.8 s |
-| `cslq outline` | — | 2.6 s |
+| `cslq ready` | 4.4–5.8 s | 2.5–2.6 s |
+| `cslq refs` | 7.6–8.8 s | 2.9–4.8 s |
+| `cslq def` | 5.4–7.6 s | 2.3–2.8 s |
+| `cslq outline` | 6.2–6.4 s | 2.3–2.5 s |
+| `cslq diag <file>` | 9.2–10.9 s | 2.9–6.1 s |
 
-About 3.2x on `refs`, with little variance across repeats. The warm floor is `dotnet tool run`
-plus apphost startup plus connecting the relay — not Roslyn — so it is a floor `cslq` cannot
-get under while it launches through `dotnet tool run`.
+About 2.5x on `refs`, with little variance across repeats once the daemon has seen the document
+— the high end of each warm range is the first invocation, which still pays the `didOpen` and
+the first bind of that document. The warm floor is `dotnet tool run` plus apphost startup plus
+connecting the relay — not Roslyn — so it is a floor `cslq` cannot get under while it launches
+through `dotnet tool run`.
 
 One daemon is shared across every workspace on the machine, keyed by user identity and the
 server's versioned path rather than by the root, and it outlives the client that started it
@@ -273,9 +338,13 @@ weekly bump.
 
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
-Fifty-seven cases today — fifty-two rows, three source-generator staleness legs, the forced
-non-daemon fallback and a cold-server `diag` — including a negative one that pins a query
-fired before load to a loud failure rather than an empty result.
+
+**63 legs today = the 55 rows in `cases.jsonl` + 8 scripted ones.** The scripted eight are the
+three source-generator staleness legs, the forced non-daemon fallback, the cold-server `diag`,
+the packaged-tool install, and the two first-run failures (a root with no solution, and `dotnet`
+off `PATH`). Quoting the composition rather than the total is deliberate: the next time the two
+halves drift, the sum stops adding up here rather than going quietly stale. The rows include a
+negative case that pins a query fired before load to a loud failure rather than an empty result.
 
 The unit tests come first because they cost under a second and need no server: they cover the
 pure logic below the transport — sentinel inference, argument parsing, path and URI rendering,

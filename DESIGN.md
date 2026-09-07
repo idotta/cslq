@@ -100,10 +100,11 @@ be attributed to one of them by path — no scan-based scoping can separate them
 project is covered only incidentally.
 
 Knowing the projects means reading the root's solution, and scanning for `*.csproj` under the
-root whenever there is not exactly one to read — none, or several — because **the server
-cannot be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and
-carries no project list. Either way it is an approximation, and the two err in opposite
-directions.
+root when there are several to read and no basis for choosing one — because **the server cannot
+be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
+project list. A root with no solution at all is neither read nor scanned: it is an error, for
+the reason the next paragraph gives. Either way the answer is an approximation, and the two err
+in opposite directions.
 
 The solution is read because **over-inclusion is not merely wasteful, it is fatal:** a `.csproj`
 the solution excludes is never loaded, so its types are never indexed, its sentinel can never
