@@ -86,7 +86,27 @@ internal sealed class LspClient : IAsyncDisposable
         {
             var stdout = proc.StandardOutput.ReadToEndAsync(ct);
             var stderr = proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            try
+            {
+                await proc.WaitForExitAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Ctrl+C mid-restore: the payload behind the pin is ~300 MB, so leaving it
+                // running orphans a download nothing will ever wait on. Tree, as
+                // DisposeAsync does for a dedicated server — the child is ours alone.
+                try
+                {
+                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Already exited.
+                }
+
+                throw;
+            }
+
             if (proc.ExitCode != 0)
             {
                 var why = (await stderr).Trim();
