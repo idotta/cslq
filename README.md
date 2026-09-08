@@ -23,7 +23,8 @@ format gate remain. See [ROADMAP.md](ROADMAP.md).
 ## Install
 
 Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches the language
-server itself on first run.
+server itself on first run. Linux, Windows and macOS are the supported platforms, and every PR
+runs the gate on all three.
 
 `cslq` is not on nuget.org yet. Until 0.1.0 is published, install it from a package you build:
 
@@ -430,12 +431,13 @@ doc comment above the only declaration in a single-file project. Anything that n
 server belongs in a case, not a test.
 
 `probe.yml` runs the gate on every PR and every push to `main`, as a `fail-fast: false` matrix
-over `ubuntu-latest` and `windows-latest`. Both legs run `./probes/run.sh` through the runner's
-`bash`, which on Windows is Git Bash — the two host-dependent cases, the non-ASCII ones and the
-forced non-daemon fallback's named mutex, are the reason the second leg exists, and
-`fail-fast: false` keeps a Windows-only red from cancelling the Linux leg that says whether it
-is platform specific. Each leg runs `dotnet format --verify-no-changes` before the gate;
-`release.yml` and `bump.yml` run it before theirs too, so no path to a release skips it.
+over `ubuntu-latest`, `windows-latest` and `macos-latest`. All three legs run `./probes/run.sh`
+through the runner's `bash`, which on Windows is Git Bash — the two host-dependent cases, the
+non-ASCII ones and the forced non-daemon fallback's named mutex, are what the Windows leg
+watches, and `fail-fast: false` keeps a Windows-only red from cancelling the Linux and macOS
+legs that say whether it is platform specific. Each leg runs `dotnet format
+--verify-no-changes` before the gate; `release.yml` and `bump.yml` run it before theirs too, so
+no path to a release skips it.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it
@@ -447,7 +449,7 @@ Inside `expect`, `'` stands for `"` and `|` separates substrings that must all a
 ```
 Cslq.slnx                    src/Cslq + tests/Cslq.Tests; fixture/ is deliberately not in it
 .config/dotnet-tools.json   the version pin
-.github/workflows/          bump.yml (weekly cron), probe.yml (every PR, linux + windows)
+.github/workflows/          bump.yml (weekly cron), probe.yml (every PR, linux + windows + macos)
 src/Cslq/                    the thin LSP client and CLI
   ServerArgs.cs             the only place server flags live
   Protocol.cs               hand-defined LSP payload types

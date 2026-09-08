@@ -32,10 +32,11 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `[Console]::OutputEncoding`, which nothing `cslq` sets can change.
 - **The non-ASCII probe cases are the first host-dependent ones.** They no longer go green on
   CI and red in Git Bash: since Milestone 5 item 5 `probe.yml` is a `fail-fast: false` matrix
-  over `ubuntu-latest` **and** `windows-latest`, where the job runs `./probes/run.sh` under the
-  runner's `bash` — which on Windows is Git Bash, the shell that raised the encoding question in
-  the first place. `bump.yml` and `release.yml` stay `ubuntu-latest` alone; they gate a
-  publish, and the platform coverage lives on every PR. Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
+  over `ubuntu-latest`, `windows-latest` **and** `macos-latest`, where the job runs
+  `./probes/run.sh` under the runner's `bash` — which on Windows is Git Bash, the shell that
+  raised the encoding question in the first place. `bump.yml` and `release.yml` stay
+  `ubuntu-latest` alone; they gate a publish, and the platform coverage lives on every PR.
+  Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
   bytes rather than throwing, so a fixture file corrupted to a non-UTF-8 encoding would desync
   the `didOpen` text from what Roslyn parses off disk — silently, except that
   `non-ascii-refs-position` then fails.
