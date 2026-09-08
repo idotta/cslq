@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Scoped to the two shipped projects on purpose. The root .config/dotnet-tools.json pins the
+  # language server, which is bump.yml's to move and only through the gate; fixture/Gen pins an
+  # old Microsoft.CodeAnalysis.CSharp because analyzers target netstandard2.0.
+  - package-ecosystem: nuget
+    directories:
+      - /src/Cslq
+      - /tests/Cslq.Tests
+    schedule:
+      interval: monthly
+    groups:
+      nuget:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: roslyn-language-server

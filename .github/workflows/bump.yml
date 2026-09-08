@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  statuses: write
+  actions: write
 
 jobs:
   bump:
@@ -60,8 +60,6 @@ jobs:
       - uses: peter-evans/create-pull-request@v8
         id: cpr
         with:
-          # BUMP_TOKEN is optional; see the status step below for what it buys.
-          token: ${{ secrets.BUMP_TOKEN || secrets.GITHUB_TOKEN }}
           title: "bump roslyn-language-server to ${{ steps.pin.outputs.version }}"
           branch: chore/bump-roslyn-ls
           commit-message: "bump roslyn-language-server to ${{ steps.pin.outputs.version }}"
@@ -74,16 +72,12 @@ jobs:
             `probes/run.sh` passed against `${{ steps.pin.outputs.version }}` on this runner
             before the PR was opened.
 
-      # A PR opened with GITHUB_TOKEN does not trigger workflows, so probe.yml never runs
-      # on it and the PR shows no gate. Publish the probe result above as a commit status
-      # instead, so the PR carries something a reviewer and branch protection can require.
-      # Set a BUMP_TOKEN secret (a PAT with repo scope) to get a native probe.yml run.
+      # The probe.yml run GitHub creates for a PR opened with GITHUB_TOKEN parks at
+      # action_required until a human approves it, so on its own the PR shows no gate.
+      # workflow_dispatch (like repository_dispatch) is exempt from that suppression, and its
+      # check runs land on the branch head under the same `probe (<os>)` names the ruleset on
+      # main requires — the same three-OS gate a human PR gets.
       - if: steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/${{ github.repository }}/statuses/${{ steps.cpr.outputs.pull-request-head-sha }}" \
-            -f state=success \
-            -f context=probes \
-            -f description="probes passed against ${{ steps.pin.outputs.version }}" \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: gh workflow run probe.yml --ref "${{ steps.cpr.outputs.pull-request-branch }}"
