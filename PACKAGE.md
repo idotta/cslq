@@ -8,12 +8,29 @@ method instead of grepping for its name.
 
 ## Install
 
+`cslq` is built for coding agents, so there are two pieces: the tool on `PATH`, and the skill
+that makes an agent reach for it instead of grep. The tool on its own is inert — nothing will
+invoke it.
+
 Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches the language
 server itself on first run.
 
 ```
-dotnet tool install -g cslq
+dotnet tool install -g cslq       # the tool
+npx skills add idotta/cslq -g     # the skill, into every agent on the machine
 ```
+
+The second command is [`npx skills`](https://github.com/vercel-labs/skills), which installs
+`skills/csharp-semantic-queries/SKILL.md` from the repository into each agent's skills
+directory — `~/.claude/skills/csharp-semantic-queries/` for Claude Code. Drop `-g` to install
+into the current repository instead. Without `npx`, copy that one file there yourself: it is
+plain markdown with YAML frontmatter and needs nothing else on disk.
+
+Or hand both steps to the agent:
+
+> Install `cslq` and its skill so you can answer C# questions semantically instead of grepping:
+> run `dotnet tool install -g cslq`, then `npx skills add idotta/cslq -g`, then `cslq restore`.
+> Then run `cslq ready --root .` here and tell me what it printed.
 
 The first command that needs the language server restores it for you and says so:
 

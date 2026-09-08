@@ -44,7 +44,7 @@ at all; that stays a one-line coupling at the call site.
 |---|---|---|
 | 1 | `ready` + `refs`, cross-project fixture, probe gate, both workflows | **done** |
 | 2 | The hard fixture cases and the read commands | **done** |
-| 3 | Daemon mode, then `skill/SKILL.md` | **done** |
+| 3 | Daemon mode, then `skills/csharp-semantic-queries/SKILL.md` | **done** |
 | 4 | Remaining commands and output tuning | **done** |
 | 5 | Shippable: install path, first-run errors, metadata symbols, docs, CI | **done** |
 
@@ -224,7 +224,7 @@ staleness is already reachable without any client work.
       host-dependent case in the suite after the non-ASCII ones, since .NET implements named
       mutexes over files on Linux — **verified there on 2026-09-04**, in the `probe` run on
       PR #5, which passed all 34 cases on `ubuntu-latest`.
-- [x] Write `skill/SKILL.md`.
+- [x] Write `skills/csharp-semantic-queries/SKILL.md`.
 
 Three client bugs surfaced while measuring, all fixed here:
 
@@ -375,15 +375,15 @@ nothing after item 1 matters to a user who cannot start `cslq`.
 - [x] **README install section, and stop the docs disagreeing.** README had no
       prerequisites, no route from a clone to a binary on `PATH`, and no note that the first
       restore is ~300 MB; it opened with `cslq ready` as if `cslq` were already installed, and
-      `skill/SKILL.md` assumed the same without saying how it got there.
+      `skills/csharp-semantic-queries/SKILL.md` assumed the same without saying how it got there.
       **Done.** README opens with an **Install** section before any example: prerequisites, the
       route that works today (clone → `dotnet pack` → `dotnet tool install -g cslq --source`),
       that `dotnet tool install -g cslq` from nuget.org is the intended route and **is not
       published yet**, the automatic first-run `dotnet tool restore` in the tool's own manifest
       directory with its one-time ~300 MB download, and that `--root` must be the directory
-      holding the `.sln`/`.slnx`. A sub-section says how `skill/SKILL.md` reaches an agent —
-      a copy into a skills directory, no plugin or marketplace — and that other agents take the
-      same file. The disagreements are closed: the status line matches this table; the case
+      holding the `.sln`/`.slnx`. A sub-section says how the skill reaches an agent, and that
+      other agents take the same file. (That sub-section is now step 2 of **Install**, and
+      leads with `npx skills add`; see the follow-up below.) The disagreements are closed: the status line matches this table; the case
       count is stated as its composition (55 rows + 8 scripted legs = 63) in both files so the
       next drift stops adding up rather than going stale; the two references to a
       `Program.Query*` symbol-retry helper that never existed are gone, since
@@ -465,6 +465,31 @@ Considered and left out: `cslq daemon status/stop` (the daemon is unmanaged by d
 README and `SKILL.md`), and any change to what `--log-level` does against a daemon someone else
 started, which stays an accepted cost.
 
+## After Milestone 5
+
+- [x] **The skill installs with `npx skills`, and no longer leans on the README.**
+      Two defects, and the discovery one was silent. `skill/SKILL.md` was not discoverable:
+      `npx skills` ([vercel-labs/skills](https://github.com/vercel-labs/skills)) scans a fixed
+      list of container directories — the repository root, `skills/`,
+      `skills/.curated|.experimental|.system/`, and each agent's own `.<agent>/skills/` —
+      walking three levels into each, and `skill/` singular is on none of them, so
+      `npx skills add idotta/cslq` found nothing at all. The installed directory name is the
+      *containing directory's*, not the frontmatter `name`, so even a `--full-depth` run would
+      have landed it at `~/.claude/skills/skill/`. Separately, the file told an agent that
+      could not find `cslq` to follow "the README's **Install** section" — a document that does
+      not exist beside a `SKILL.md` the CLI symlinked into a skills directory, on a machine
+      holding no clone of this repository.
+      **Done.** `skill/SKILL.md` → `skills/csharp-semantic-queries/SKILL.md`, which is both a
+      documented container layout and the name the skill should install as. The README
+      reference is replaced by the two commands themselves — `dotnet tool install -g cslq` and
+      `cslq restore` — so the skill carries its own install procedure and depends on nothing
+      else on disk. **Install** in README and PACKAGE.md is two steps rather than one, the tool
+      then the skill, because the tool on its own is inert: nothing invokes it. Both lead with
+      `npx skills add idotta/cslq -g`, keep the manual copy as the fallback, and end with a
+      prompt to paste at an agent so it installs both itself. PACKAGE.md had never mentioned
+      the skill at all, which is the worse of the two omissions — nuget.org is where a reader
+      lands first. Verified against the `npx skills` README on 2026-09-08.
+
 ## Acceptance criteria
 
 - [x] `.config/dotnet-tools.json` pins `roslyn-language-server`; `dotnet tool restore` reproduces it
@@ -485,7 +510,9 @@ started, which stays an accepted cost.
 - [x] A source-generated symbol disappears when what the generator keys on is renamed on
       disk, and comes back when it is restored, against a daemon that outlives both queries
 - [x] A run that silently fell back to a non-daemon server says so, and a probe forces one
-- [x] `skill/SKILL.md` exists and tells an agent not to grep for what `cslq` answers
+- [x] `skills/csharp-semantic-queries/SKILL.md` exists and tells an agent not to grep for what `cslq` answers
+- [x] The skill is self-contained: it installs with `npx skills add idotta/cslq`, and names the
+      commands that install `cslq` rather than pointing at the README
 - [x] `cslq impl` resolves an interface member to implementers in two different projects
 - [x] `cslq sym` searches the workspace by name, including a source-generated declaration
 - [x] Readiness means every project loaded, not just one, so no command can answer with a
@@ -552,7 +579,7 @@ against 5.12.0-1.26426.8 / win-x64.
   linked file's real diagnostics. Verified 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy
   of the fixture.
 - `fixture/` **does** have a solution — `Fixture.slnx` — so it is not a counterexample to
-  `skill/SKILL.md`'s entry on solutionless roots, which since PR #12 reads that such a root
+  `skills/csharp-semantic-queries/SKILL.md`'s entry on solutionless roots, which since PR #12 reads that such a root
   errors in about a second rather than hanging. `.slnx` counts as the solution there exactly as
   `.sln` does. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is

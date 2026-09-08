@@ -19,10 +19,18 @@ description: >-
 extension. It answers about the compiled semantic model, so it sees cross-project references,
 generic instantiations, source-generated code and `partial` halves. Grep sees none of that.
 
-`cslq` has to be installed before any of this works — a `dotnet tool install` of the `cslq`
-package, which puts it on `PATH` and carries its own pinned copy of the language server. The
-README's **Install** section is the whole procedure; if `cslq` is not found, that is what to
-follow, not a reason to fall back to grep.
+`cslq` has to be installed before any of this works. If it is not on `PATH`, install it — that
+is the whole procedure, and it needs nothing but the .NET 10 SDK. Not finding `cslq` is not a
+reason to fall back to grep:
+
+```
+dotnet tool install -g cslq
+cslq restore
+```
+
+`cslq restore` fetches the language server the tool pins — a one-time ~300 MB download. It is
+optional, since the first query that needs the server does it anyway, but running it up front
+keeps the download out of the middle of an answer.
 
 ## Start every session with this
 
@@ -30,9 +38,15 @@ follow, not a reason to fall back to grep.
 cslq ready
 ```
 
-Blocks until the workspace has loaded and exits 0. Everything else waits for readiness on its
-own, so this is not required — but running it once gets the load out of the way and turns a
-slow first query into a fast one.
+Blocks until the workspace has loaded and exits 0. Every other command waits for readiness on
+its own, so this looks optional. It is not, and latency is the smaller half of why.
+
+Run it **unpiped and uncaptured**. `cslq` starts a shared background daemon on first use, and
+the daemon inherits the stdout of whichever invocation launched it — so if that first
+invocation is piped or captured (`cslq refs Foo | head`, `out=$(cslq def Bar)`) the pipe never
+sees its last writer close and the command hangs indefinitely. It reads exactly like a slow
+cold load, so waiting longer does not help. A plain `cslq ready` takes the launch and gets the
+solution load out of the way; every query after it pipes and captures normally.
 
 ## Task → command
 

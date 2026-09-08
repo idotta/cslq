@@ -14,16 +14,23 @@ Two constraints drive the design:
 Status: **all five milestones done, `0.1.0` is the first release.** Ten commands — `ready`,
 `refs`, `def`, `impl`, `hover`, `sym`, `outline`, `diag`, `project` and `restore` — over a
 cross-project fixture with source-generated, non-ASCII, metadata and deliberate-error cases;
-the shared server daemon on by default; `skill/SKILL.md` for the agent; a probe gate that runs
-on Linux, Windows and macOS for every PR; a weekly bump PR gated by that suite; and a
-tag-triggered release that publishes to nuget.org and binds each version to a GitHub Release.
+the shared server daemon on by default; `skills/csharp-semantic-queries/SKILL.md` for the
+agent; a probe gate that runs on Linux, Windows and macOS for every PR; a weekly bump PR gated
+by that suite; and a tag-triggered release that publishes to nuget.org and binds each version
+to a GitHub Release.
 The history and the evidence behind each decision are in [ROADMAP.md](ROADMAP.md).
 
 ## Install
 
+`cslq` is built for coding agents, so installing it is two things: the tool on `PATH`, and the
+skill that makes an agent reach for it instead of grep. The tool on its own is inert — nothing
+will invoke it.
+
 Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches the language
 server itself on first run. Linux, Windows and macOS are the supported platforms, and every PR
 runs the gate on all three.
+
+### 1. The tool
 
 ```
 dotnet tool install -g cslq
@@ -42,6 +49,40 @@ cd cslq
 dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts
 dotnet tool install -g cslq --source ./artifacts
 ```
+
+### 2. The skill
+
+`skills/csharp-semantic-queries/SKILL.md` is what makes an agent reach for `cslq` instead of
+grep. It is a plain markdown file with YAML frontmatter, and installing it means putting it
+where the agent looks:
+
+```
+npx skills add idotta/cslq -g
+```
+
+That is [`npx skills`](https://github.com/vercel-labs/skills), which reads GitHub as its
+registry rather than a package feed: it detects the coding agents on the machine and installs
+to each one's skills directory — `~/.claude/skills/csharp-semantic-queries/` for Claude Code.
+Drop `-g` to install into the current repository (`.claude/skills/...`) instead, which is what
+to do when only one project you work on is C#. It is the one step that wants Node; the
+prerequisites above do not.
+
+Without `npx`, copy the file — that is the whole of the installation, and the skill needs
+nothing else on disk. For Claude Code it goes to
+`.claude/skills/csharp-semantic-queries/SKILL.md` in the repository you want to query, or the
+same path under `~` to have it everywhere; the `name` and `description` in its frontmatter are
+what Claude Code matches against. Other agents read the same file — its body names no tool but
+`cslq` — so paste it into whatever that agent takes as standing instructions.
+
+### Or hand both steps to the agent
+
+Every step above is something an agent can run itself. Paste this at it:
+
+> Install `cslq` and its skill so you can answer C# questions semantically instead of grepping:
+> run `dotnet tool install -g cslq`, then `npx skills add idotta/cslq -g`, then `cslq restore`.
+> Then run `cslq ready --root .` here and tell me what it printed.
+
+### The first run
 
 The first command that needs the language server restores it for you and says so:
 
@@ -98,7 +139,9 @@ binary, prints where it restored to and what the prune above removed, and exits 
 what a Dockerfile layer or a CI step runs to keep the download out of the first query. `--json`
 gives it the same envelope every other command uses, with `removed` and `kept` arrays.
 
-Then, in the repository you want to query:
+### Querying a repository
+
+In the repository you want to query:
 
 ```
 dotnet restore                 # the server does not restore your projects
@@ -108,19 +151,6 @@ cslq ready --root <dir>
 `--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
 that solution lists. A root with no solution at its top is an error, reported in about a second
 rather than after the timeout, and a solution one directory down does not count.
-
-### The skill
-
-`skill/SKILL.md` is what makes an agent reach for `cslq` instead of grep. It is a plain markdown
-file with YAML frontmatter; installing it means putting it where the agent looks.
-
-For Claude Code, copy it to `.claude/skills/csharp-semantic-queries/SKILL.md` in the repository
-you want to query, or to `~/.claude/skills/csharp-semantic-queries/SKILL.md` to have it
-everywhere; the `name` and `description` in its frontmatter are what Claude Code matches
-against. There is no plugin or marketplace to install.
-
-Other agents get the same file — its body names no tool but `cslq`, so paste it into whatever
-that agent reads as standing instructions.
 
 ## Use
 
@@ -343,15 +373,26 @@ through `dotnet tool run`.
 
 One daemon is shared across every workspace on the machine, keyed by user identity and the
 server's versioned path rather than by the root, and it outlives the client that started it
-(900 s after the last client disconnects, by default). Two consequences worth knowing:
+(900 s after the last client disconnects, by default). Two costs worth knowing:
 `--log-level` is silently a no-op against a daemon someone else started, because the daemon
 takes its configuration from whoever launched it; and the thin client falls back to a private
 cold server without failing if it cannot reach the daemon, so `cslq` watches its stderr for that
 and says `cslq: daemon unreachable` rather than leaving you to infer it from the latency.
 
+A third consequence is a trap rather than a cost, and it catches the **first** `cslq` command
+in a shell. The daemon inherits the stdout of whichever invocation launched it, so if that
+invocation is piped or captured — `cslq refs Foo | head`, `out=$(cslq def Bar)` — the pipe
+never sees its last writer close and the command hangs indefinitely instead of returning. It
+reads exactly like a slow cold load, so waiting it out does not help. Only that one invocation
+is exposed: once the daemon is up it owns its own stdout, and everything after it pipes and
+captures normally. Take the launch with a plain unredirected `cslq ready`, or redirect to a
+file and read that, or pass `--no-daemon`, whose private server exits with the client.
+
 `probes/run.sh` scopes itself to its own daemon with
 `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` and a short keepalive, so the gate cannot inherit a
-stale workspace and its opening `cslq ready` is still a real cold load.
+stale workspace and its opening `cslq ready` is still a real cold load. That opening `ready` is
+also the one leg the script leaves uncaptured, for the reason above; every case after it is
+captured with `$(...)` and none of them blocks.
 
 ## The pin
 
@@ -474,11 +515,12 @@ weekly bump.
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
 
-**80 legs today = the 71 rows in `cases.jsonl` + 9 scripted ones.** The scripted nine are the
+**82 legs today = the 72 rows in `cases.jsonl` + 10 scripted ones.** The scripted ten are the
 three source-generator staleness legs, the framework `def` (whose two failure modes are an
 absence and a duration, neither of which a `expect` substring can pin), the forced non-daemon
-fallback, the cold-server `diag`, the packaged-tool install, and the two first-run failures (a
-root with no solution, and `dotnet` off `PATH`). Quoting the composition rather than the total is deliberate: the next time the two
+fallback, the cold-server `diag`, the packaged-tool install, the two first-run failures (a root
+with no solution, and `dotnet` off `PATH`), and the restore that rebuilds the tool-resolver
+cache. Quoting the composition rather than the total is deliberate: the next time the two
 halves drift, the sum stops adding up here rather than going quietly stale. The rows include a
 negative case that pins a query fired before load to a loud failure rather than an empty result.
 
@@ -513,6 +555,8 @@ src/Cslq/                    the thin LSP client and CLI
   Protocol.cs               hand-defined LSP payload types
   LspClient.cs              transport, initialize, readiness, didOpen
   Output.cs                 path:line + context formatting, and the outline tree
+skills/                     the agent skill; the directory name is what `npx skills` installs as
+  csharp-semantic-queries/SKILL.md
 fixture/                    deliberately tricky solution
   Gen/                      incremental source generator; its output is referenced from App
   Ambient/Stray.cs          a document no project compiles, for the misc-files cases
