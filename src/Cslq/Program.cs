@@ -172,8 +172,8 @@ internal static partial class Program
     private static async Task<int> RestoreAsync(Options opts, CancellationToken ct)
     {
         var manifestRoot = ServerArgs.ToolManifestRoot();
-        await LspClient.RestoreAsync(manifestRoot, ct);
-        Output.WriteRestored(manifestRoot, opts.Json);
+        var pruned = await LspClient.RestoreAsync(manifestRoot, ct);
+        Output.WriteRestored(manifestRoot, pruned, opts.Json);
         return 0;
     }
 

@@ -43,6 +43,13 @@ internal static class ServerArgs
     public static string[] Restore() => ["tool", "restore"];
 
     /// <summary>
+    /// Prints <c>global-packages: &lt;path&gt;</c>, the folder every restored pin lands in.
+    /// Asked once, right after a restore, so the prune deletes from where NuGet actually
+    /// extracted rather than from where <c>~/.nuget/packages</c> would be.
+    /// </summary>
+    public static string[] GlobalPackages() => ["nuget", "locals", "global-packages", "--list"];
+
+    /// <summary>
     /// LSP 3.17 position encoding. The server does not advertise
     /// <c>positionEncoding</c> in its initialize result, which per spec means
     /// utf-16 — the same unit as a .NET string index. Anything else would break
