@@ -118,4 +118,17 @@ public class CliSurfaceTests
     {
         Assert.Equal(["tool", "restore"], ServerArgs.Restore());
     }
+
+    /// <summary>
+    /// A command wired into the dispatch but never into the usage text is invisible to the
+    /// caller who most needs it — the one reading <c>cslq --help</c> to find out what exists.
+    /// </summary>
+    [Fact]
+    public void Every_command_is_named_in_the_usage_text()
+    {
+        foreach (var command in Program.Commands)
+        {
+            Assert.Contains("cslq " + command, Program.Usage, StringComparison.Ordinal);
+        }
+    }
 }

@@ -138,4 +138,31 @@ public class OptionsTests
     {
         Assert.Equal("Foo:1", Program.Options.Parse([command, "Foo:1"]).Argument);
     }
+
+    /// <summary>
+    /// The pre-warm. It reaches no workspace, so the only thing the parser has to get right
+    /// is that it is a command at all and that <c>--json</c> still applies to it.
+    /// </summary>
+    [Fact]
+    public void Restore_parses_with_no_argument()
+    {
+        var opts = Program.Options.Parse(["restore"]);
+
+        Assert.Equal("restore", opts.Command);
+        Assert.Null(opts.Argument);
+        Assert.False(opts.Json);
+        Assert.True(Program.Options.Parse(["restore", "--json"]).Json);
+    }
+
+    /// <summary>
+    /// The manifest restored is the one packed beside the running binary, found by walking up
+    /// from it. A path argument would read as if it could be pointed somewhere else.
+    /// </summary>
+    [Fact]
+    public void Restore_rejects_an_argument()
+    {
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["restore", "somewhere"]));
+
+        Assert.Contains("restore takes no argument", ex.Message, StringComparison.Ordinal);
+    }
 }
