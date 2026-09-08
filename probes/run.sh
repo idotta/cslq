@@ -225,7 +225,10 @@ leg() {
 }
 
 leg staleness-baseline-present present
-sed -i 's/\bGreeter\b/GreeterRenamed/g' "$greeter"
+# perl, not `sed -i`: BSD sed takes -i's argument as a mandatory backup suffix, so on macOS
+# this reads the script as the suffix and fails, and BSD sed has no \b either. perl is on
+# ubuntu-latest, macos-latest and Git Bash alike, and its \b means the same thing everywhere.
+perl -pi -e 's/\bGreeter\b/GreeterRenamed/g' "$greeter"
 leg staleness-after-rename-absent absent
 cp "$greeter_saved" "$greeter"
 leg staleness-after-restore-present present

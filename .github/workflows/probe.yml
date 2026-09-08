@@ -12,13 +12,13 @@ permissions:
 jobs:
   probe:
     strategy:
-      # The two OSes fail for different reasons — the non-ASCII and mutex cases are the
+      # The three OSes fail for different reasons — the non-ASCII and mutex cases are the
       # host-dependent ones and Git Bash is where they would go red — so a Windows-only
-      # failure must not cancel the Linux leg that would have said whether it is platform
-      # specific.
+      # failure must not cancel the Linux and macOS legs that would have said whether it is
+      # platform specific.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 

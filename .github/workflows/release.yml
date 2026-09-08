@@ -12,6 +12,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Trusted publishing: the job's OIDC token is exchanged with nuget.org for a one-hour API
+    # key, so no long-lived secret exists to leak. The policy on nuget.org names this repo,
+    # this file (release.yml) and the environment below; anything else is refused.
+    permissions:
+      contents: read
+      id-token: write
+    environment: release
     steps:
       - uses: actions/checkout@v7
 
@@ -45,13 +52,18 @@ jobs:
 
       - run: dotnet pack src/Cslq/Cslq.csproj -c Release -o artifacts --nologo
 
-      # Idle until a NUGET_API_KEY secret exists: with none set the key is empty and the
-      # push fails, which is the intended state before the first release is authorised.
+      # Requested after the gate and the pack, not before: the key it returns lives one hour
+      # and probes/run.sh alone can take several minutes cold. NUGET_USER is the nuget.org
+      # profile name of the policy owner, not an email address.
+      - name: nuget.org login
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: push to nuget.org
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          dotnet nuget push "artifacts/*.nupkg" \
-            --api-key "$NUGET_API_KEY" \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

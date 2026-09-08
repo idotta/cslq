@@ -23,7 +23,8 @@ format gate remain. See [ROADMAP.md](ROADMAP.md).
 ## Install
 
 Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches the language
-server itself on first run.
+server itself on first run. Linux, Windows and macOS are the supported platforms, and every PR
+runs the gate on all three.
 
 `cslq` is not on nuget.org yet. Until 0.1.0 is published, install it from a package you build:
 
@@ -336,6 +337,29 @@ the PR and publishes the result as a `probes` commit status — that is the chec
 branch protection. Setting a `BUMP_TOKEN` secret (a PAT with `repo` scope) makes the PR run
 `probe.yml` for real as well.
 
+### Releasing
+
+A release is a tag. On the merged `main` commit, `git tag v<Version> && git push origin
+v<Version>`, where `<Version>` is the value in `src/Cslq/Cslq.csproj`. `release.yml` fires on
+`v*` and nothing else, and its first step re-reads that `<Version>` and refuses any tag that
+does not equal it — before the gate, because the tag is what names the package and a
+disagreement would publish a version nobody asked for.
+
+What it then runs, in order: `dotnet format --verify-no-changes`, so no path to nuget.org skips
+the format check; `probes/run.sh`, the same gate every PR runs; `dotnet pack -c Release`;
+`NuGet/login@v1`, which exchanges the job's OIDC token for a one-hour nuget.org key so no
+long-lived secret exists to leak; and `dotnet nuget push --skip-duplicate`, so a re-run of an
+already-published version is a no-op rather than a failure.
+
+`bump.yml` moves `<Version>` with every new pin, so merging a bump PR is followed by tagging it
+— a merged bump is a release like any other. Nothing tags automatically. That is deliberate
+until the flow has run once for real.
+
+Two prerequisites live outside the repo: a `release` environment on GitHub, and a trusted
+publishing policy on nuget.org naming this repo, `release.yml` and that environment.
+
+`0.1.0` is the first release and goes out as-is — no `rc`.
+
 ## Dependencies
 
 `cslq` depends on **StreamJsonRpc** (Microsoft, MIT) for `Content-Length` framing, request
@@ -407,12 +431,13 @@ doc comment above the only declaration in a single-file project. Anything that n
 server belongs in a case, not a test.
 
 `probe.yml` runs the gate on every PR and every push to `main`, as a `fail-fast: false` matrix
-over `ubuntu-latest` and `windows-latest`. Both legs run `./probes/run.sh` through the runner's
-`bash`, which on Windows is Git Bash — the two host-dependent cases, the non-ASCII ones and the
-forced non-daemon fallback's named mutex, are the reason the second leg exists, and
-`fail-fast: false` keeps a Windows-only red from cancelling the Linux leg that says whether it
-is platform specific. Each leg runs `dotnet format --verify-no-changes` before the gate;
-`release.yml` and `bump.yml` run it before theirs too, so no path to a release skips it.
+over `ubuntu-latest`, `windows-latest` and `macos-latest`. All three legs run `./probes/run.sh`
+through the runner's `bash`, which on Windows is Git Bash — the two host-dependent cases, the
+non-ASCII ones and the forced non-daemon fallback's named mutex, are what the Windows leg
+watches, and `fail-fast: false` keeps a Windows-only red from cancelling the Linux and macOS
+legs that say whether it is platform specific. Each leg runs
+`dotnet format --verify-no-changes` before the gate; `release.yml` and `bump.yml` run it before
+theirs too, so no path to a release skips it.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it
@@ -424,7 +449,7 @@ Inside `expect`, `'` stands for `"` and `|` separates substrings that must all a
 ```
 Cslq.slnx                    src/Cslq + tests/Cslq.Tests; fixture/ is deliberately not in it
 .config/dotnet-tools.json   the version pin
-.github/workflows/          bump.yml (weekly cron), probe.yml (every PR, linux + windows)
+.github/workflows/          bump.yml (weekly cron), probe.yml (every PR, linux + windows + macos)
 src/Cslq/                    the thin LSP client and CLI
   ServerArgs.cs             the only place server flags live
   Protocol.cs               hand-defined LSP payload types
