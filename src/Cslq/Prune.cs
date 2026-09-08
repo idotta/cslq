@@ -37,47 +37,22 @@ internal static class Prune
     }
 
     /// <summary>
-    /// The version directories of the server packages — the RID-less shim and every
-    /// <c>roslyn-language-server.&lt;rid&gt;</c> beside it — that are not the pin. NuGet
-    /// lower-cases ids and versions on disk, so the pin is compared ignoring case.
-    /// </summary>
-    public static IReadOnlyList<string> OtherVersions(string packages, string pin)
-    {
-        if (!Directory.Exists(packages)) return [];
-
-        var found = new List<string>();
-        foreach (var package in Directory.EnumerateDirectories(packages, PackageId + "*"))
-        {
-            var id = Path.GetFileName(package);
-            if (!id.Equals(PackageId, StringComparison.OrdinalIgnoreCase)
-                && !id.StartsWith(PackageId + ".", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            foreach (var version in Directory.EnumerateDirectories(package))
-            {
-                if (!Path.GetFileName(version).Equals(pin, StringComparison.OrdinalIgnoreCase))
-                    found.Add(version);
-            }
-        }
-
-        found.Sort(StringComparer.OrdinalIgnoreCase);
-        return found;
-    }
-
-    /// <summary>
-    /// Deletes every other version. The <c>.nupkg.sha512</c> marker goes first, so a
-    /// directory a still-running old daemon holds half-locked already reads as absent to
-    /// NuGet and the next restore rewrites it rather than trusting what is left. A locked or
-    /// unwritable directory is reported, never thrown: the restore that just succeeded is the
-    /// result, and this is housekeeping after it.
+    /// Deletes every version of the server packages — the RID-less shim and every
+    /// <c>roslyn-language-server.&lt;rid&gt;</c> beside it — that is not the pin. NuGet
+    /// lower-cases ids and versions on disk, so the pin is compared ignoring case. The
+    /// <c>.nupkg.sha512</c> marker goes first, so a directory a still-running old daemon holds
+    /// half-locked already reads as absent to NuGet and the next restore rewrites it rather
+    /// than trusting what is left. Nothing here throws for a locked, unreadable or
+    /// concurrently removed directory — it is reported as kept: the restore that just
+    /// succeeded is the result, and this is housekeeping after it.
     /// </summary>
     public static Result Run(string packages, string pin)
     {
         var removed = new List<string>();
         var kept = new List<(string, string)>();
-        foreach (var dir in OtherVersions(packages, pin))
+        foreach (var dir in OtherVersions(packages, pin, kept))
         {
-            var label = Path.GetRelativePath(packages, dir).Replace(Path.DirectorySeparatorChar, '/');
+            var label = Label(packages, dir);
             try
             {
                 foreach (var marker in Directory.EnumerateFiles(dir, "*.nupkg.sha512"))
@@ -85,7 +60,7 @@ internal static class Prune
                 Directory.Delete(dir, recursive: true);
                 removed.Add(label);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (Tolerated(ex))
             {
                 kept.Add((label, ex.Message.Trim()));
             }
@@ -93,4 +68,47 @@ internal static class Prune
 
         return new Result(packages, removed, kept);
     }
+
+    private static List<string> OtherVersions(string packages, string pin, List<(string, string)> kept)
+    {
+        var found = new List<string>();
+        if (!Directory.Exists(packages)) return found;
+
+        string[] candidates;
+        try
+        {
+            candidates = Directory.GetDirectories(packages, PackageId + "*");
+        }
+        catch (Exception ex) when (Tolerated(ex))
+        {
+            kept.Add((PackageId + "*", ex.Message.Trim()));
+            return found;
+        }
+
+        foreach (var package in candidates)
+        {
+            var id = Path.GetFileName(package);
+            if (!id.Equals(PackageId, StringComparison.OrdinalIgnoreCase)
+                && !id.StartsWith(PackageId + ".", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            try
+            {
+                found.AddRange(Directory.GetDirectories(package)
+                    .Where(v => !Path.GetFileName(v).Equals(pin, StringComparison.OrdinalIgnoreCase)));
+            }
+            catch (Exception ex) when (Tolerated(ex))
+            {
+                kept.Add((Label(packages, package), ex.Message.Trim()));
+            }
+        }
+
+        found.Sort(StringComparer.OrdinalIgnoreCase);
+        return found;
+    }
+
+    private static bool Tolerated(Exception ex) => ex is IOException or UnauthorizedAccessException;
+
+    private static string Label(string packages, string dir) =>
+        Path.GetRelativePath(packages, dir).Replace(Path.DirectorySeparatorChar, '/');
 }

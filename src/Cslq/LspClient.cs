@@ -72,7 +72,7 @@ internal sealed class LspClient : IAsyncDisposable
 
         var pin = Prune.PinnedVersion(
             await File.ReadAllTextAsync(Path.Combine(manifestRoot, ".config", "dotnet-tools.json"), ct));
-        var packages = await GlobalPackagesAsync(ct);
+        var packages = await GlobalPackagesAsync(manifestRoot, ct);
         return pin is null || packages is null ? null : Prune.Run(packages, pin);
     }
 
@@ -81,12 +81,16 @@ internal sealed class LspClient : IAsyncDisposable
     /// and a <c>globalPackagesFolder</c> in any NuGet.Config both move it. The line is
     /// <c>global-packages: &lt;path&gt;</c>; the label is not localised with the UI language
     /// pinned, and the path is everything after the first <c>: </c> because on Windows it
-    /// carries a colon of its own. Null when the CLI would not say.
+    /// carries a colon of its own. Null when the CLI would not say. Run from the manifest
+    /// root, as the restore was: NuGet.Config is resolved from the working directory, so a
+    /// repository with its own <c>globalPackagesFolder</c> would otherwise name a folder the
+    /// restore never wrote to.
     /// </summary>
-    private static async Task<string?> GlobalPackagesAsync(CancellationToken ct)
+    private static async Task<string?> GlobalPackagesAsync(string manifestRoot, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {
+            WorkingDirectory = manifestRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

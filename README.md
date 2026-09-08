@@ -65,7 +65,11 @@ another tool manifest on the machine still pins a deleted version, that version 
 as unrestored again — `dotnet tool run` answers with the same *Run "dotnet tool restore"* line
 `cslq` itself recognises — so an older `cslq` still installed elsewhere restores it back rather
 than breaking. A version a still-running old daemon holds open cannot be deleted on Windows;
-`cslq` reports it and a later `cslq restore` removes it.
+`cslq` reports it and a later `cslq restore` removes it. The one shape this does not serve is
+two different `cslq` versions in regular use on one machine — say a `-g` install and a
+`--tool-path` one: each restore deletes the other's pin, and they take turns re-downloading it.
+One `cslq` per machine is the supported shape; there is deliberately no lock, because a lock
+would serialise that fight rather than end it.
 
 What it writes is `~/.nuget/packages` and `~/.dotnet/toolResolverCache`, never that install
 directory, so a `--tool-path` install owned by root and used by another account is fine. What

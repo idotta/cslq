@@ -65,8 +65,9 @@ public class PruneTests : IDisposable
     [Fact]
     public void The_pin_is_matched_ignoring_case()
     {
-        Package("roslyn-language-server.osx-arm64", "5.12.0-1.26426.8");
-        Assert.Empty(Prune.OtherVersions(_packages, "5.12.0-1.26426.8".ToUpperInvariant()));
+        var dir = Package("roslyn-language-server.osx-arm64", "5.12.0-1.26426.8");
+        Assert.Empty(Prune.Run(_packages, "5.12.0-1.26426.8".ToUpperInvariant()).Removed);
+        Assert.True(Directory.Exists(dir));
     }
 
     [Fact]

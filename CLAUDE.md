@@ -282,7 +282,11 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **A successful restore prunes every other server version from the global packages folder,
   and that folder is shared.** `Prune.Run` deletes `roslyn-language-server*/<version>` for every
   version but the pin, in the folder `dotnet nuget locals global-packages --list` names — never
-  an assumed `~/.nuget/packages`. It is safe for two reasons that are both measured, not
+  an assumed `~/.nuget/packages`, and asked **from the manifest root**, where the restore ran:
+  NuGet.Config resolves from the working directory, so asked from a repository with its own
+  `globalPackagesFolder` it would name a folder the restore never wrote to. Two different
+  `cslq` versions in regular use on one machine delete each other's pin in turn; that is a
+  documented limit, not a locking bug. It is safe for two reasons that are both measured, not
   assumed: a deleted version reads as unrestored again (`dotnet tool run` answers the same
   `Run "dotnet tool restore"` line with the directory moved aside, so an older `cslq` self-heals),
   and the `.nupkg.sha512` marker is deleted *first*, so a directory a still-running old daemon
