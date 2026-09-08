@@ -20,6 +20,13 @@
     <Description>Semantic C# queries over the official roslyn-language-server, for coding agents.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/idotta/cslq</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/idotta/cslq</PackageProjectUrl>
+    <PackageTags>roslyn;lsp;csharp;dotnet-tool;coding-agent;cli</PackageTags>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <!-- Normalises the paths SourceLink embeds, so a package built by release.yml is
+         reproducible. Conditioned on the runner's own variable rather than set outright:
+         a local dotnet pack keeps its absolute paths and stays debuggable. -->
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' != ''">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,6 +40,12 @@
        pin at all - there is no repository above it. -->
   <ItemGroup>
     <None Include="../../.config/dotnet-tools.json" Pack="true" PackagePath="tools/net10.0/any/.config/" />
+  </ItemGroup>
+
+  <!-- The nuget.org readme. It is its own file rather than README.md because every link on a
+       nuget.org page has to be absolute - relative ones render dead there. -->
+  <ItemGroup>
+    <None Include="../../PACKAGE.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
   <!-- The pure logic below the LSP transport - sentinel inference, argument parsing, path
