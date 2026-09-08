@@ -336,6 +336,29 @@ the PR and publishes the result as a `probes` commit status — that is the chec
 branch protection. Setting a `BUMP_TOKEN` secret (a PAT with `repo` scope) makes the PR run
 `probe.yml` for real as well.
 
+### Releasing
+
+A release is a tag. On the merged `main` commit, `git tag v<Version> && git push origin
+v<Version>`, where `<Version>` is the value in `src/Cslq/Cslq.csproj`. `release.yml` fires on
+`v*` and nothing else, and its first step re-reads that `<Version>` and refuses any tag that
+does not equal it — before the gate, because the tag is what names the package and a
+disagreement would publish a version nobody asked for.
+
+What it then runs, in order: `dotnet format --verify-no-changes`, so no path to nuget.org skips
+the format check; `probes/run.sh`, the same gate every PR runs; `dotnet pack -c Release`;
+`NuGet/login@v1`, which exchanges the job's OIDC token for a one-hour nuget.org key so no
+long-lived secret exists to leak; and `dotnet nuget push --skip-duplicate`, so a re-run of an
+already-published version is a no-op rather than a failure.
+
+`bump.yml` moves `<Version>` with every new pin, so merging a bump PR is followed by tagging it
+— a merged bump is a release like any other. Nothing tags automatically. That is deliberate
+until the flow has run once for real.
+
+Two prerequisites live outside the repo: a `release` environment on GitHub, and a trusted
+publishing policy on nuget.org naming this repo, `release.yml` and that environment.
+
+`0.1.0` is the first release and goes out as-is — no `rc`.
+
 ## Dependencies
 
 `cslq` depends on **StreamJsonRpc** (Microsoft, MIT) for `Content-Length` framing, request
