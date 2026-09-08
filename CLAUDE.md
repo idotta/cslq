@@ -339,4 +339,7 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
   `chmod +x` does not register; use `git update-index --chmod=+x` if it ever reverts.
 - Adding a NuGet package for LSP types is a regression, not a cleanup. See the README.
 - A bump PR opened with `GITHUB_TOKEN` gets a `probe.yml` run parked at `action_required` that
-  never executes. The `probes` commit status published by `bump.yml` is the real gate.
+  never executes. `bump.yml` dispatches `probe.yml` on the PR branch instead — `workflow_dispatch`
+  is the one event `GITHUB_TOKEN` may raise — and the ruleset on `main` requires the three
+  `probe (<os>)` checks. Dependabot is scoped away from `.config/dotnet-tools.json`: the server
+  pin moves only through `bump.yml`.

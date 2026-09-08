@@ -476,7 +476,7 @@ started, which stays an accepted cost.
 - [x] `cslq def` resolves from a use, a symbol and a source-generated symbol
 - [x] `cslq outline` renders a nested document outline, including a generated document
 - [x] Probe suite fails loudly when the server returns empty due to premature querying
-- [x] `bump.yml` opens a PR that is gated (see the `probes` commit status caveat in the README)
+- [x] `bump.yml` opens a PR that is gated (see the bump-PR gate caveat in the README)
 - [x] Two concurrent clients work (sharing one daemon); daemon survives killing client 1's
       process tree
 - [x] Warm command latency measured and recorded in the README
