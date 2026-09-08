@@ -479,13 +479,17 @@ rs_elapsed=$(( $(date +%s) - rs_start ))
 out=$(cat "$rs_log")
 rm -f "$rs_log"
 
+# Asserted before the cleanup puts the saved entry back, or there would be nothing left to
+# distinguish a restore that rebuilt the cache from one that only printed the message.
+ok=1
+[ -e "$cache_entry" ] || ok=0
+
 if [ -n "$cache_saved" ]; then
   rm -rf "$cache_entry"
   mv "$cache_saved" "$cache_entry"
   cache_saved=""
 fi
 
-ok=1
 [ "$rc" = 0 ] || ok=0
 # The manifest `restore` names is the one above the running binary, which for this checkout is
 # the repository root. A pre-warm that restored somewhere else would still exit 0.
@@ -506,7 +510,7 @@ if [ "$ok" = 1 ]; then
   printf 'PASS  %s (%ss)\n' "restore-rebuilds-the-tool-resolver-cache" "$rs_elapsed"
   pass=$((pass + 1))
 else
-  printf 'FAIL  %s (exit %s after %ss, wanted 0 under 60s naming %s)\n' \
+  printf 'FAIL  %s (exit %s after %ss, wanted 0 under 60s rebuilding the resolver cache and naming %s)\n' \
     "restore-rebuilds-the-tool-resolver-cache" "$rc" "$rs_elapsed" "$root_abs"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
