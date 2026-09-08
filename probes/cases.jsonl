@@ -46,8 +46,8 @@
 {"name":"non-project-file-not-indexed","args":"sym Stray --root fixture","exit":"1","expect":"no results"}
 {"name":"non-project-file-outlines","args":"outline Ambient/Stray.cs --root fixture","exit":"0","expect":"public sealed class Stray"}
 {"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}
-{"name":"no-solution-root-reports","args":"ready --root skill --timeout 5","exit":"1","expect":"cslq: no .sln or .slnx at|--root must be the directory holding"}
-{"name":"unknown-command-reports","args":"bogus --root skill","exit":"1","expect":"cslq: unknown command|usage:"}
+{"name":"no-solution-root-reports","args":"ready --root skills --timeout 5","exit":"1","expect":"cslq: no .sln or .slnx at|--root must be the directory holding"}
+{"name":"unknown-command-reports","args":"bogus --root skills","exit":"1","expect":"cslq: unknown command|usage:"}
 {"name":"self-hosted-ready","args":"ready --root . --timeout 120","exit":"0","expect":"ready"}
 {"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Cslq/Program.cs:|tests/Cslq.Tests/"}
 {"name":"generated-label-names-consuming-project","args":"sym Stamp --root fixture2","exit":"0","expect":"<generated>/Alpha/Gen2/Stamp.g.cs:3|<generated>/Beta/Gen2/Stamp.g.cs:3"}

@@ -294,6 +294,19 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   prune off the ordinary start path: it costs a `dotnet` launch, and nothing but a restore
   changes what the pin is. To test it live, `mkdir` a fake version beside the real one and run
   `cslq restore`; the unit tests cover the selection.
+- **`skills/csharp-semantic-queries/SKILL.md`'s path is load-bearing twice, and both failures
+  are silent.** `npx skills add idotta/cslq` — the install the docs now lead with — scans a
+  fixed list of container directories (the repository root, `skills/`,
+  `skills/.curated|.experimental|.system/`, and each agent's own `.<agent>/skills/`), walking
+  three levels into each, and installs the skill under the name of the **containing directory**,
+  not the frontmatter `name`. `skill/` singular — what this was until 2026-09-08 — is on none of
+  those lists, so `npx skills add` found nothing at all, and even `--full-depth` would have
+  landed it at `~/.claude/skills/skill/`. Separately, `probes/cases.jsonl` uses `--root skills`
+  as the solutionless-root fixture for `no-solution-root-reports` and `unknown-command-reports`:
+  the directory is load-bearing there precisely for having no `.sln`, so renaming it turns two
+  cases red for a reason unrelated to the code under test. The file must also stay
+  **self-contained** — `npx skills` puts that one file on a machine holding no clone of this
+  repository, so a cross-reference to the README from inside it points at nothing.
 
 ## C# and .NET rules
 
