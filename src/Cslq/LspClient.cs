@@ -58,7 +58,12 @@ internal sealed class LspClient : IAsyncDisposable
     internal static bool NotRestored(string stderr) =>
         stderr.Contains("dotnet tool restore", StringComparison.Ordinal);
 
-    private static async Task RestoreAsync(string manifestRoot, CancellationToken ct)
+    /// <summary>
+    /// Also the whole of <c>cslq restore</c>, which is why this is not private: the pre-warm
+    /// a Dockerfile or a CI job runs is exactly this restore, asked for rather than recovered
+    /// from.
+    /// </summary>
+    internal static async Task RestoreAsync(string manifestRoot, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {

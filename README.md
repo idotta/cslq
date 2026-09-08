@@ -53,6 +53,33 @@ alongside the binary, which for a global install is under
 repository: the pin travels with the `cslq` version, so nothing you query has to carry it. The
 restore is idempotent and later runs skip it.
 
+What it writes is `~/.nuget/packages` and `~/.dotnet/toolResolverCache`, never that install
+directory, so a `--tool-path` install owned by root and used by another account is fine. What
+breaks is the home those two live in — the minimal-container case. With `HOME` unset the CLI
+computes no path at all and refuses up front, naming the variable that fixes it: *The user's
+home directory could not be determined. Set the 'DOTNET_CLI_HOME' environment variable to
+specify the directory to use.* With `HOME` set but not writable, the restore fails as any
+write to it would. Point `DOTNET_CLI_HOME` at a writable directory and it has somewhere to go:
+
+```
+DOTNET_CLI_HOME=/var/cache/dotnet cslq ready --root <dir>
+```
+
+The other first-run edge is a race: two `cslq` processes started together in a fresh home both
+reach the restore, and `dotnet tool restore` is not built to be raced — one of them can fail
+rather than wait. `cslq` does not lock around it, deliberately; the window is the first run
+only and a rerun once the winner finishes succeeds. Pre-warm instead, which is the whole of
+`cslq restore`:
+
+```
+cslq restore                   # fetch the pinned server now, then exit
+```
+
+It takes no `--root` and needs no workspace — it restores the manifest packed beside the
+binary, prints where it restored to, and exits — so it is what a Dockerfile layer or a CI
+step runs to keep the download out of the first query. `--json` gives it the same envelope
+every other command uses.
+
 Then, in the repository you want to query:
 
 ```
@@ -89,6 +116,7 @@ cslq sym <query> [--max N]                    # search the workspace by name
 cslq outline <file | symbol> [--max N]        # the declarations in one document
 cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
 cslq project <file>                           # which .csproj compiles it, for which TFM
+cslq restore                                  # fetch the pinned language server, then exit
 ```
 
 Add `--no-daemon` to any of them to start a private server instead of sharing the background

@@ -292,4 +292,36 @@ public class OutputTests
     {
         Assert.Equal(expected, Output.Severity(severity));
     }
+
+    /// <summary>
+    /// <c>restore</c> reaches no workspace, so its one line names the absolute manifest
+    /// directory it restored to rather than anything root-relative, and its JSON goes through
+    /// the same <c>{ count, truncated, results }</c> envelope as every other command.
+    /// </summary>
+    [Fact]
+    public async Task Restore_reports_where_it_restored_to()
+    {
+        var manifest = Path.Combine(Path.GetTempPath(), "tools", "net10.0", "any");
+
+        var text = await CaptureAsync(() =>
+        {
+            Output.WriteRestored(manifest, json: false);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal("restored the pinned language server in " + manifest, text.Trim());
+
+        var json = await CaptureAsync(() =>
+        {
+            Output.WriteRestored(manifest, json: true);
+            return Task.CompletedTask;
+        });
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(1, doc.RootElement.GetProperty("count").GetInt32());
+        Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+        var row = doc.RootElement.GetProperty("results")[0];
+        Assert.True(row.GetProperty("restored").GetBoolean());
+        Assert.Equal(manifest, row.GetProperty("manifest").GetString());
+    }
 }

@@ -13,6 +13,9 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 root=$(pwd)
+# What `cslq` prints for a path it did not get from us. MSYS hands a native .NET process
+# Windows paths, so `pwd` alone would not match the manifest directory `cslq restore` names.
+root_abs=$( { pwd -W 2>/dev/null || pwd; } )
 # cslq talks to the shared daemon by default, so scope this run to a daemon of its own.
 # Without the pipe name the suite would inherit whatever daemon the developer's session
 # left running -- a stale workspace could make the gate lie, and the `cslq ready` below
@@ -185,10 +188,20 @@ cp "$greeter" "$greeter_saved"
 # One EXIT hook for the whole run. The rename below has to be undone even on an interrupt --
 # see CLAUDE.md -- and the packaged-tool leg's throwaway tree is cleaned by the same hook.
 install_tmp=""
+# Set only while the restore leg below has the tool resolver cache entry moved aside. Leaving
+# it moved would make every later `dotnet tool run` on this machine re-resolve the pin.
+cache_saved=""
+cache_entry=""
 cleanup() {
   cp "$greeter_saved" "$greeter"
   rm -f "$greeter_saved"
   [ -n "$install_tmp" ] && rm -rf "$install_tmp"
+  # The restore writes a fresh entry; the saved one is the developer's, and it covers every
+  # manifest on the machine rather than only this repository's.
+  if [ -n "$cache_saved" ] && [ -e "$cache_saved" ]; then
+    rm -rf "$cache_entry"
+    mv "$cache_saved" "$cache_entry"
+  fi
   return 0
 }
 trap cleanup EXIT
@@ -440,6 +453,61 @@ if [ "$ok" = 1 ]; then
   pass=$((pass + 1))
 else
   printf 'FAIL  %s (exit %s, wanted 1 and a one-line cslq: message)\n' "dotnet-off-path-reports" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# `cslq restore`, the pre-warm, against a tool that reads as unrestored. Moving the resolver
+# cache entry aside is what produces that state cheaply: the package itself stays in
+# ~/.nuget/packages, so the restore re-resolves the pin in about a second rather than paying the
+# ~300 MB download a genuine first run pays. A scripted leg rather than a cases.jsonl row for the
+# same reasons `no-solution-root-fails-fast` is one -- the state under test has to be set up and
+# put back, and the elapsed bound is half the assertion. Placed here, and not earlier, because
+# the cache is shared with every other leg: the daemon is long since launched by now and nothing
+# below has to resolve the tool again.
+log "restore"
+cache_entry="${DOTNET_CLI_HOME:-$HOME}/.dotnet/toolResolverCache/1/roslyn-language-server"
+[ -e "$cache_entry" ] && { cache_saved="$cache_entry.probe-$$"; mv "$cache_entry" "$cache_saved"; }
+
+rs_log=$(mktemp)
+rs_start=$(date +%s)
+# Redirected rather than captured, like every other invocation here. `restore` reaches no daemon
+# at all, but the rule in CLAUDE.md is blanket.
+"$CSLQ" restore > "$rs_log" 2>&1
+rc=$?
+rs_elapsed=$(( $(date +%s) - rs_start ))
+out=$(cat "$rs_log")
+rm -f "$rs_log"
+
+if [ -n "$cache_saved" ]; then
+  rm -rf "$cache_entry"
+  mv "$cache_saved" "$cache_entry"
+  cache_saved=""
+fi
+
+ok=1
+[ "$rc" = 0 ] || ok=0
+# The manifest `restore` names is the one above the running binary, which for this checkout is
+# the repository root. A pre-warm that restored somewhere else would still exit 0.
+case "$out" in
+  *"restored the pinned language server in "*) ;;
+  *) ok=0 ;;
+esac
+# Separators folded rather than matched: .NET prints a Windows path with backslashes and
+# `pwd -W` hands back the same directory with forward slashes.
+case "$(printf '%s' "$out" | tr "\\\\" /)" in
+  *"$(printf '%s' "$root_abs" | tr "\\\\" /)"*) ;;
+  *) ok=0 ;;
+esac
+# And it must not have gone to the network: only the resolver cache was missing, the payload
+# behind the pin is already in ~/.nuget/packages. A restore that downloads takes minutes.
+[ "$rs_elapsed" -lt 60 ] || ok=0
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%ss)\n' "restore-rebuilds-the-tool-resolver-cache" "$rs_elapsed"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 0 under 60s naming %s)\n' \
+    "restore-rebuilds-the-tool-resolver-cache" "$rc" "$rs_elapsed" "$root_abs"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi

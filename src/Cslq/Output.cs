@@ -478,6 +478,29 @@ internal static class Output
     }
 
     /// <summary>
+    /// Where <c>cslq restore</c> restored to. The path is the tool's own manifest directory
+    /// rather than anything under a workspace root, so it is absolute and not put through
+    /// <see cref="PathUri"/>: there is no root for it to be relative to.
+    /// </summary>
+    public static void WriteRestored(string manifestRoot, bool json)
+    {
+        if (!json)
+        {
+            Console.WriteLine("restored the pinned language server in " + manifestRoot);
+            return;
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(
+            new
+            {
+                count = 1,
+                truncated = false,
+                results = new[] { new { restored = true, manifest = manifestRoot } },
+            },
+            JsonOut));
+    }
+
+    /// <summary>
     /// The project a file is compiled by, and the target framework it is compiled for. Exits
     /// through the same envelope as everything else; both paths are rendered through
     /// <see cref="PathUri.Display(string, string, string?, string?)"/> like every other

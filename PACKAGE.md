@@ -23,6 +23,8 @@ cslq: the pinned language server is not restored; restoring it in <dir>. This is
 
 `<dir>` is the tool's *own* manifest directory — the `.config/dotnet-tools.json` packed
 alongside the binary, never your repository. The restore is idempotent and later runs skip it.
+`cslq restore` does it on demand, with no workspace, for a Dockerfile or a CI step that would
+rather not pay the download inside the first query.
 
 Then, in the repository you want to query:
 
@@ -47,6 +49,7 @@ cslq sym <query> [--max N]                    # search the workspace by name
 cslq outline <file | symbol> [--max N]        # the declarations in one document
 cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
 cslq project <file>                           # which .csproj compiles it, for which TFM
+cslq restore                                  # fetch the pinned language server, then exit
 ```
 
 ```

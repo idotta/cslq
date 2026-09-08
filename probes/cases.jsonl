@@ -69,3 +69,4 @@
 {"name":"ready-json-honours-the-envelope","args":"ready --root fixture --json","exit":"0","expect":"'count': 1|'truncated': false|'ready': true|'projects': 3"}
 {"name":"ambiguity-honours-max","args":"def Area --root fixture --max 1","exit":"1","expect":"is ambiguous; qualify it further|... 2 more (use --max 3 to see all)"}
 {"name":"generated-ambiguity-honours-max","args":"outline Stamp --root fixture2 --max 1","exit":"1","expect":"declared in several documents|... 1 more (use --max 2 to see all)"}
+{"name":"restore-json-honours-the-envelope","args":"restore --json","exit":"0","expect":"'count': 1|'truncated': false|'restored': true|'manifest'"}

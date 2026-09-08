@@ -6,7 +6,7 @@ namespace Cslq;
 
 internal static partial class Program
 {
-    private const string Usage = """
+    internal const string Usage = """
         cslq - semantic C# queries over the official roslyn-language-server
 
         usage:
@@ -19,6 +19,7 @@ internal static partial class Program
           cslq outline <file | symbol> [--max N]
           cslq diag    [path] [--errors-only] [--max N] [--context N]
           cslq project <file>
+          cslq restore
 
         options:
           --root <dir>      workspace root (default: current directory)
@@ -34,8 +35,8 @@ internal static partial class Program
           -h, --help        this message
         """;
 
-    private static readonly string[] Commands =
-        ["ready", "refs", "def", "impl", "hover", "sym", "outline", "diag", "project"];
+    internal static readonly string[] Commands =
+        ["ready", "refs", "def", "impl", "hover", "sym", "outline", "diag", "project", "restore"];
 
     // `outline` is here because it accepts a position too — see OutlineTargetAsync. `sym`
     // takes a free-text query and `diag` and `project` a path, none of which is
@@ -73,13 +74,18 @@ internal static partial class Program
 
         var opts = Options.Parse(argv);
 
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+        // Above both the workspace scan and the server launch, which is the whole point of
+        // the command: a Dockerfile or a CI job pre-warming the ~300 MB pin has no solution
+        // to point at, and project discovery would fail it for the absence.
+        if (opts.Command == "restore") return await RestoreAsync(opts, cts.Token);
+
         // Before the server starts, like the argument checks in Options.Parse: this is a
         // filesystem scan, and a root with no project in it should say so instantly rather
         // than after a cold load.
         var sentinels = Sentinels(opts);
-
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
         await using var client = await LspClient.StartAsync(opts.Root, opts.LogLevel, opts.Daemon, cts.Token);
 
@@ -149,10 +155,26 @@ internal static partial class Program
             case "project":
                 return await ProjectAsync(client, opts, sentinels, ct);
 
+            // `restore` never reaches here: RunAsync answers it before a client exists.
+
             default:
                 throw new System.Diagnostics.UnreachableException(
                     $"Options.Parse admitted '{opts.Command}'");
         }
+    }
+
+    /// <summary>
+    /// Pays the one-time server download on demand, so the first real query does not.
+    /// <see cref="LspClient.StartAsync"/> already restores on the failure it recognises;
+    /// this is the same restore asked for deliberately, with no workspace, no server and
+    /// nothing to be ready for. A failure is a <c>CslqException</c> like any other.
+    /// </summary>
+    private static async Task<int> RestoreAsync(Options opts, CancellationToken ct)
+    {
+        var manifestRoot = ServerArgs.ToolManifestRoot();
+        await LspClient.RestoreAsync(manifestRoot, ct);
+        Output.WriteRestored(manifestRoot, opts.Json);
+        return 0;
     }
 
     private static async Task<int> RefsAsync(
@@ -839,6 +861,12 @@ internal static partial class Program
             // argument error. Only for the commands that accept a position: `sym Foo:1` is a
             // legitimate query and `diag nope:x` a path, and validating those rejected both.
             if (argument is not null && TakesPosition.Contains(command)) ValidatePosition(argument);
+
+            // `restore` names nothing: the manifest it restores is the one packed beside the
+            // running binary, found by walking up from it, and a path here would read as if
+            // it could be pointed somewhere else.
+            if (command == "restore" && argument is not null)
+                throw new CslqException($"restore takes no argument; got '{argument}'");
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
