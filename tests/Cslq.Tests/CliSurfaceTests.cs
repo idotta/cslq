@@ -120,6 +120,16 @@ public class CliSurfaceTests
     }
 
     /// <summary>
+    /// The prune after a restore deletes from wherever NuGet says it extracts, so the folder
+    /// is asked for, not assumed to be <c>~/.nuget/packages</c>.
+    /// </summary>
+    [Fact]
+    public void The_packages_folder_is_asked_of_the_cli()
+    {
+        Assert.Equal(["nuget", "locals", "global-packages", "--list"], ServerArgs.GlobalPackages());
+    }
+
+    /// <summary>
     /// A command wired into the dispatch but never into the usage text is invisible to the
     /// caller who most needs it — the one reading <c>cslq --help</c> to find out what exists.
     /// </summary>

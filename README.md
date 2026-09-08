@@ -11,14 +11,13 @@ Two constraints drive the design:
 1. **Official tooling only.** The C#-specific component in the query path is Microsoft-published.
 2. **Always current.** A weekly cron bumps the pin and a probe suite gates the bump.
 
-Status: **Milestones 1-4 done, Milestone 5 open** — `cslq ready`, `cslq refs`, `cslq def`,
-`cslq impl`, `cslq sym`, `cslq outline` and `cslq diag`, cross-project fixture, probe gate, both
-workflows, the source-generator, non-ASCII and deliberate-error fixture cases, the shared server
-daemon on by default, source-generator staleness pinned, `skill/SKILL.md`, and output tuning.
-Milestone 5 is what stands between "works on this clone" and "someone else can use it": its
-first two items are done — the tool packs and installs outside this repository, and the
-first-run failures are one-line `cslq:` messages — and metadata symbols, a Windows CI leg and a
-format gate remain. See [ROADMAP.md](ROADMAP.md).
+Status: **all five milestones done, `0.1.0` is the first release.** Ten commands — `ready`,
+`refs`, `def`, `impl`, `hover`, `sym`, `outline`, `diag`, `project` and `restore` — over a
+cross-project fixture with source-generated, non-ASCII, metadata and deliberate-error cases;
+the shared server daemon on by default; `skill/SKILL.md` for the agent; a probe gate that runs
+on Linux, Windows and macOS for every PR; a weekly bump PR gated by that suite; and a
+tag-triggered release that publishes to nuget.org and binds each version to a GitHub Release.
+The history and the evidence behind each decision are in [ROADMAP.md](ROADMAP.md).
 
 ## Install
 
@@ -26,20 +25,23 @@ Prerequisites: the **.NET 10 SDK** and **git**. Nothing else — `cslq` fetches 
 server itself on first run. Linux, Windows and macOS are the supported platforms, and every PR
 runs the gate on all three.
 
-`cslq` is not on nuget.org yet. Until 0.1.0 is published, install it from a package you build:
+```
+dotnet tool install -g cslq
+cslq --version
+```
+
+`dotnet tool update -g cslq` moves to the latest release, and every release is a [GitHub
+Release](https://github.com/idotta/cslq/releases) of the same tag with the `.nupkg` attached
+and notes saying which language server it pins. To run what is on `main` instead, install from
+a package you build — the `--source` pointing at your own `dotnet pack` output is what takes
+the place of nuget.org:
 
 ```
 git clone https://github.com/idotta/cslq.git
 cd cslq
 dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts
 dotnet tool install -g cslq --source ./artifacts
-cslq --version
 ```
-
-`dotnet tool install -g cslq` straight from nuget.org is the intended route, and will replace
-every step above once 0.1.0 is pushed. **It does not work today** — the package has never been
-published — so the `--source` pointing at your own `dotnet pack` output is what makes the
-install work.
 
 The first command that needs the language server restores it for you and says so:
 
@@ -52,6 +54,22 @@ alongside the binary, which for a global install is under
 `~/.dotnet/tools/.store/cslq/<version>/cslq/<version>/tools/net10.0/any/`. It is never your
 repository: the pin travels with the `cslq` version, so nothing you query has to carry it. The
 restore is idempotent and later runs skip it.
+
+Each pin is its own ~300 MB under `~/.nuget/packages/roslyn-language-server.<rid>/<version>`,
+and `dotnet tool` never removes one, so updating `cslq` with every weekly bump would otherwise
+stack them up. `cslq` does the housekeeping itself: the restore that brings in a new pin then
+deletes every other version of the server packages and says which —
+`removed 1 other version(s) of the language server from <packages>: ...`. The folder is the
+one `dotnet nuget locals global-packages --list` names, so `NUGET_PACKAGES` is honoured. If
+another tool manifest on the machine still pins a deleted version, that version simply reads
+as unrestored again — `dotnet tool run` answers with the same *Run "dotnet tool restore"* line
+`cslq` itself recognises — so an older `cslq` still installed elsewhere restores it back rather
+than breaking. A version a still-running old daemon holds open cannot be deleted on Windows;
+`cslq` reports it and a later `cslq restore` removes it. The one shape this does not serve is
+two different `cslq` versions in regular use on one machine — say a `-g` install and a
+`--tool-path` one: each restore deletes the other's pin, and they take turns re-downloading it.
+One `cslq` per machine is the supported shape; there is deliberately no lock, because a lock
+would serialise that fight rather than end it.
 
 What it writes is `~/.nuget/packages` and `~/.dotnet/toolResolverCache`, never that install
 directory, so a `--tool-path` install owned by root and used by another account is fine. What
@@ -76,9 +94,9 @@ cslq restore                   # fetch the pinned server now, then exit
 ```
 
 It takes no `--root` and needs no workspace — it restores the manifest packed beside the
-binary, prints where it restored to, and exits — so it is what a Dockerfile layer or a CI
-step runs to keep the download out of the first query. `--json` gives it the same envelope
-every other command uses.
+binary, prints where it restored to and what the prune above removed, and exits — so it is
+what a Dockerfile layer or a CI step runs to keep the download out of the first query. `--json`
+gives it the same envelope every other command uses, with `removed` and `kept` arrays.
 
 Then, in the repository you want to query:
 
@@ -376,8 +394,13 @@ disagreement would publish a version nobody asked for.
 What it then runs, in order: `dotnet format --verify-no-changes`, so no path to nuget.org skips
 the format check; `probes/run.sh`, the same gate every PR runs; `dotnet pack -c Release`;
 `NuGet/login@v1`, which exchanges the job's OIDC token for a one-hour nuget.org key so no
-long-lived secret exists to leak; and `dotnet nuget push --skip-duplicate`, so a re-run of an
-already-published version is a no-op rather than a failure.
+long-lived secret exists to leak; `dotnet nuget push --skip-duplicate`, so a re-run of an
+already-published version is a no-op rather than a failure; and last, `gh release create
+--generate-notes` with the `.nupkg` attached, so every version on nuget.org is bound to a
+GitHub Release of the same tag. The notes are the PRs merged since the previous tag, and a
+bump PR's title names the server version it pins, which is what tells `0.1.3` from `0.1.4`.
+The release step comes after the push so a red gate leaves nothing behind, and skips itself
+when the release already exists.
 
 `bump.yml` moves `<Version>` with every new pin, so merging a bump PR is followed by tagging it
 — a merged bump is a release like any other. Nothing tags automatically. That is deliberate

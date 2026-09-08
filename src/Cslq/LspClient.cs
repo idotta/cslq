@@ -45,7 +45,8 @@ internal sealed class LspClient : IAsyncDisposable
             Console.Error.WriteLine(
                 $"cslq: the pinned language server is not restored; restoring it in {manifestRoot}. " +
                 "This is a one-time ~300 MB download.");
-            await RestoreAsync(manifestRoot, ct);
+            var pruned = await RestoreAsync(manifestRoot, ct);
+            foreach (var line in Output.PruneLines(pruned)) Console.Error.WriteLine("cslq: " + line);
             return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
         }
     }
@@ -61,9 +62,60 @@ internal sealed class LspClient : IAsyncDisposable
     /// <summary>
     /// Also the whole of <c>cslq restore</c>, which is why this is not private: the pre-warm
     /// a Dockerfile or a CI job runs is exactly this restore, asked for rather than recovered
-    /// from.
+    /// from. A restore that succeeds is followed by <see cref="Prune.Run"/>: the new pin is
+    /// now the only version this binary can run, so the others stop costing 300 MB each. The
+    /// prune is reported, never fatal — null when the packages folder could not be found.
     /// </summary>
-    internal static async Task RestoreAsync(string manifestRoot, CancellationToken ct)
+    internal static async Task<Prune.Result?> RestoreAsync(string manifestRoot, CancellationToken ct)
+    {
+        await RestoreCoreAsync(manifestRoot, ct);
+
+        var pin = Prune.PinnedVersion(
+            await File.ReadAllTextAsync(Path.Combine(manifestRoot, ".config", "dotnet-tools.json"), ct));
+        var packages = await GlobalPackagesAsync(manifestRoot, ct);
+        return pin is null || packages is null ? null : Prune.Run(packages, pin);
+    }
+
+    /// <summary>
+    /// Where NuGet extracts packages, asked of the CLI rather than assumed: <c>NUGET_PACKAGES</c>
+    /// and a <c>globalPackagesFolder</c> in any NuGet.Config both move it. The line is
+    /// <c>global-packages: &lt;path&gt;</c>; the label is not localised with the UI language
+    /// pinned, and the path is everything after the first <c>: </c> because on Windows it
+    /// carries a colon of its own. Null when the CLI would not say. Run from the manifest
+    /// root, as the restore was: NuGet.Config is resolved from the working directory, so a
+    /// repository with its own <c>globalPackagesFolder</c> would otherwise name a folder the
+    /// restore never wrote to.
+    /// </summary>
+    private static async Task<string?> GlobalPackagesAsync(string manifestRoot, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo(ServerArgs.Command)
+        {
+            WorkingDirectory = manifestRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var a in ServerArgs.GlobalPackages()) psi.ArgumentList.Add(a);
+        psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
+
+        using var proc = StartProcess(psi, "locate the NuGet global packages folder");
+        var stdout = proc.StandardOutput.ReadToEndAsync(ct);
+        _ = proc.StandardError.ReadToEndAsync(ct);
+        await proc.WaitForExitAsync(ct);
+        if (proc.ExitCode != 0) return null;
+
+        foreach (var line in (await stdout).Split('\n'))
+        {
+            var sep = line.IndexOf(": ", StringComparison.Ordinal);
+            if (sep < 0 || !line.StartsWith("global-packages", StringComparison.Ordinal)) continue;
+            var path = line[(sep + 2)..].Trim();
+            return path.Length == 0 ? null : Path.TrimEndingDirectorySeparator(path);
+        }
+
+        return null;
+    }
+
+    private static async Task RestoreCoreAsync(string manifestRoot, CancellationToken ct)
     {
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {

@@ -305,7 +305,7 @@ public class OutputTests
 
         var text = await CaptureAsync(() =>
         {
-            Output.WriteRestored(manifest, json: false);
+            Output.WriteRestored(manifest, pruned: null, json: false);
             return Task.CompletedTask;
         });
 
@@ -313,7 +313,7 @@ public class OutputTests
 
         var json = await CaptureAsync(() =>
         {
-            Output.WriteRestored(manifest, json: true);
+            Output.WriteRestored(manifest, pruned: null, json: true);
             return Task.CompletedTask;
         });
 
@@ -323,5 +323,42 @@ public class OutputTests
         var row = doc.RootElement.GetProperty("results")[0];
         Assert.True(row.GetProperty("restored").GetBoolean());
         Assert.Equal(manifest, row.GetProperty("manifest").GetString());
+        Assert.Equal(0, row.GetProperty("removed").GetArrayLength());
+    }
+
+    /// <summary>
+    /// The prune after a restore is the only thing that ever deletes from the shared packages
+    /// folder, so what it removed and what it could not are both named, in text and in JSON.
+    /// </summary>
+    [Fact]
+    public async Task Restore_reports_what_the_prune_removed_and_what_it_could_not()
+    {
+        var pruned = new Prune.Result(
+            "/home/u/.nuget/packages",
+            ["roslyn-language-server.linux-x64/5.11.0-2.26311.5", "roslyn-language-server/5.11.0-2.26311.5"],
+            [("roslyn-language-server.linux-x64/5.10.0-1.26201.4", "in use.")]);
+
+        var lines = Output.PruneLines(pruned).ToArray();
+
+        Assert.Equal(2, lines.Length);
+        Assert.Equal(
+            "removed 2 other version(s) of the language server from /home/u/.nuget/packages: "
+            + "roslyn-language-server.linux-x64/5.11.0-2.26311.5, roslyn-language-server/5.11.0-2.26311.5",
+            lines[0]);
+        Assert.StartsWith(
+            "could not remove roslyn-language-server.linux-x64/5.10.0-1.26201.4 from /home/u/.nuget/packages: in use.",
+            lines[1]);
+
+        var json = await CaptureAsync(() =>
+        {
+            Output.WriteRestored("/m", pruned, json: true);
+            return Task.CompletedTask;
+        });
+
+        using var doc = JsonDocument.Parse(json);
+        var row = doc.RootElement.GetProperty("results")[0];
+        Assert.Equal("/home/u/.nuget/packages", row.GetProperty("packages").GetString());
+        Assert.Equal(2, row.GetProperty("removed").GetArrayLength());
+        Assert.Equal("in use.", row.GetProperty("kept")[0].GetProperty("why").GetString());
     }
 }

@@ -482,11 +482,12 @@ internal static class Output
     /// rather than anything under a workspace root, so it is absolute and not put through
     /// <see cref="PathUri"/>: there is no root for it to be relative to.
     /// </summary>
-    public static void WriteRestored(string manifestRoot, bool json)
+    public static void WriteRestored(string manifestRoot, Prune.Result? pruned, bool json)
     {
         if (!json)
         {
             Console.WriteLine("restored the pinned language server in " + manifestRoot);
+            foreach (var line in PruneLines(pruned)) Console.WriteLine(line);
             return;
         }
 
@@ -495,9 +496,37 @@ internal static class Output
             {
                 count = 1,
                 truncated = false,
-                results = new[] { new { restored = true, manifest = manifestRoot } },
+                results = new[]
+                {
+                    new
+                    {
+                        restored = true,
+                        manifest = manifestRoot,
+                        packages = pruned?.Packages,
+                        removed = pruned?.Removed ?? [],
+                        kept = pruned?.Kept.Select(k => new { dir = k.Dir, why = k.Why }) ?? [],
+                    },
+                },
             },
             JsonOut));
+    }
+
+    /// <summary>
+    /// What the post-restore prune did, one line per outcome, unprefixed: <c>cslq restore</c>
+    /// prints them as they are and <see cref="LspClient.StartAsync"/> prefixes them for
+    /// stderr. Nothing at all when nothing was there to remove.
+    /// </summary>
+    public static IEnumerable<string> PruneLines(Prune.Result? pruned)
+    {
+        if (pruned is null) yield break;
+        if (pruned.Removed.Count > 0)
+        {
+            yield return $"removed {pruned.Removed.Count} other version(s) of the language server from "
+                + $"{pruned.Packages}: {string.Join(", ", pruned.Removed)}";
+        }
+
+        foreach (var (dir, why) in pruned.Kept)
+            yield return $"could not remove {dir} from {pruned.Packages}: {why} Run 'cslq restore' once nothing is using it.";
     }
 
     /// <summary>
