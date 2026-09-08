@@ -435,9 +435,9 @@ over `ubuntu-latest`, `windows-latest` and `macos-latest`. All three legs run `.
 through the runner's `bash`, which on Windows is Git Bash — the two host-dependent cases, the
 non-ASCII ones and the forced non-daemon fallback's named mutex, are what the Windows leg
 watches, and `fail-fast: false` keeps a Windows-only red from cancelling the Linux and macOS
-legs that say whether it is platform specific. Each leg runs `dotnet format
---verify-no-changes` before the gate; `release.yml` and `bump.yml` run it before theirs too, so
-no path to a release skips it.
+legs that say whether it is platform specific. Each leg runs
+`dotnet format --verify-no-changes` before the gate; `release.yml` and `bump.yml` run it before
+theirs too, so no path to a release skips it.
 
 `cases.jsonl` is one flat JSON object per line with four string fields so `run.sh` can parse it
 with `sed` alone — no `jq`, which is absent from Git Bash on the dev machine. That keeps it
