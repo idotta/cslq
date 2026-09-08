@@ -378,12 +378,12 @@ repo. When the pin is already current the update is a no-op and no PR is opened.
 
 A PR opened with `GITHUB_TOKEN` does not get a working `probe.yml` run on its own: GitHub
 creates the run with `github-actions[bot]` as the actor and parks it at `action_required`,
-waiting for a human to approve it, so it never executes. `bump.yml` therefore runs the probes
-itself before opening the PR — a broken pin never becomes a PR — and then dispatches
-`probe.yml` on the PR branch with `gh workflow run`. `workflow_dispatch` is the one event
-`GITHUB_TOKEN` is allowed to raise, and the check runs it produces land on the branch head
-under the same `probe (<os>)` names, so a bump PR carries the same three-OS gate a human PR
-does. A ruleset on `main` requires those three checks and a pull request, with no bypass, so
+and it never executes unless someone approves it. `bump.yml` therefore runs the probes itself
+before opening the PR — a broken pin never becomes a PR — and then dispatches `probe.yml` on
+the PR branch with `gh workflow run`. `workflow_dispatch` (like `repository_dispatch`) is
+exempt from the `GITHUB_TOKEN` trigger suppression, and the check runs it produces land on the
+branch head under the same `probe (<os>)` names, so a bump PR carries the same three-OS gate a
+human PR does. A ruleset on `main` requires those three checks and a pull request, with no bypass, so
 the gate is enforcing rather than informational.
 
 `dependabot.yml` watches the action pins and the NuGet references under `src/` and `tests/`,

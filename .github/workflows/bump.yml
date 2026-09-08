@@ -72,12 +72,12 @@ jobs:
             `probes/run.sh` passed against `${{ steps.pin.outputs.version }}` on this runner
             before the PR was opened.
 
-      # A PR opened with GITHUB_TOKEN does not trigger workflows: the probe.yml run GitHub
-      # creates for it parks at action_required and never executes, so the PR would show no
-      # gate. workflow_dispatch is the one event GITHUB_TOKEN may raise, and its check runs
-      # land on the branch head under the same `probe (<os>)` names the ruleset on main
-      # requires — the same three-OS gate a human PR gets.
+      # The probe.yml run GitHub creates for a PR opened with GITHUB_TOKEN parks at
+      # action_required until a human approves it, so on its own the PR shows no gate.
+      # workflow_dispatch (like repository_dispatch) is exempt from that suppression, and its
+      # check runs land on the branch head under the same `probe (<os>)` names the ruleset on
+      # main requires — the same three-OS gate a human PR gets.
       - if: steps.cpr.outputs.pull-request-number
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run probe.yml --ref chore/bump-roslyn-ls
+        run: gh workflow run probe.yml --ref "${{ steps.cpr.outputs.pull-request-branch }}"
