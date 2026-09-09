@@ -42,6 +42,49 @@ public class ProjectSourcesTests
     }
 
     /// <summary>
+    /// A conditioned <c>false</c> is unknown, not true: this project's Debug build — the one
+    /// the server loads — keeps the default glob and compiles files of its own, so skipping it
+    /// would be a wrong answer at exit 0.
+    /// </summary>
+    [Fact]
+    public void A_conditioned_default_items_off_leaves_the_project_ordinary()
+    {
+        var kind = ProjectSources.Read("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup Condition="'$(Configuration)'=='Release'">
+                <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        Assert.False(kind.None);
+        Assert.False(kind.Elsewhere);
+    }
+
+    /// <summary>
+    /// The unconditional value still decides. A conditioned <c>true</c> beside it says nothing
+    /// this can evaluate, and ignoring the conditioned element is not the same as letting it
+    /// override the one that always applies.
+    /// </summary>
+    [Fact]
+    public void An_unconditional_false_beside_a_conditioned_true_still_compiles_nothing()
+    {
+        var kind = ProjectSources.Read("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <EnableDefaultItems>false</EnableDefaultItems>
+              </PropertyGroup>
+              <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+                <EnableDefaultItems>true</EnableDefaultItems>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        Assert.True(kind.None);
+        Assert.True(kind.Elsewhere);
+    }
+
+    /// <summary>
     /// Default items off and every include pointing outside is the same "compiles nothing of
     /// its own" as an empty include list, and it has to be, or the candidate scan reads types
     /// out of files MSBuild never compiles — the ProjectTemplates failure by another route.

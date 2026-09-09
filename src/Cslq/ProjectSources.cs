@@ -110,11 +110,20 @@ internal static class ProjectSources
     /// <c>EnableDefaultCompileItems</c> as well as <c>EnableDefaultItems</c>: the narrower
     /// property turns off exactly the <c>**/*.cs</c> glob this inference depends on, so a
     /// project setting it compiles no more of its own than one setting the broader flag.
-    /// Conditioned property groups are read unconditionally, which over-reports: the cost is
-    /// a project reported as skipped rather than probed, against a full timeout the other way.
+    /// Only an <em>unconditional</em> <c>false</c> counts: a <c>Condition</c> on the element or
+    /// on anything containing it — a <c>PropertyGroup</c>, a <c>When</c>, a <c>Target</c> — is
+    /// not evaluated here, and a Release-only <c>false</c> would otherwise skip a project whose
+    /// Debug build, which is what the server loads, compiles files of its own. Unknown leaves
+    /// the project probed as before: the worst case is the timeout that was always there,
+    /// against a wrongly skipped project at exit 0.
     /// </summary>
     private static bool DefaultItemsDisabled(XElement project) => project
         .Descendants()
         .Where(e => e.Name.LocalName is "EnableDefaultItems" or "EnableDefaultCompileItems")
+        .Where(Unconditional)
         .Any(e => e.Value.Trim().Equals("false", StringComparison.OrdinalIgnoreCase));
+
+    private static bool Unconditional(XElement element) => !element
+        .AncestorsAndSelf()
+        .Any(e => e.Attribute("Condition") is not null);
 }
