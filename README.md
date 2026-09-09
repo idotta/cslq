@@ -392,8 +392,12 @@ safe from the first command: measured on the fixture with a 20 s keepalive, the 
 One case is left, and it is not `cslq`'s to fix: if you launch `cslq` from a process that
 itself holds an inheritable capture pipe — a .NET `Process.Start` with
 `RedirectStandardOutput`, whose *own* stdout is a pipe — that pipe is inherited into `cslq` as
-an ordinary handle and travels on into the daemon. Redirect the intermediary to a file rather
-than capturing it, or pass `--no-daemon`, whose private server exits with the client.
+an ordinary handle and travels on into the daemon. The concrete instance is a PowerShell-hosted
+harness: measured with a 10 s keepalive, bash `out=$(cslq ready)` returns in 4 s but
+`out=$(pwsh -c '$x = & cslq ready; $x')` takes 18 s, which is what an agent whose shell tool is
+PowerShell — Claude Code on Windows, Actions `shell: pwsh` — sees. Redirect the intermediary to
+a file rather than capturing it, take the launching call as an unredirected `cslq ready`, or
+pass `--no-daemon`, whose private server exits with the client.
 
 `probes/run.sh` scopes itself to its own daemon with
 `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` and a short keepalive, so the gate cannot inherit a

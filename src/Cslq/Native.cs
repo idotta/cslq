@@ -8,10 +8,10 @@ namespace Cslq;
 /// </summary>
 internal static partial class Native
 {
-    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll")]
     internal static partial nint GetStdHandle(int nStdHandle);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool SetHandleInformation(nint hObject, int dwMask, int dwFlags);
 }

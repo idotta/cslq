@@ -186,7 +186,11 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   the only thing that catches it. **The trap survives one level up:** launch `cslq` from a
   process whose own stdout is an inheritable pipe — `dotnet run probes/stdout-capture.cs`
   under `$(...)` — and *that* pipe is inherited into cslq as an ordinary handle and travels on
-  into the daemon. Redirect an intermediary to a file and `cat` it; never capture it.
+  into the daemon. Redirect an intermediary to a file and `cat` it; never capture it. The
+  instance that reaches users is a **PowerShell-hosted harness** (Claude Code on Windows,
+  Actions `shell: pwsh`): keepalive 10, bash `out=$(cslq ready)` 4 s against bash
+  `out=$(pwsh -c '$x = & cslq ready; $x')` 18 s. So the launch must be an unredirected
+  `cslq ready`, or `--no-daemon`, and SKILL.md carries that qualifier because it ships alone.
 - **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
   it terminates the process without ever raising a console control event, so the handler never
   runs and the 130 you see is bash's own signal status. To exercise the real path, launch `cslq`

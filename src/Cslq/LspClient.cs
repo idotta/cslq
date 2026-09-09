@@ -20,7 +20,6 @@ internal sealed class LspClient : IAsyncDisposable
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(10);
 
     private const int HandleFlagInherit = 0x1;
-    private static bool _stdioInheritanceCleared;
 
     public string Root { get; }
 
@@ -94,6 +93,7 @@ internal sealed class LspClient : IAsyncDisposable
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {
             WorkingDirectory = manifestRoot,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -102,6 +102,7 @@ internal sealed class LspClient : IAsyncDisposable
         psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
         using var proc = StartProcess(psi, "locate the NuGet global packages folder");
+        proc.StandardInput.Close();
         var stdout = proc.StandardOutput.ReadToEndAsync(ct);
         _ = proc.StandardError.ReadToEndAsync(ct);
         await proc.WaitForExitAsync(ct);
@@ -123,6 +124,7 @@ internal sealed class LspClient : IAsyncDisposable
         var psi = new ProcessStartInfo(ServerArgs.Command)
         {
             WorkingDirectory = manifestRoot,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -132,6 +134,7 @@ internal sealed class LspClient : IAsyncDisposable
 
         using (var proc = StartProcess(psi, $"restore the pinned language server in {manifestRoot}"))
         {
+            proc.StandardInput.Close();
             var stdout = proc.StandardOutput.ReadToEndAsync(ct);
             var stderr = proc.StandardError.ReadToEndAsync(ct);
             try
@@ -171,28 +174,21 @@ internal sealed class LspClient : IAsyncDisposable
     /// std handles reach the thin client and, through it, the daemon — which outlives us. A
     /// harness that captures our output then waits for EOF on a pipe the daemon still holds,
     /// so a launching call blocks for the whole keepalive and the daemon is dead by the time
-    /// it returns. Clearing the inherit flag once, before any launch, is what stops the leak.
+    /// it returns. Clearing the inherit flag before every launch is what stops the leak.
     /// Unix is unaffected: .NET opens its own descriptors <c>O_CLOEXEC</c> and dup2s only the
     /// redirected ends.
     /// </summary>
     private static void DisableStdioInheritance()
     {
-        if (!OperatingSystem.IsWindows() || _stdioInheritanceCleared) return;
-        _stdioInheritanceCleared = true;
+        if (!OperatingSystem.IsWindows()) return;
 
-        // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE. Best effort throughout: a
-        // process with no console has invalid std handles, and it must not be broken by this.
+        // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE. Best effort: a process with
+        // no console has invalid std handles, and it must not be broken by this.
         foreach (var id in (ReadOnlySpan<int>)[-10, -11, -12])
         {
-            try
-            {
-                var handle = Native.GetStdHandle(id);
-                if (handle == nint.Zero || handle == -1) continue;
-                Native.SetHandleInformation(handle, HandleFlagInherit, 0);
-            }
-            catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
-            {
-            }
+            var handle = Native.GetStdHandle(id);
+            if (handle == nint.Zero || handle == -1) continue;
+            Native.SetHandleInformation(handle, HandleFlagInherit, 0);
         }
     }
 

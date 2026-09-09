@@ -76,6 +76,9 @@ dotnet build src/Cslq/Cslq.csproj -c Release --nologo -v q || exit 1
 CSLQ="$root/src/Cslq/bin/Release/net10.0/cslq"
 [ -x "$CSLQ" ] || CSLQ="$CSLQ.exe"
 [ -x "$CSLQ" ] || { echo "cslq not found at $CSLQ" >&2; exit 1; }
+# The same binary as a Windows path, for the legs that hand it to a .NET harness rather
+# than running it from bash.
+CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 
 # Readiness is asserted before any case runs: project load is async and a query fired
 # too early returns empty results, not an error, so a naive probe reports a false pass.
@@ -355,7 +358,7 @@ fi
 installed="$install_tmp/bin/cslq"
 [ -x "$installed" ] || installed="$installed.exe"
 if [ "$ok" = 1 ] && [ -x "$installed" ]; then
-  # Redirected rather than captured, like every other invocation here.
+  # Redirected to a log rather than captured, so the output survives for printing on failure.
   ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 ) \
     > "$install_tmp/ready.log" 2>&1
   rc=$?
@@ -389,7 +392,7 @@ fi
 if pwd -W >/dev/null 2>&1; then
   log "captured stdout"
   sc_log=$(mktemp)
-  dotnet run probes/stdout-capture.cs -- "$root_abs/src/Cslq/bin/Release/net10.0/cslq.exe" > "$sc_log" 2>&1
+  dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
   rc=$?
   out=$(cat "$sc_log")
   rm -f "$sc_log"
@@ -404,9 +407,9 @@ if pwd -W >/dev/null 2>&1; then
 fi
 
 # The three first-run failures a user who is not this repository hits, two of which are
-# checkable without a server. Both capture with $(...), which is only safe because neither
-# reaches a daemon: one fails in the filesystem scan before LspClient.StartAsync, the other
-# fails at Process.Start.
+# checkable without a server. Both are scripted legs rather than cases.jsonl rows because
+# the message alone proves nothing: what each one asserts is that the failure is immediate,
+# so the elapsed time has to be checked too.
 #
 # A root with no solution. --autoLoadProjects does not discover a bare .csproj, so this used
 # to load nothing, answer empty and exit 1 only after the whole timeout. The elapsed check is
@@ -493,7 +496,7 @@ cache_entry="${DOTNET_CLI_HOME:-$HOME}/.dotnet/toolResolverCache/1/roslyn-langua
 
 rs_log=$(mktemp)
 rs_start=$(date +%s)
-# Redirected rather than captured, like every other invocation here.
+# Redirected to a log rather than captured, so the output survives for printing on failure.
 "$CSLQ" restore > "$rs_log" 2>&1
 rc=$?
 rs_elapsed=$(( $(date +%s) - rs_start ))

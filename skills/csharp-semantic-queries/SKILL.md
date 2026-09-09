@@ -43,7 +43,9 @@ its own, so this looks optional. It is not, and latency is the smaller half of w
 
 `cslq` starts a shared background daemon on first use, and the first command pays the solution
 load for everything after it. Piping and capturing are safe, including on that first command —
-the daemon does not inherit the launching client's stdout.
+the daemon does not inherit the launching client's stdout. The exception is a shell that is
+itself captured (a PowerShell-hosted harness, whose own stdout is a pipe): there the launching
+command should be an unredirected `cslq ready`, or pass `--no-daemon`.
 
 ## Task → command
 
