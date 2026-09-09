@@ -39,6 +39,24 @@ internal static class PathUri
 
     public static string FromPath(string path) => new Uri(Path.GetFullPath(path)).AbsoluteUri;
 
+    /// <summary>
+    /// An extended-length path with its prefix removed: <c>\\?\C:\x</c> becomes <c>C:\x</c>
+    /// and <c>\\?\UNC\server\share</c> becomes <c>\\server\share</c>. The prefix is legal
+    /// input to every filesystem API and survives <see cref="Path.GetFullPath(string)"/>
+    /// untouched, but nothing above that tolerates it: <see cref="FromPath"/> builds a URI
+    /// no server ever reports for the same file, so every prefix test against the root
+    /// fails, and <c>XDocument.Load(string)</c> parses its argument as a URI and rejects one
+    /// outright. Normalised once, where <c>--root</c> is parsed, rather than defended
+    /// against at each of those places.
+    /// </summary>
+    public static string Plain(string path)
+    {
+        const string unc = @"\\?\UNC\";
+        const string extended = @"\\?\";
+        if (path.StartsWith(unc, StringComparison.Ordinal)) return @"\\" + path[unc.Length..];
+        return path.StartsWith(extended, StringComparison.Ordinal) ? path[extended.Length..] : path;
+    }
+
     public static string ToPath(string uri) => new Uri(uri).LocalPath;
 
     public static bool IsGenerated(string uri) =>
@@ -95,14 +113,24 @@ internal static class PathUri
     /// a stale <c>ProjectReference</c> binding, and one it only has the assembly for is a
     /// framework or package type whose decompiled document is the real answer.
     /// </summary>
-    public static bool AnyUnder(string root, IEnumerable<string> uris)
-    {
-        var prefix = Path.GetFullPath(root).TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    public static bool AnyUnder(string root, IEnumerable<string> uris) => uris.Any(u =>
+        !IsGenerated(u) && !IsDecompiled(u) && IsUnder(root, ToPath(u)));
 
-        return uris.Any(u =>
-            !IsGenerated(u) && !IsDecompiled(u) &&
-            Path.GetFullPath(ToPath(u)).StartsWith(prefix, PathComparison));
+    /// <summary>
+    /// Whether a path is inside <paramref name="root"/>: the path form of the question
+    /// <c>Sentinel.Under</c> asks of a URI, written once here because the argument guard in
+    /// <see cref="Program"/> asks it of a caller's argument, before any URI exists.
+    /// Both sides are compared as full paths, so a <c>../x.cs</c> lands outside; the root
+    /// itself counts as inside, which is what keeps <c>diag .</c> the whole workspace rather
+    /// than an argument error.
+    /// </summary>
+    public static bool IsUnder(string root, string path)
+    {
+        var full = Path.GetFullPath(root).TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var target = Path.GetFullPath(path);
+        return target.Equals(full, PathComparison) ||
+               target.StartsWith(full + Path.DirectorySeparatorChar, PathComparison);
     }
 
     /// <summary>Agents want repo-relative forward-slash paths, not absolute paths or URIs.</summary>

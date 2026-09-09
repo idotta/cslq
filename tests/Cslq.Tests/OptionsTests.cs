@@ -63,6 +63,24 @@ public class OptionsTests
     }
 
     /// <summary>
+    /// A blank value is a misquoted shell variable, never a request. <c>--root ""</c> reached
+    /// <c>Path.GetFullPath</c>, whose <c>ArgumentException</c> is not a <c>CslqException</c>,
+    /// so the run ended in a stack trace and exit 127.
+    /// </summary>
+    [Theory]
+    [InlineData("--root", "")]
+    [InlineData("--root", "  ")]
+    [InlineData("--sentinel", "")]
+    [InlineData("--log-level", "")]
+    [InlineData("--max", "")]
+    public void An_option_given_a_blank_value_is_rejected(string option, string value)
+    {
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", option, value]));
+
+        Assert.Equal($"option '{option}' needs a value", ex.Message);
+    }
+
+    /// <summary>
     /// Overflow is not garbage: <c>--max 99999999999</c> is a number, just not one that fits,
     /// and "needs an integer" reads as a lie about the input.
     /// </summary>

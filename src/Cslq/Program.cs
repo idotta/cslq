@@ -182,6 +182,8 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CslqException("refs needs a symbol or file:line:col");
 
+        CheckTarget(opts.Root, target);
+
         // Gate on a sentinel that must exist, never on the symbol being asked about:
         // otherwise a genuinely absent symbol is indistinguishable from a workspace that
         // has not finished loading, and the caller waits out the whole timeout for it.
@@ -199,6 +201,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CslqException("def needs a symbol or file:line:col");
 
+        CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
@@ -220,6 +223,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CslqException("impl needs a symbol or file:line:col");
 
+        CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
@@ -239,6 +243,7 @@ internal static partial class Program
     {
         var target = opts.Argument ?? throw new CslqException("hover needs a symbol or file:line:col");
 
+        CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
@@ -259,8 +264,12 @@ internal static partial class Program
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CslqException("project needs a file");
-        var full = Path.GetFullPath(Path.Combine(opts.Root, target));
-        if (!File.Exists(full)) throw new CslqException($"no such file: {target}");
+        if (Directory.Exists(Path.GetFullPath(Path.Combine(opts.Root, target))))
+        {
+            throw new CslqException($"project needs a file, not a directory: {target}");
+        }
+
+        var full = CheckFile(opts.Root, target);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -299,10 +308,21 @@ internal static partial class Program
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         var target = opts.Argument ?? throw new CslqException("outline needs a file or symbol");
+        var file = OutlineFile(opts.Root, target, out var line);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var uri = await OutlineTargetAsync(client, opts.Root, target, opts.Max, ct);
+        string uri;
+        if (file is null)
+        {
+            uri = await OutlineSymbolAsync(client, opts.Root, target, opts.Max, ct);
+        }
+        else
+        {
+            uri = PathUri.FromPath(file);
+            if (line > 0) await CheckLineAsync(client, opts.Root, uri, line, ct);
+        }
+
         var symbols = await client.DocumentSymbolsAsync(uri, ct);
         await Output.WriteOutlineAsync(
             opts.Root, uri, symbols, opts.Max, opts.Json, Documents.Of(client, ct));
@@ -310,23 +330,36 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// A file path, a <c>file:line:col</c> spec (whose document is outlined, so a position
-    /// copied from a <c>def</c> result works), or a symbol whose declaring document is
-    /// outlined — the last being the only route to a source-generated document, which has no
-    /// path. Anything file-shaped is resolved as a file and nothing else: letting a mistyped
-    /// path fall through to the symbol resolver produces "no symbol matched 'Core/Missing.cs'"
-    /// and a candidate dump, when the answer is that the file is not there.
+    /// The file half of an <c>outline</c> target: a file path, or a <c>file:line:col</c> spec
+    /// whose document is outlined, so a position copied from a <c>def</c> result works. Null
+    /// for a target that is not a file at all, which goes to <see cref="OutlineSymbolAsync"/> —
+    /// the only route to a source-generated document, which has no path. Anything file-shaped
+    /// is resolved as a file and nothing else: letting a mistyped path fall through to the
+    /// symbol resolver produces "no symbol matched 'Core/Missing.cs'" and a candidate dump,
+    /// when the answer is that the file is not there.
+    /// <para>
+    /// Nothing here needs the server, so <c>outline</c> runs it before readiness and answers a
+    /// bad path without waiting out a cold load. <paramref name="line"/> is 0 unless the target
+    /// carried a position.
+    /// </para>
     /// </summary>
-    private static async Task<string> OutlineTargetAsync(
-        LspClient client, string root, string target, int max, CancellationToken ct)
+    private static string? OutlineFile(string root, string target, out int line)
     {
-        var path = TryParsePosition(target, out var file, out _, out _) ? file : target;
+        var spec = TryParsePosition(target, out var file, out line, out _);
+        var path = spec ? file : target;
         var full = Path.GetFullPath(Path.Combine(root, path));
 
-        if (File.Exists(full)) return PathUri.FromPath(full);
+        if (File.Exists(full)) return CheckDocument(root, path);
+
         if (Directory.Exists(full)) throw new CslqException($"outline needs a file, not a directory: {path}");
         if (LooksLikePath(path)) throw new CslqException($"no such file: {path}");
+        return null;
+    }
 
+    /// <summary>The document declaring <paramref name="target"/>, for <c>outline</c>.</summary>
+    private static async Task<string> OutlineSymbolAsync(
+        LspClient client, string root, string target, int max, CancellationToken ct)
+    {
         // Overloads are not ambiguity here: several matches that share a document all outline
         // to the same thing, so collapse by document and only complain if they really differ.
         var matches = await MatchSymbolsAsync(client, target, ct);
@@ -363,6 +396,66 @@ internal static partial class Program
         target.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The three extensions Roslyn answers document questions for. Razor is here because it
+    /// works in file mode — <c>outline</c>, <c>refs</c>, <c>def</c> and a per-file <c>diag</c>
+    /// all answer for a <c>.razor</c> — even though the directory walk does not reach one.
+    /// </summary>
+    private static readonly string[] DocumentExtensions = [".cs", ".razor", ".cshtml"];
+
+    /// <summary>
+    /// The one gate every file-taking command puts its argument through, before any
+    /// <c>didOpen</c>. <see cref="LspClient.OpenAsync"/> declares <c>languageId: csharp</c>
+    /// for whatever it is handed and the daemon then holds the document open for its whole
+    /// lifetime, so a <c>.csproj</c> given to <c>diag</c> answered with a hundred parse errors
+    /// at exit 0, and a <c>.json</c> did the same. A path above <c>--root</c> is not in the
+    /// workspace at all. Both are argument errors, and both are named here rather than left to
+    /// the server to answer with <c>no results</c>.
+    /// <para>
+    /// The message spells the path the caller did, like <c>no such file</c>; the full path is
+    /// returned for the caller to use. Existence is not checked — <c>diag</c> takes a directory
+    /// too, so each caller says what it means by a missing target.
+    /// </para>
+    /// </summary>
+    internal static string CheckDocument(string root, string target)
+    {
+        var full = CheckUnderRoot(root, target);
+        var extension = Path.GetExtension(full);
+        return DocumentExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)
+            ? full
+            : throw new CslqException($"{target} is not a C# document");
+    }
+
+    /// <summary>
+    /// The first half of <see cref="CheckDocument"/>, on its own for <c>diag</c>'s directory
+    /// walk: a directory is a legitimate target there, but one above the root is not.
+    /// </summary>
+    internal static string CheckUnderRoot(string root, string target)
+    {
+        var full = Path.GetFullPath(Path.Combine(root, target));
+        return PathUri.IsUnder(root, full)
+            ? full
+            : throw new CslqException($"{target} is outside --root");
+    }
+
+    /// <summary><see cref="CheckDocument"/> for a command that needs the file to be there.</summary>
+    private static string CheckFile(string root, string target)
+    {
+        var full = CheckDocument(root, target);
+        return File.Exists(full) ? full : throw new CslqException($"no such file: {target}");
+    }
+
+    /// <summary>
+    /// The guard for a <c>symbol | file:line:col</c> target, which only has a file to check
+    /// half the time. Run by <c>refs</c>, <c>def</c>, <c>impl</c> and <c>hover</c> before
+    /// readiness, so a bad path is answered in milliseconds rather than after a cold load;
+    /// <see cref="LocateAsync"/> repeats the check because it is the one that needs the path.
+    /// </summary>
+    private static void CheckTarget(string root, string target)
+    {
+        if (TryParsePosition(target, out var file, out _, out _)) CheckFile(root, file);
+    }
+
+    /// <summary>
     /// Exit code reports whether the query was answered, not whether the workspace is clean:
     /// a repo with no diagnostics is a successful `diag`, unlike an empty `refs`, which means
     /// the lookup failed.
@@ -370,38 +463,14 @@ internal static partial class Program
     private static async Task<int> DiagAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
+        var files = DiagFiles(opts);
+
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var findings = new List<(string Uri, Diagnostic Diagnostic)>();
-        if (opts.Argument is { } target)
+        foreach (var uri in files.Select(PathUri.FromPath))
         {
-            var full = Path.GetFullPath(Path.Combine(opts.Root, target));
-            if (Directory.Exists(full))
-            {
-                foreach (var uri in SourceFiles(full).Select(PathUri.FromPath))
-                {
-                    findings.AddRange((await client.DiagnosticsAsync(uri, ct)).Select(d => (uri, d)));
-                }
-            }
-            else if (File.Exists(full))
-            {
-                var uri = PathUri.FromPath(full);
-                findings.AddRange((await client.DiagnosticsAsync(uri, ct)).Select(d => (uri, d)));
-            }
-            else
-            {
-                throw new CslqException($"no such file or directory: {target}");
-            }
-        }
-        else
-        {
-            // Per file, not workspace/diagnostic: that endpoint answers but returns zero
-            // reports, which is what workspaceDiagnostics: false in its dynamic registration
-            // means. Verified against 5.12.0-1.26426.8.
-            foreach (var uri in SourceFiles(opts.Root).Select(PathUri.FromPath))
-            {
-                findings.AddRange((await client.DiagnosticsAsync(uri, ct)).Select(d => (uri, d)));
-            }
+            findings.AddRange((await client.DiagnosticsAsync(uri, ct)).Select(d => (uri, d)));
         }
 
         if (opts.ErrorsOnly)
@@ -415,6 +484,25 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// The documents one <c>diag</c> pulls, resolved before the server is waited on so a bad
+    /// path is an instant argument error. A directory keeps walking — that is <c>diag</c>'s
+    /// contract, and the walk is <c>.cs</c>-only — while a file passes the document guard, so
+    /// a <c>.csproj</c> is refused rather than opened as C# and answered with a wall of parse
+    /// errors at exit 0. Per file, not <c>workspace/diagnostic</c>: that endpoint answers but
+    /// returns zero reports, which is what <c>workspaceDiagnostics: false</c> in its dynamic
+    /// registration means. Verified against 5.12.0-1.26426.8.
+    /// </summary>
+    private static IReadOnlyList<string> DiagFiles(Options opts)
+    {
+        if (opts.Argument is not { } target) return SourceFiles(opts.Root).ToList();
+
+        var full = CheckUnderRoot(opts.Root, target);
+        if (Directory.Exists(full)) return SourceFiles(full).ToList();
+        if (!File.Exists(full)) throw new CslqException($"no such file or directory: {target}");
+        return [CheckDocument(opts.Root, target)];
+    }
+
+    /// <summary>
     /// Returns a URI, not a path: a source-generated declaration has no path, and converting
     /// one to a path and back silently yields a different, nonexistent document.
     /// </summary>
@@ -423,9 +511,9 @@ internal static partial class Program
     {
         if (TryParsePosition(target, out var file, out var line, out var column))
         {
-            var full = Path.GetFullPath(Path.Combine(root, file));
-            if (!File.Exists(full)) throw new CslqException($"no such file: {file}");
-            return (PathUri.FromPath(full), new Position(line - 1, column - 1));
+            var uri = PathUri.FromPath(CheckFile(root, file));
+            await CheckLineAsync(client, root, uri, line, ct);
+            return (uri, new Position(line - 1, column - 1));
         }
 
         var matches = await MatchSymbolsAsync(client, target, ct);
@@ -535,6 +623,37 @@ internal static partial class Program
 
         (file, line, column) = (string.Empty, 0, 0);
         return false;
+    }
+
+    /// <summary>
+    /// A line past the end of the document, rejected before the position reaches the server.
+    /// It is the server that refuses it — <c>The requested line number 98 must be less than
+    /// the number of lines 14. (Parameter 'Line')</c> — and that arrives as a
+    /// <c>RemoteInvocationException</c>, which <c>Main</c> does not catch: a stack trace and
+    /// exit 127. Said here instead, where the file name and the count are known.
+    /// <para>
+    /// Roslyn's count includes the empty line after the final newline, so its limit for a
+    /// 13-line file is 14. The count reported here is the one <c>cat -n</c> shows the caller,
+    /// so line 14 of that file is rejected too — a position nothing can be at. The column
+    /// stays unchecked: it is inside a line that exists, and the server answers `no results`.
+    /// </para>
+    /// <para>
+    /// Only a caller-spelled <c>file:line:col</c> gets here, which is always an ordinary file
+    /// on disk — a source-generated document is reachable by symbol alone — so the read is
+    /// the one <see cref="LspClient.LinesAsync"/> caches for the context lines anyway. An
+    /// empty file counts as one line, since 1:1 is a position in it, but the message reports
+    /// the real count rather than claiming a line that is not there.
+    /// </para>
+    /// </summary>
+    private static async Task CheckLineAsync(
+        LspClient client, string root, string uri, int line, CancellationToken ct)
+    {
+        var lines = await client.LinesAsync(uri, ct);
+        if (line <= Math.Max(1, lines.Length)) return;
+
+        var count = lines.Length == 1 ? "1 line" : $"{lines.Length} lines";
+        throw new CslqException(
+            $"line out of range: {line} ({PathUri.Display(root, uri)} has {count})");
     }
 
     private static int Coordinate(string text, string name) => int.TryParse(text, out var value)
@@ -761,7 +880,14 @@ internal static partial class Program
     {
         try
         {
-            return XDocument.Load(solution);
+            // From a stream, not the path: the string overload resolves its argument as a
+            // URI, and an extended-length path (`\\?\C:\...`) is not one — it threw
+            // UriFormatException, which is not an XmlException and so escaped as a stack
+            // trace. `PathUri.Plain` strips the prefix off `--root` before it ever gets here,
+            // which is what actually fixes that path; this stays because the string overload
+            // buys nothing in exchange for resolving a filename the caller already has.
+            using var file = File.OpenRead(solution);
+            return XDocument.Load(file);
         }
         catch (XmlException ex)
         {
@@ -834,7 +960,7 @@ internal static partial class Program
             {
                 switch (argv[i])
                 {
-                    case "--root": root = Path.GetFullPath(Next(argv, ref i)); break;
+                    case "--root": root = PathUri.Plain(Path.GetFullPath(Next(argv, ref i))); break;
                     case "--sentinel": sentinel = Next(argv, ref i); break;
                     case "--max": max = Int(argv, ref i, 1); break;
                     case "--context": context = Int(argv, ref i, 0); break;
@@ -873,9 +999,19 @@ internal static partial class Program
                 daemon);
         }
 
+        /// <summary>
+        /// The value after an option, which is never legitimately blank: every option here
+        /// names a directory, a symbol, a number or a log level, and an empty one is a
+        /// misquoted shell variable rather than a request. Without this
+        /// <c>--root ""</c> reached <see cref="Path.GetFullPath(string)"/>, whose
+        /// <c>ArgumentException</c> is not a <see cref="CslqException"/> and so answered a
+        /// typo with a stack trace and exit 127.
+        /// </summary>
         private static string Next(string[] argv, ref int i)
         {
-            if (++i >= argv.Length) throw new CslqException($"option '{argv[i - 1]}' needs a value");
+            var name = argv[i];
+            if (++i >= argv.Length || string.IsNullOrWhiteSpace(argv[i]))
+                throw new CslqException($"option '{name}' needs a value");
             return argv[i];
         }
 

@@ -86,7 +86,9 @@ an error. Use it when you do not know the exact name; use `def` when you do.
 
 `diag` is the exception: it takes a **file or directory path, or nothing at all** — never a
 symbol or a position. With no argument it walks every `.cs` file under `--root`. `project` takes
-a **file path** and nothing else.
+a **file path** and nothing else. Every path argument must lie under `--root`, and a file
+must be a C# document (`.cs`, `.razor`, `.cshtml`); `diag`'s directory is the one non-document
+target. A `.csproj`, a `.json` or a path above the root is an error.
 
 ## Output
 

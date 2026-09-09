@@ -228,6 +228,30 @@ public class ProjectDiscoveryTests
     }
 
     /// <summary>
+    /// An extended-length root (<c>\\?\C:\...</c>) is a real path that <c>Path.GetFullPath</c>
+    /// preserves and every filesystem API accepts, and nothing above them does:
+    /// <c>XDocument.Load(string)</c> resolves its argument as a URI and threw
+    /// <c>UriFormatException</c> — not <c>XmlException</c>, so it escaped as a stack trace and
+    /// exit 127 — and <c>PathUri.FromPath</c> would have thrown the same on the next hit. The
+    /// prefix is therefore stripped once, in <c>Options.Parse</c>, and discovery sees an
+    /// ordinary root. Windows-only: the prefix is a Win32 spelling.
+    /// </summary>
+    [Fact]
+    public void An_extended_length_root_is_read_like_any_other()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("\\\\?\\ is a Win32 path prefix.");
+
+        using var ws = new Workspace();
+        var app = ws.Project("App");
+        ws.Write("App/Real.cs", "internal class Real;");
+
+        var opts = Program.Options.Parse(["ready", "--root", @"\\?\" + ws.Root]);
+
+        Assert.Equal(ws.Root, opts.Root);
+        Assert.Equal(app, Assert.Single(Program.InferSentinels(opts.Root)).Directory);
+    }
+
+    /// <summary>
     /// "no .csproj under &lt;root&gt;" would be a lie about a root whose solution simply lists
     /// no C# project, and would send the reader looking for files that are sitting right there.
     /// </summary>

@@ -290,10 +290,12 @@ App/TypeError.cs:18:36 error CS0029: Cannot implicitly convert type 'string' to 
   19 | }
 ```
 
-`diag` takes a file, a directory, or nothing at all — with no argument it walks every `.cs` file
-under `--root`, skipping `bin` and `obj`. It does *not* use `workspace/diagnostic`: the server
-answers that endpoint but returns zero reports, which is what the `workspaceDiagnostics: false`
-in its dynamic registration means.
+`diag` takes a C# file (`.cs`, `.razor`, `.cshtml`), a directory, or nothing at all — with no
+argument it walks every `.cs` file under `--root`, skipping `bin` and `obj`. Anything else, a
+`.csproj` or a `.json` or a path above `--root`, is an argument error rather than a document
+parsed as C#. It does *not* use `workspace/diagnostic`: the server answers that endpoint but
+returns zero reports, which is what the `workspaceDiagnostics: false` in its dynamic
+registration means.
 
 Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (default 50),
 `--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
@@ -515,7 +517,7 @@ weekly bump.
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
 
-**82 legs today = the 72 rows in `cases.jsonl` + 10 scripted ones.** The scripted ten are the
+**88 legs today = the 78 rows in `cases.jsonl` + 10 scripted ones.** The scripted ten are the
 three source-generator staleness legs, the framework `def` (whose two failure modes are an
 absence and a duration, neither of which a `expect` substring can pin), the forced non-daemon
 fallback, the cold-server `diag`, the packaged-tool install, the two first-run failures (a root
