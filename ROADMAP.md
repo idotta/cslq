@@ -5,10 +5,11 @@ questions are already settled. `DESIGN.md` holds the why behind the settled ones
 
 Last updated: 2026-09-07, after Milestone 5 item 5 put the gate on a Windows runner. All five
 milestones are done: the distance between "works on this clone" and "someone else can use it"
-was Milestone 5, and it is closed. Output tuning held two concrete changes: `sym`
-applies `--max` in the server's relevance order and sorts only what survives, so a capped
-broad query keeps the best matches; and a generated document's label now names the project
-that consumed the generator, which the URI never did.
+was Milestone 5, and it is closed. Output tuning held two concrete changes: `sym` ranks its
+hits client-side — exact, then prefix, then substring, source before generated — and applies
+`--max` to that ranking, sorting only what survives, so a capped broad query keeps the best
+matches; and a generated document's label now names the project that consumed the generator,
+which the URI never did.
 
 80 legs pass — the 71 rows in `probes/cases.jsonl` plus 9 scripted legs (three source-generator
 staleness legs, the framework `def`, the forced non-daemon fallback, the cold-server `diag`, the
@@ -294,7 +295,7 @@ agent to run `cslq ready` once at session start.
       empty answer now means absent.
 - [x] Output tuning — the one concrete item under it, DESIGN.md's generated-document label,
       is done. The label now leads with the consuming project's directory
-      (`<generated>/Core/Gen/BuildInfo.g.cs`), which comes from
+      (`<generated>/Core/Gen/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs`), which comes from
       `textDocument/_vs_getProjectContexts` rather than from the URI: the URI's stable fields
       name the *generator*, so one generator serving several projects rendered several
       distinct documents identically, and `Output` sorts on that label. The `_vs_id` it
@@ -630,8 +631,10 @@ against 5.12.0-1.26426.8 / win-x64.
   four distinct strings. The query `Zed` answered `Zed` (App), `ZedHelper` (Core), `AbcZed`
   (Core) -- exact, prefix, substring, with the exact match's project coming second in document
   order, so neither project order nor declaration order explains it. Identical across two runs.
-  This is what makes `sym`'s truncate-before-sort meaningful. Verified 2026-09-05 against
-  5.12.0-1.26426.8.
+  This is what made `sym`'s truncate-before-sort meaningful. The order did not hold on three
+  real corpora (T-23) — the answer arrived grouped per project and per target framework, with
+  generated copies first — so `sym` no longer relies on it and ranks client-side before the cut.
+  Verified 2026-09-05 against 5.12.0-1.26426.8.
 - `textDocument/implementation` answers `Location[]`, with zero-width ranges at the
   implementer's name. Fired at an interface member it returns the implementing members, at an
   interface type the implementing types, and at a base-list mention of the interface the same

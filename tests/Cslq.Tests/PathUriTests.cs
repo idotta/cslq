@@ -9,21 +9,55 @@ public class PathUriTests
 {
     /// <summary>
     /// The authority guid, the documentId and the assemblyPath in a generated URI are all
-    /// regenerated per run and per machine, so the display label is built only from hintName
-    /// and assemblyName. This URI carries the volatile fields precisely so a regression that
-    /// starts using them shows up here.
+    /// regenerated per run and per machine, so the display label is built only from
+    /// assemblyName, typeName and hintName. This URI carries the volatile fields precisely so
+    /// a regression that starts using them shows up here.
     /// </summary>
     private const string Generated =
         "roslyn-source-generated://8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234/BuildInfo.g.cs" +
         "?documentId=7f2c9b13-4a55-4c8e-9d3f-1e5b6a2d9c77" +
         "&assemblyPath=C%3A%5Cdev%5Cfixture%5CApp%5Cbin%5CDebug%5Cnet10.0%5CFixture.App.dll" +
-        "&assemblyName=Fixture.App&assemblyVersion=1.0.0.0&typeName=BuildInfo&hintName=BuildInfo.g.cs";
+        "&assemblyName=Fixture.App&assemblyVersion=1.0.0.0" +
+        "&typeName=Fixture.Gen.BuildInfoGenerator&hintName=BuildInfo.g.cs";
 
     [Fact]
     public void A_generated_uri_displays_as_its_assembly_and_hint_name()
     {
         Assert.True(PathUri.IsGenerated(Generated));
-        Assert.Equal("<generated>/Fixture.App/BuildInfo.g.cs", PathUri.Display("/anywhere", Generated));
+        Assert.Equal(
+            "<generated>/Fixture.App/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs",
+            PathUri.Display("/anywhere", Generated));
+    }
+
+    /// <summary>
+    /// Roslyn keys a generated document by (generator type, hintName), so two generators in
+    /// one assembly emitting the same hintName are two documents. The generator's full type
+    /// name is in the label always, not only when something else in the result set collides
+    /// with it: it was one string for both, which put an unpickable duplicate in a "pick one"
+    /// list.
+    /// </summary>
+    [Fact]
+    public void Two_generators_emitting_one_hint_name_render_differently()
+    {
+        var other = Generated.Replace(
+            "typeName=Fixture.Gen.BuildInfoGenerator",
+            "typeName=Fixture.Gen.OtherGenerator",
+            StringComparison.Ordinal);
+
+        Assert.Equal(
+            "<generated>/Fixture.App/Fixture.Gen.OtherGenerator/BuildInfo.g.cs",
+            PathUri.Display("/anywhere", other));
+        Assert.NotEqual(PathUri.Display("/anywhere", Generated), PathUri.Display("/anywhere", other));
+    }
+
+    /// <summary>A field the server did not send renders as <c>?</c>, like a missing assembly.</summary>
+    [Fact]
+    public void A_generated_uri_without_a_type_name_renders_a_question_mark()
+    {
+        var without = Generated.Replace(
+            "&typeName=Fixture.Gen.BuildInfoGenerator", string.Empty, StringComparison.Ordinal);
+
+        Assert.Equal("<generated>/Fixture.App/?/BuildInfo.g.cs", PathUri.Display("/anywhere", without));
     }
 
     /// <summary>
@@ -211,8 +245,12 @@ public class PathUriTests
         var alpha = Path.Combine(root, "Alpha", "Alpha.csproj");
         var beta = Path.Combine(root, "Beta", "Beta.csproj");
 
-        Assert.Equal("<generated>/Alpha/Fixture.App/BuildInfo.g.cs", PathUri.Display(root, Generated, alpha));
-        Assert.Equal("<generated>/Beta/Fixture.App/BuildInfo.g.cs", PathUri.Display(root, Generated, beta));
+        Assert.Equal(
+            "<generated>/Alpha/Fixture.App/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs",
+            PathUri.Display(root, Generated, alpha));
+        Assert.Equal(
+            "<generated>/Beta/Fixture.App/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs",
+            PathUri.Display(root, Generated, beta));
     }
 
     /// <summary>
@@ -224,7 +262,7 @@ public class PathUriTests
     {
         var display = await PathUri.DisplayAsync("/anywhere", Generated, Nothing());
 
-        Assert.Equal("<generated>/Fixture.App/BuildInfo.g.cs", display);
+        Assert.Equal("<generated>/Fixture.App/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs", display);
     }
 
     [Fact]

@@ -103,7 +103,9 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   client capability. Its `_vs_id` is `<projectId guid>|<absolute .csproj> ($<tfm>)`: read the
   path half only. `_vs_label` (`"Core (net10.0)"`) is display text, same class of thing as
   `containerName`, and is not parsed. The label is
-  `<generated>/<project dir>/<assembly>/<hintName>`, and every rendering path has to go
+  `<generated>/<project dir>/<assembly>/<generator full type name>/<hintName>` — the generator
+  type is the URI's `typeName`, and it is in the label always because two generators in one
+  assembly may emit the same `hintName` — and every rendering path has to go
   through it — the two ambiguity listings in `Program` did not, and printed the same string
   twice under "pick one".
 - **`fixture2/` is the two-consumers-of-one-generator shape, and it cannot live in

@@ -117,7 +117,8 @@ back to `cslq`: `outline System.Console` exits 1, because the document only exis
 at a use site has made Roslyn write it. Use `cslq hover` at a use of the symbol instead — it
 answers with no document at all.
 
-Source-generated locations print as `<generated>/<project>/<assembly>/<hintName>` and have no
+Source-generated locations print as
+`<generated>/<project>/<assembly>/<generator type name>/<hintName>` and have no
 file on disk. That is a real answer, not an error — read the source with `cslq outline` on the
 symbol, not with a file read. The leading segment is the project that consumed the generator,
 which is the only thing separating two documents one generator emitted into two projects.

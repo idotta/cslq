@@ -295,7 +295,7 @@ internal static partial class Program
 
         var matches = Distinct(await client.SymbolsAsync(query, ct));
         await Output.WriteSymbolsAsync(
-            opts.Root, matches, opts.Max, opts.Json, Documents.Of(client, ct));
+            opts.Root, query, matches, opts.Max, opts.Json, Documents.Of(client, ct));
         return matches.Count == 0 ? 1 : 0;
     }
 
