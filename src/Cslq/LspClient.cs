@@ -19,6 +19,9 @@ internal sealed class LspClient : IAsyncDisposable
 
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(10);
 
+    private const int HandleFlagInherit = 0x1;
+    private static bool _stdioInheritanceCleared;
+
     public string Root { get; }
 
     private LspClient(
@@ -164,6 +167,36 @@ internal sealed class LspClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Windows <c>CreateProcess</c> is called with <c>bInheritHandles=TRUE</c>, so cslq's own
+    /// std handles reach the thin client and, through it, the daemon — which outlives us. A
+    /// harness that captures our output then waits for EOF on a pipe the daemon still holds,
+    /// so a launching call blocks for the whole keepalive and the daemon is dead by the time
+    /// it returns. Clearing the inherit flag once, before any launch, is what stops the leak.
+    /// Unix is unaffected: .NET opens its own descriptors <c>O_CLOEXEC</c> and dup2s only the
+    /// redirected ends.
+    /// </summary>
+    private static void DisableStdioInheritance()
+    {
+        if (!OperatingSystem.IsWindows() || _stdioInheritanceCleared) return;
+        _stdioInheritanceCleared = true;
+
+        // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE. Best effort throughout: a
+        // process with no console has invalid std handles, and it must not be broken by this.
+        foreach (var id in (ReadOnlySpan<int>)[-10, -11, -12])
+        {
+            try
+            {
+                var handle = Native.GetStdHandle(id);
+                if (handle == nint.Zero || handle == -1) continue;
+                Native.SetHandleInformation(handle, HandleFlagInherit, 0);
+            }
+            catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
     /// Every <c>dotnet</c> launch goes through here. <see cref="Process.Start(ProcessStartInfo)"/>
     /// throws <see cref="System.ComponentModel.Win32Exception"/> when <c>dotnet</c> is off
     /// <c>PATH</c> — the first-time-user case exactly — and that escaped as a stack trace and
@@ -171,6 +204,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     private static Process StartProcess(ProcessStartInfo psi, string what)
     {
+        DisableStdioInheritance();
         try
         {
             return Process.Start(psi) ?? throw new CslqException($"could not {what}: no process started.");

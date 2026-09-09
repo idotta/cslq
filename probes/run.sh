@@ -306,10 +306,9 @@ rm -f "$fb_log"
 # in a never-used server -- would have nothing testing it. The rest of the walk is already
 # covered warm by deliberate-error-diag-workspace.
 cold_log=$(mktemp)
-# --no-daemon, not a private pipe name: a fresh pipe would make this run *launch* a daemon,
-# the daemon inherits stdout, and $(...) then blocks forever waiting for the pipe's last
-# writer. --no-daemon gives a dedicated server that has never seen the document, which is
-# the state under test anyway.
+# --no-daemon, not a private pipe name: it gives a dedicated server that has never seen the
+# document, which is the state under test, and it exits with the client rather than leaving a
+# second daemon holding a warm fixture behind this leg.
 "$CSLQ" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
 rc=$?
 out=$(cat "$cold_log")
@@ -356,9 +355,7 @@ fi
 installed="$install_tmp/bin/cslq"
 [ -x "$installed" ] || installed="$installed.exe"
 if [ "$ok" = 1 ] && [ -x "$installed" ]; then
-  # Redirected, never captured: this attaches to the suite's daemon rather than launching one,
-  # but the rule in CLAUDE.md is blanket -- the daemon inherits stdout and $(...) then waits
-  # forever for the pipe's last writer.
+  # Redirected rather than captured, like every other invocation here.
   ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 ) \
     > "$install_tmp/ready.log" 2>&1
   rc=$?
@@ -379,6 +376,31 @@ else
   printf 'FAIL  %s (exit %s, wanted 0 and a ready workspace)\n' "installed-tool-resolves-its-own-pin" "$rc"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
+fi
+
+# The daemon under a harness that captures stdout -- Windows only, and unpinnable from bash:
+# `> file` here hands cslq a real file handle and bash waits for exit, not EOF, so the leak
+# this leg is about is invisible from the shell running the suite. probes/stdout-capture.cs is
+# the harness instead, a .NET process with RedirectStandardOutput, on its own pipe.
+#
+# Redirected to a file and cat'd, never $(...): the bash capture pipe would leak through the
+# app into the daemon exactly the way the bug does, and the leg would hang for the reason it
+# is testing.
+if pwd -W >/dev/null 2>&1; then
+  log "captured stdout"
+  sc_log=$(mktemp)
+  dotnet run probes/stdout-capture.cs -- "$root_abs/src/Cslq/bin/Release/net10.0/cslq.exe" > "$sc_log" 2>&1
+  rc=$?
+  out=$(cat "$sc_log")
+  rm -f "$sc_log"
+  if [ "$rc" = 0 ]; then
+    printf 'PASS  %s\n' "daemon-survives-captured-stdout"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (exit %s)\n' "daemon-survives-captured-stdout" "$rc"
+    printf '%s\n' "$out" | sed 's/^/      | /'
+    fail=$((fail + 1))
+  fi
 fi
 
 # The three first-run failures a user who is not this repository hits, two of which are
@@ -471,8 +493,7 @@ cache_entry="${DOTNET_CLI_HOME:-$HOME}/.dotnet/toolResolverCache/1/roslyn-langua
 
 rs_log=$(mktemp)
 rs_start=$(date +%s)
-# Redirected rather than captured, like every other invocation here. `restore` reaches no daemon
-# at all, but the rule in CLAUDE.md is blanket.
+# Redirected rather than captured, like every other invocation here.
 "$CSLQ" restore > "$rs_log" 2>&1
 rc=$?
 rs_elapsed=$(( $(date +%s) - rs_start ))

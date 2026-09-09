@@ -174,13 +174,19 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   a cold document at all; by the time `deliberate-error-diag-workspace` and
   `non-project-file-no-diagnostics` run it is already open and warm. Reordering the file, or
   running one case against an ambient daemon, disarms that coverage with nothing going red.
-- **Never pipe or command-substitute `cslq` output in bash while the daemon is in play.** The
-  daemon inherits the client's stdout, so `cslq ... | tail` and `out=$(cslq ...)` block forever
-  waiting for the pipe's last writer — it looks exactly like a hung cold load. Redirect to a
-  file and `cat` it, or pass `--no-daemon`. Only the run that *launches* the daemon can hang,
-  which is why `probes/run.sh` captures every case with `$(...)` and never blocks: its cold
-  `cslq ready` — the one leg that starts the daemon — is deliberately uncaptured. Keep it that
-  way.
+- **`LspClient.StartProcess` clears `HANDLE_FLAG_INHERIT` on our own std handles before every
+  `dotnet` launch, and that is what makes captured output safe.** Windows `CreateProcess` is
+  called with `bInheritHandles=TRUE`, so cslq's stdout reached the thin client and, through it,
+  the *daemon* — which outlives the call. A capturing harness then waited for EOF on a pipe the
+  daemon still held: the launching call blocked for the whole keepalive and returned with the
+  daemon dead, so every call was a launching call. Measured on the fixture, keepalive 20 s:
+  `out=$(cslq ready --root fixture)` 25 s before, 4 s after. Best effort by design — a process
+  with no console has invalid std handles and must not be broken by this — so a regression is
+  silent, and `daemon-survives-captured-stdout` (Windows-only, `probes/stdout-capture.cs`) is
+  the only thing that catches it. **The trap survives one level up:** launch `cslq` from a
+  process whose own stdout is an inheritable pipe — `dotnet run probes/stdout-capture.cs`
+  under `$(...)` — and *that* pipe is inherited into cslq as an ordinary handle and travels on
+  into the daemon. Redirect an intermediary to a file and `cat` it; never capture it.
 - **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
   it terminates the process without ever raising a console control event, so the handler never
   runs and the 130 you see is bash's own signal status. To exercise the real path, launch `cslq`
