@@ -154,6 +154,14 @@ internal static class PathUri
     /// distinct. Null when the server would not say, which restores the older ambiguous form
     /// rather than inventing a project.
     /// </para>
+    /// <para>
+    /// The generator's own full type name is in the label for the same class of reason:
+    /// Roslyn keys a generated document by (generator type, hintName), so two generators in
+    /// one assembly emitting the same hintName are two documents that rendered as one string.
+    /// It is rendered always rather than only on collision — a label whose shape depends on
+    /// what else is in the result set is worse for a caller than a longer stable one — and it
+    /// mirrors the layout <c>EmitCompilerGeneratedFiles</c> writes on disk.
+    /// </para>
     /// </summary>
     public static string Display(
         string root, string uri, string? projectFile = null, string? assembly = null)
@@ -169,11 +177,12 @@ internal static class PathUri
 
         var query = Query(uri);
         var generator = query.GetValueOrDefault("assemblyName", "?");
+        var type = query.GetValueOrDefault("typeName", "?");
         var hint = query.GetValueOrDefault("hintName") ?? ToPath(uri).TrimStart('/');
         var project = projectFile is null
             ? string.Empty
             : Relative(root, Path.GetDirectoryName(Path.GetFullPath(projectFile))!) + "/";
-        return $"<generated>/{project}{generator}/{hint}";
+        return $"<generated>/{project}{generator}/{type}/{hint}";
     }
 
     /// <summary>

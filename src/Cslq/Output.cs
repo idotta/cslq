@@ -61,8 +61,21 @@ internal static class Output
                 location.Uri, await PathUri.DisplayAsync(root, location.Uri, documents), location.Range));
         }
 
+        // Folded on what a row renders as, not on the URI. Roslyn answers the same place
+        // twice for a declaration with an implicit or primary constructor and for a namespace,
+        // and answers a generated document once per target framework under URIs whose authority
+        // guid and documentId differ while the label does not -- both arrive here as rows a
+        // caller cannot tell apart. The first occurrence is kept so Lines(hit.Uri) still has a
+        // URI the server answers for.
         var hits = labelled
-            .OrderBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
+            .DistinctBy(h => (h.Display,
+                h.Range.Start.Line, h.Range.Start.Character,
+                h.Range.End.Line, h.Range.End.Character))
+            // Source before generated before metadata: a multi-targeted project can produce
+            // enough generated hits to push every source row past the cap, and the source rows
+            // are the ones a caller came for.
+            .OrderBy(h => Rank(h.Uri))
+            .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
             .ThenBy(h => h.Range.Start.Line)
             .ThenBy(h => h.Range.Start.Character)
             .ToList();
@@ -222,25 +235,38 @@ internal static class Output
     /// can quote one whole. containerName is Roslyn's localised display text ("in Greeter
     /// (project Core (net10.0))"), not a namespace path; it is rendered because it is the
     /// only thing separating two symbols that share a name, and never asserted on, because
-    /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape. The cap applies
-    /// to the server's relevance order and the display sort is cosmetic -- see below.
+    /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape. The cap is a
+    /// relevance cut against <paramref name="query"/> — the text the caller typed — computed
+    /// here rather than inherited from the server, and the display sort is cosmetic: see below.
     /// </summary>
     public static async Task WriteSymbolsAsync(
         string root,
+        string query,
         IReadOnlyList<SymbolInformation> symbols,
         int max,
         bool json,
         Documents documents)
     {
-        // Truncate first, then sort: Roslyn answers workspace/symbol in relevance order --
-        // exact, then prefix, then substring, across every project -- and Distinct's DistinctBy
-        // keeps first-seen order, so that ranking arrives here intact. Sorting before the cap
-        // would keep an alphabetical prefix of the hits rather than the best matches. Taking
-        // before the projection is also what keeps PathUri.Display off the hits that are
-        // dropped, which on a broad query is most of them. WriteLocationsAsync sorts first,
-        // deliberately: textDocument/references has no ranking to preserve.
+        // Rank against the query, then cut, then sort for display. The cut used to be
+        // symbols.Take(max) on the premise that Roslyn answers workspace/symbol in relevance
+        // order; that holds on the fixture and was measured false on three real corpora, where
+        // the answer arrives grouped per project and per target framework with generated
+        // copies first, so a broad query's exact match fell outside --max 50. Ranking here
+        // makes the cut mean the same thing on every repository. The projection stays after
+        // the cut: PathUri.DisplayAsync costs a request per generated URI and a broad query
+        // drops most of its hits, so the tiebreak is on the raw URI rather than the label.
+        // WriteLocationsAsync labels first, deliberately: it folds rows on what they render
+        // as, and textDocument/references has no ranking to preserve.
+        var ranked = symbols
+            .OrderBy(s => Relevance(s.Name, query))
+            .ThenBy(s => Rank(s.Location.Uri))
+            .ThenBy(s => s.Location.Uri, StringComparer.Ordinal)
+            .ThenBy(s => s.Location.Range.Start.Line)
+            .ThenBy(s => s.Location.Range.Start.Character)
+            .Take(max);
+
         var labelled = new List<Match>(Math.Min(max, symbols.Count));
-        foreach (var symbol in symbols.Take(max))
+        foreach (var symbol in ranked)
         {
             labelled.Add(new Match(
                 await PathUri.DisplayAsync(root, symbol.Location.Uri, documents), symbol));
@@ -661,6 +687,19 @@ internal static class Output
         JsonValueKind.Number => code.ToString(),
         _ => null,
     };
+
+    // How well a symbol's name answers what the caller typed: 0 exact, 1 prefix, 2 substring,
+    // 3 anything else -- the server's own documented ranking, computed here because the answer
+    // does not arrive in it. Case-insensitive, like the query itself.
+    private static int Relevance(string name, string query) =>
+        name.Equals(query, StringComparison.OrdinalIgnoreCase) ? 0
+        : name.StartsWith(query, StringComparison.OrdinalIgnoreCase) ? 1
+        : name.Contains(query, StringComparison.OrdinalIgnoreCase) ? 2
+        : 3;
+
+    // 0 = an ordinary file, 1 = source-generated, 2 = decompiled metadata.
+    private static int Rank(string uri) =>
+        PathUri.IsGenerated(uri) ? 1 : PathUri.IsDecompiled(uri) ? 2 : 0;
 
     private static string? At(string[] lines, int zeroBased) =>
         zeroBased >= 0 && zeroBased < lines.Length ? lines[zeroBased] : null;

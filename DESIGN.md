@@ -22,6 +22,8 @@ near-useless to a model.
 - Print `path:line` plus the matched line and a line of surrounding context.
 - Paths relative to the workspace root. Lines and columns one-based.
 - Cap results by default so one call can't blow the context window.
+- Location rows are folded on their rendered label plus range, and ordered source, then
+  generated, then metadata, before the cap.
 - `--json` for the probe harness to assert against. Every row carries `generated` and
   `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
   prefix back off `path`.
@@ -59,15 +61,29 @@ is the only thing separating two symbols that share a name; it is localised disp
 nothing asserts on it. No `|` appears in a row, unlike an outline's gutter, so a probe case can
 quote one whole.
 
-**The cap is applied in the server's order, and the display sort is cosmetic.** Roslyn answers
-`workspace/symbol` in relevance order -- exact match, then prefix, then substring, across every
-project rather than project by project -- so `--max` truncates that ranking and only what
-survives is sorted for display. Sorting first would keep an alphabetical prefix of the hits
-instead of the best ones, which does not show on a fixture where the interesting query's hits
-all share a name but loses the ranking entirely on a real repository.
+**`sym` ranks its answer itself, and the display sort is cosmetic.** `--max` is a relevance
+cut: hits are ordered by how their name answers the query -- exact, then prefix, then substring,
+case-insensitively -- then source before generated before metadata, then by URI and position as a
+stable tiebreak, and only what survives that is sorted for display. The cap used to be taken in
+the server's arrival order, on the measured premise that `workspace/symbol` answers globally
+ranked. It does on `fixture/`; on three real corpora it does not -- the answer arrives grouped
+per project and per target framework with generated copies first, so `sym Startup --max 10`
+showed substring hits while 140 exact matches went unshown. Ranking here makes the cut mean the
+same thing on every repository. The label projection stays *after* the cut, because resolving a
+generated document's label costs a request and a broad query drops most of its hits, so the
+tiebreak is on the raw URI rather than on what the row will render as.
 
 Source-generated locations are labelled
-`<generated>/<consuming project directory>/<assemblyName>/<hintName>`. Everything after the
+`<generated>/<consuming project directory>/<assemblyName>/<typeName>/<hintName>`, where
+`typeName` is the generator's full type name. That mirrors the layout
+`EmitCompilerGeneratedFiles` writes under
+`obj/.../generated/<assembly>/<generator full type name>/<hintName>`, which is the one place an
+agent may already have seen these files. The generator type is in the label always rather than
+only when something in the result set collides with it: Roslyn keys a generated document by
+(generator type, hintName), so two generators in one assembly emitting the same hintName were
+one string for both — an unpickable duplicate in a "pick one" list — and a label whose shape
+depends on what else is in the result set is worse for a caller than a longer stable one. A
+field the server does not send renders as `?`, like a missing assembly. Everything after the
 project comes from the URI's stable fields; the project does not, and cannot. Those fields name
 the *generator* — one generator applied to several projects, an analyzer in
 `Directory.Build.props` being the common real-world shape, yields several distinct documents

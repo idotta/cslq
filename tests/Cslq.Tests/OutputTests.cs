@@ -3,10 +3,10 @@ using System.Text.Json;
 namespace Cslq.Tests;
 
 /// <summary>
-/// <c>workspace/symbol</c> is ranked by relevance — exact, then prefix, then substring,
-/// across every project — and that ranking only survives if the cap is applied before the
-/// sort. Proving it needs a symbol set where relevance order and alphabetical order differ,
-/// which in <c>fixture/</c> took a scratch copy carrying three purpose-built types.
+/// <c>sym</c> ranks its answer against the query itself — exact, then prefix, then substring,
+/// source before generated — and cuts <c>--max</c> out of that, because the server's own
+/// ordering was measured absent on three real corpora. Proving it needs a symbol set where
+/// relevance order and alphabetical order differ, and an arrival order that is neither.
 /// </summary>
 public class OutputTests
 {
@@ -46,21 +46,21 @@ public class OutputTests
     }
 
     /// <summary>
-    /// The cap keeps the best matches, not an alphabetical prefix of them. Answered in
-    /// relevance order Zed / ZedHelper / AbcZed, a cap of two must drop AbcZed — sorting
-    /// first would have dropped Zed, the exact match.
+    /// The cap keeps the best matches, not an alphabetical prefix of them and not an arrival
+    /// prefix either: answered AbcZed / ZedHelper / Zed, a cap of two keeps the exact match
+    /// and the prefix match, and displays them alphabetically.
     /// </summary>
     [Fact]
     public async Task Truncation_happens_in_relevance_order_and_display_in_alphabetical_order()
     {
         var symbols = new[]
         {
-            Symbol("Zed", "App/Zed.cs"),
-            Symbol("ZedHelper", "Core/ZedHelper.cs"),
             Symbol("AbcZed", "Core/AbcZed.cs"),
+            Symbol("ZedHelper", "Core/ZedHelper.cs"),
+            Symbol("Zed", "App/Zed.cs"),
         };
 
-        var lines = (await CaptureAsync(() => Output.WriteSymbolsAsync(Root, symbols, max: 2, json: false, Plain)))
+        var lines = (await CaptureAsync(() => Output.WriteSymbolsAsync(Root, "Zed", symbols, max: 2, json: false, Plain)))
             .Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
         Assert.Contains("Zed ", lines[0], StringComparison.Ordinal);
@@ -74,7 +74,7 @@ public class OutputTests
     {
         var symbols = new[] { Symbol("A", "Core/A.cs"), Symbol("B", "Core/B.cs"), Symbol("C", "Core/C.cs") };
 
-        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, symbols, max: 1, json: false, Plain));
+        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, "A", symbols, max: 1, json: false, Plain));
 
         Assert.Contains("... 2 more (use --max 3 to see all)", text, StringComparison.Ordinal);
     }
@@ -82,7 +82,7 @@ public class OutputTests
     [Fact]
     public async Task An_empty_answer_says_so_rather_than_printing_nothing()
     {
-        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, [], 50, json: false, Plain));
+        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, "A", [], 50, json: false, Plain));
 
         Assert.Equal("no results", text.Trim());
     }
@@ -96,7 +96,7 @@ public class OutputTests
         var symbols = new[] { Symbol("A", "Core/A.cs", line: 9), Symbol("B", "Core/B.cs") };
 
         var json = JsonDocument.Parse(await CaptureAsync(
-            () => Output.WriteSymbolsAsync(Root, symbols, max: 1, json: true, Plain))).RootElement;
+            () => Output.WriteSymbolsAsync(Root, "A", symbols, max: 1, json: true, Plain))).RootElement;
 
         Assert.Equal(2, json.GetProperty("count").GetInt32());
         Assert.True(json.GetProperty("truncated").GetBoolean());
@@ -110,6 +110,49 @@ public class OutputTests
         // prefix off `path` to know what kind of document it is looking at.
         Assert.False(only.GetProperty("generated").GetBoolean());
         Assert.False(only.GetProperty("metadata").GetBoolean());
+    }
+
+    /// <summary>
+    /// The cut is a relevance cut, not an arrival cut. Roslyn was measured answering a
+    /// substring hit ahead of the exact match on three real corpora, so a cap of one taken in
+    /// arrival order showed <c>BomUser</c> for the query <c>Use</c> and reported the exact
+    /// match only as one of the hits it dropped.
+    /// </summary>
+    [Fact]
+    public async Task An_exact_match_survives_the_cap_over_a_substring_hit_that_arrived_first()
+    {
+        var symbols = new[] { Symbol("BomUser", "Core/BomUser.cs"), Symbol("Use", "App/Use.cs") };
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteSymbolsAsync(Root, "Use", symbols, max: 1, json: true, Plain))).RootElement;
+
+        Assert.True(json.GetProperty("truncated").GetBoolean());
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal("Use", only.GetProperty("name").GetString());
+        Assert.Equal("App/Use.cs", only.GetProperty("path").GetString());
+    }
+
+    /// <summary>
+    /// Two hits equally exact are separated by where they live: the corpora answered the
+    /// generated copies of a name first, so a cap taken in arrival order kept the copy and
+    /// dropped the declaration the caller came for.
+    /// </summary>
+    [Fact]
+    public async Task A_source_hit_survives_the_cap_over_an_equally_exact_generated_one()
+    {
+        var symbols = new[]
+        {
+            new SymbolInformation(
+                "Stamp", 5, Loc(GeneratedUri("8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234", "Stamp.g.cs"), 3), null),
+            Symbol("Stamp", "Core/Stamp.cs"),
+        };
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteSymbolsAsync(Root, "Stamp", symbols, max: 1, json: true, Plain))).RootElement;
+
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal("Core/Stamp.cs", only.GetProperty("path").GetString());
+        Assert.False(only.GetProperty("generated").GetBoolean());
     }
 
     /// <summary>
@@ -277,6 +320,96 @@ public class OutputTests
         });
 
         Assert.Equal("no project", text.Trim());
+    }
+
+    /// <summary>
+    /// A source-generated URI for <paramref name="hint"/>, carrying the fields that are
+    /// regenerated on every workspace load. Two of these differing only in
+    /// <paramref name="authority"/> are what a multi-targeted project answers with: different
+    /// URIs, one label. See <see cref="PathUriTests"/> for the shape.
+    /// </summary>
+    private static string GeneratedUri(
+        string authority,
+        string hint = "BuildInfo.g.cs",
+        string generator = "Fixture.Gen.BuildInfoGenerator") =>
+        $"roslyn-source-generated://{authority}/{hint}"
+        + $"?documentId={authority}&assemblyName=Fixture.App&assemblyVersion=1.0.0.0"
+        + $"&typeName={generator}&hintName={hint}";
+
+    private static Location Loc(string uri, int line, int column = 1) =>
+        new(uri, new Range(new Position(line - 1, column - 1), new Position(line - 1, column + 4)));
+
+    /// <summary>
+    /// Roslyn answers the declaration of a type with a primary constructor twice — once for
+    /// the type, once for the constructor — at byte-identical positions, and the count used to
+    /// include the twin. Rows are folded on what they render as plus the range.
+    /// </summary>
+    [Fact]
+    public async Task Two_locations_that_render_identically_are_one_row()
+    {
+        var twins = new[] { Loc(Uri("App/Square.cs"), 2, 22), Loc(Uri("App/Square.cs"), 2, 22) };
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteLocationsAsync(Root, twins, 50, 0, json: true, Plain))).RootElement;
+
+        Assert.Equal(1, json.GetProperty("count").GetInt32());
+        Assert.False(json.GetProperty("truncated").GetBoolean());
+        Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+
+        var text = await CaptureAsync(
+            () => Output.WriteLocationsAsync(Root, twins, 50, 0, json: false, Plain));
+
+        Assert.Equal(
+            ["App/Square.cs:2:22", "> 2 | line two"],
+            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// A multi-targeted project answers one generated document once per framework, under URIs
+    /// whose authority guid and documentId differ while the label does not. The fold is on the
+    /// label, so those collapse; folding on the URI would not have touched them.
+    /// </summary>
+    [Fact]
+    public async Task Generated_twins_that_differ_only_in_the_volatile_uri_fields_fold()
+    {
+        var twins = new[]
+        {
+            Loc(GeneratedUri("8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234"), 5),
+            Loc(GeneratedUri("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"), 5),
+        };
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteLocationsAsync(Root, twins, 50, 0, json: true, Plain))).RootElement;
+
+        Assert.Equal(1, json.GetProperty("count").GetInt32());
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal(
+            "<generated>/Fixture.App/Fixture.Gen.BuildInfoGenerator/BuildInfo.g.cs",
+            only.GetProperty("path").GetString());
+        Assert.True(only.GetProperty("generated").GetBoolean());
+    }
+
+    /// <summary>
+    /// Enough generated hits will fill the cap on their own, and the source hits are what the
+    /// caller came for, so the cap applies to source rows first.
+    /// </summary>
+    [Fact]
+    public async Task Source_rows_come_before_generated_ones_so_the_cap_drops_generated_first()
+    {
+        var mixed = new[]
+        {
+            Loc(GeneratedUri("8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234"), 5),
+            Loc(Uri("App/Program.cs"), 10),
+        };
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteLocationsAsync(Root, mixed, max: 1, 0, json: true, Plain))).RootElement;
+
+        Assert.Equal(2, json.GetProperty("count").GetInt32());
+        Assert.True(json.GetProperty("truncated").GetBoolean());
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal("App/Program.cs", only.GetProperty("path").GetString());
+        Assert.False(only.GetProperty("generated").GetBoolean());
     }
 
     private static string Uri(string file) => PathUri.FromPath(
