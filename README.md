@@ -326,13 +326,22 @@ never loaded or the path does not exist.
 
 ### Symbol names
 
-A dotted target narrows by **enclosing type**, not by namespace: `Greeter.Greet` and
-`Fixture.Core.Greeter.Greet` both work, but the namespace part is not actually checked. Roslyn
-returns `containerName` as a localised display string (`in Greeter (project Core (net10.0))`),
-not a namespace path, so there is nothing to match a namespace against. When a target stays
-ambiguous, `cslq` lists the candidates with their locations so you can switch to
-`file:line:col`. That listing honours `--max` and says how many it dropped, like every other
-capped output — a broad ambiguous target on a real repository is hundreds of rows otherwise.
+A dotted target is matched against the declaring document's **syntax tree**, so every segment
+counts, namespaces included. The segments have to be a contiguous suffix of the declaration
+path: `Greet`, `Greeter.Greet`, `Core.Greeter.Greet` and `Fixture.Core.Greeter.Greet` all select
+`Fixture.Core.Greeter.Greet`, while `Wrong.Namespace.Greeter.Greet` and `Fixture.Greeter.Greet`
+select nothing. Nested types are separated the same way — `Outer.Inner.Depth` does not match
+`Other.Inner.Depth`.
+
+A bare name selects the **type** when the only other candidates are its own constructors, which
+Roslyn reports as separate same-named symbols. `Widget.Widget` still selects the constructors;
+two constructor overloads are still ambiguous with each other.
+
+When a target stays ambiguous — and when it matches nothing, under `candidates:` — `cslq` lists
+the candidates as `sym` rows: `kind  name  container  path:line:col`, so a row can be pasted
+straight back as a `file:line:col` target. They are ordered like `sym`'s, most relevant to the
+name you typed first, and honour `--max` and say how many they dropped, like every other capped
+output — a broad ambiguous target on a real repository is hundreds of rows otherwise.
 
 `cslq` pins `DOTNET_CLI_UI_LANGUAGE=en` on the server so those display strings do not change with
 the developer's machine locale.

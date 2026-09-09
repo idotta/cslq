@@ -27,6 +27,9 @@ near-useless to a model.
 - `--json` for the probe harness to assert against. Every row carries `generated` and
   `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
   prefix back off `path`.
+- A candidate listing — an ambiguous target's, `outline`'s per-document one, the
+  `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
+  so every row it prints is a `path:line:col` the caller can paste straight back as a target.
 - Every new command follows these. They are the reason this is a CLI and not a wrapper.
 
 **`outline` is the one deliberate exception.** It prints the document path once as a header
@@ -64,7 +67,8 @@ quote one whole.
 **`sym` ranks its answer itself, and the display sort is cosmetic.** `--max` is a relevance
 cut: hits are ordered by how their name answers the query -- exact, then prefix, then substring,
 case-insensitively -- then source before generated before metadata, then by URI and position as a
-stable tiebreak, and only what survives that is sorted for display. The cap used to be taken in
+stable tiebreak, and only what survives that is sorted for display — on the same keys, with
+the label in place of the URI, so the most relevant row is still the first one printed. The cap used to be taken in
 the server's arrival order, on the measured premise that `workspace/symbol` answers globally
 ranked. It does on `fixture/`; on three real corpora it does not -- the answer arrives grouped
 per project and per target framework with generated copies first, so `sym Startup --max 10`
@@ -139,6 +143,67 @@ and `def` at `Console.WriteLine` went 12.5 s to 2.5 s. A workspace that declares
 `Console` pays the budget on a framework `def`; that is the accepted cost of keeping the guard.
 The stale case cannot be reproduced by a probe — that is what the measurement says — so only the
 pure halves of the discriminator are pinned, by `PathUriTests`.
+
+## Targeting a symbol by name
+
+A dotted target is verified against the **syntax tree**, one
+`textDocument/documentSymbol` per candidate document, never against `containerName` and never
+against `hover`. The candidate's *chain* is the declaration path that request gives —
+`["Fixture","Core","Greeter","Greet"]` for `Greet` in `Greeter` in `Fixture.Core` — and a
+dotted target matches when its segments are a **contiguous suffix** of that chain. So
+`Fixture.Core.Greeter.Greet`, `Core.Greeter.Greet` and `Greeter.Greet` all select, while
+`Wrong.Namespace.Greeter.Greet` and `Fixture.Greeter.Greet` select nothing.
+
+The two rejected alternatives were rejected on measurement, not on taste.
+
+`containerName` is what this used to test, and it can only ever have narrowed by *enclosing
+type*: it is localised display text (`in Greeter (project Core (net10.0))`), so for a top-level
+type the string is `project <name> (<tfm>)` and the only namespace segment that could pass was
+one equal to the project name. `Fixture.Core.Greeter` passed in the probe suite for exactly
+that reason — the project is called `Core` — which masked the defect for four milestones.
+Meanwhile the test was a token test over one segment, so a wrong namespace matched at exit 0
+and a right one failed on five of five top-level types on Serilog and three of three on
+OrchardCore.
+
+`hover` was the proposed replacement, and it cannot do it. Measured on the fixture 2026-09-09:
+hover's first line is fully qualified **for types only** — `class Fixture.Core.Greeter` — while
+a member prints the minimal form, `string Greeter.Greet(string name)` and
+`int Volume.Litres { get; }`. A member's namespace is therefore not in the answer at all, and
+a member's namespace is the case that was wrong. `documentSymbol` does carry the chain: its
+namespace node is named `Fixture.Core`, already dotted, with `Greeter` as its child.
+
+Chains are computed only where they are needed — a dotted target, or a bare name with more than
+one distinct candidate — so a bare unambiguous name, the common case, costs no extra request.
+One request per distinct document, cached for the call. Node names are reduced to their
+identifier first: `documentSymbol` renders a member's signature and return type into its name
+(`Greet(string) : string`) and a generic's type parameters (`Box<T>`), and a namespace's name is
+split on its dots.
+
+Contiguity rather than "in order" is what fixes the nested case. `Outer.Inner.Depth` and
+`Other.Inner.Depth` differ in a segment no display string carries, so an in-order test would
+keep matching both — the chain's parent of `Inner` is the discriminator, and it is only there
+because the tree was read.
+
+**A bare name selects the type over its own constructors.** `workspace/symbol` reports an
+explicit constructor as a separate symbol of the type's own name and of kind `method`, so every
+type with a constructor was ambiguous with itself and had no symbol-form route at all: on
+CleanArchitecture every handler, validator, behaviour and the DbContext, with `TodoItem` and
+`BaseEntity` working only because they have none. A candidate is a constructor when its kind is
+`method` and its chain repeats its own last name — the chain answers this, `containerName`
+again being display text. When the distinct candidates are exactly one type-kind symbol plus
+constructors whose chain is that type's chain plus one, the bare name selects the type.
+Anything else stays ambiguous, because anything else is a real alternative: two types of one
+name, or a same-named method that is not a constructor. `Widget.Widget` still selects the
+constructors — the suffix match holds on a constructor's chain and not on the type's — so
+overloaded constructors remain ambiguous with each other; a selector for them is a separate
+design.
+
+The kind a row prints is the one `workspace/symbol` reported, except where the chain has
+already been read. `sym` prints `method` for a constructor, because `sym` must not spend a
+`documentSymbol` request per hit and the chain is the only thing that identifies one — LSP kind
+9 is mapped, but the server never sends it. The ambiguity listing runs after the selection that
+computes those chains, so it carries them through and prints `constructor`; the `candidates:`
+dump has no chains and prints what the server said. No listing asks for one.
 
 ## Readiness
 

@@ -12,10 +12,13 @@ public class OutputTests
 {
     private static readonly string Root = Path.Combine(Path.GetTempPath(), "repo");
 
-    private static SymbolInformation Symbol(string name, string file, int line = 1, string? container = null) =>
-        new(name, 5, new Location(
+    private static SymbolInformation Symbol(
+        string name, string file, int line = 1, string? container = null, int column = 1, int kind = 5) =>
+        new(name, kind, new Location(
             PathUri.FromPath(Path.Combine(Root, file.Replace('/', Path.DirectorySeparatorChar))),
-            new Range(new Position(line - 1, 0), new Position(line - 1, 4))), container);
+            new Range(new Position(line - 1, column - 1), new Position(line - 1, column + 3))), container);
+
+    private static SymbolRow Row(SymbolInformation symbol) => new(symbol, symbol.Kind);
 
     /// <summary>
     /// No label lookups: these cases render file URIs, which carry their own path. The
@@ -153,6 +156,71 @@ public class OutputTests
         var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
         Assert.Equal("Core/Stamp.cs", only.GetProperty("path").GetString());
         Assert.False(only.GetProperty("generated").GetBoolean());
+    }
+
+    /// <summary>
+    /// A candidate listing is <c>sym</c>'s rows: the same order — exact name first, then
+    /// source before generated, then label, line and column — and a <c>path:line:col</c> a
+    /// caller can paste straight back as a target, which the old listing's <c>path:line</c>
+    /// could not be.
+    /// </summary>
+    [Fact]
+    public async Task A_candidate_listing_orders_by_relevance_then_rank_then_position()
+    {
+        var candidates = new[]
+        {
+            Row(Symbol("AbcZed", "App/AbcZed.cs")),
+            Row(new SymbolInformation(
+                "Zed", 5, Loc(GeneratedUri("8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234", "Zed.g.cs"), 3), null)),
+            Row(Symbol("Zed", "Zzz/Zed.cs", line: 4, column: 12)),
+            Row(Symbol("Zed", "App/Zed.cs", line: 2, column: 7)),
+        };
+
+        var lines = (await Output.SymbolListingAsync(Root, "Zed", candidates, max: 10, Plain)).Split('\n');
+
+        Assert.Equal(4, lines.Length);
+        Assert.EndsWith("App/Zed.cs:2:7", lines[0], StringComparison.Ordinal);
+        Assert.EndsWith("Zzz/Zed.cs:4:12", lines[1], StringComparison.Ordinal);
+        Assert.EndsWith("Zed.g.cs:3:1", lines[2], StringComparison.Ordinal);
+        Assert.EndsWith("App/AbcZed.cs:1:1", lines[3], StringComparison.Ordinal);
+        Assert.StartsWith("  class  Zed ", lines[0], StringComparison.Ordinal);
+    }
+
+    /// <summary>The cap is the one the output rules require, footer included.</summary>
+    [Fact]
+    public async Task A_candidate_listing_caps_at_max_and_says_how_many_it_dropped()
+    {
+        var candidates = new[]
+        {
+            Row(Symbol("Zed", "App/Zed.cs")),
+            Row(Symbol("Zed", "Core/Zed.cs")),
+            Row(Symbol("Zed", "Web/Zed.cs")),
+        };
+
+        var lines = (await Output.SymbolListingAsync(Root, "Zed", candidates, max: 1, Plain)).Split('\n');
+
+        Assert.Equal(2, lines.Length);
+        Assert.EndsWith("App/Zed.cs:1:1", lines[0], StringComparison.Ordinal);
+        Assert.Equal("... 2 more (use --max 3 to see all)", lines[1]);
+    }
+
+    /// <summary>
+    /// <c>workspace/symbol</c> reports a constructor as a method; the caller that already read
+    /// the declaration chain says otherwise, and the listing prints what it was told.
+    /// </summary>
+    [Fact]
+    public async Task A_constructor_renders_as_one_when_the_chain_says_so()
+    {
+        var candidates = new[]
+        {
+            new SymbolRow(Symbol("Widget", "Core/Widget.cs", line: 13, column: 12, kind: 6), 9),
+            new SymbolRow(Symbol("Widget", "Core/Widget.cs", line: 15, column: 12, kind: 6), 9),
+        };
+
+        var lines = (await Output.SymbolListingAsync(Root, "Widget", candidates, max: 10, Plain)).Split('\n');
+
+        Assert.Equal("  constructor  Widget    Core/Widget.cs:13:12", lines[0]);
+        Assert.EndsWith("Core/Widget.cs:15:12", lines[1], StringComparison.Ordinal);
     }
 
     /// <summary>

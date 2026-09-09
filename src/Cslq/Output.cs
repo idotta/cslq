@@ -23,6 +23,14 @@ internal sealed record Documents(
 }
 
 /// <summary>
+/// A symbol as a row: the hit itself and the kind to render it as. The two are separate
+/// because <c>workspace/symbol</c> reports a constructor as a method and only a declaration
+/// chain says otherwise, so a caller that has already computed the chain can hand the truth
+/// in without the renderer asking for one.
+/// </summary>
+internal sealed record SymbolRow(SymbolInformation Symbol, int Kind);
+
+/// <summary>
 /// Raw LSP hands back URIs and zero-based line/character ranges, which is close to
 /// useless to a model. Everything an agent sees goes through here instead: repo-relative
 /// path, one-based line, the matched source line and a line of context either side.
@@ -237,7 +245,8 @@ internal static class Output
     /// only thing separating two symbols that share a name, and never asserted on, because
     /// DOTNET_CLI_UI_LANGUAGE pins its language but nothing pins its shape. The cap is a
     /// relevance cut against <paramref name="query"/> — the text the caller typed — computed
-    /// here rather than inherited from the server, and the display sort is cosmetic: see below.
+    /// here rather than inherited from the server: see <see cref="ShownAsync"/>, which the
+    /// candidate listings share so that a listed row and a <c>sym</c> row are the same row.
     /// </summary>
     public static async Task WriteSymbolsAsync(
         string root,
@@ -247,50 +256,21 @@ internal static class Output
         bool json,
         Documents documents)
     {
-        // Rank against the query, then cut, then sort for display. The cut used to be
-        // symbols.Take(max) on the premise that Roslyn answers workspace/symbol in relevance
-        // order; that holds on the fixture and was measured false on three real corpora, where
-        // the answer arrives grouped per project and per target framework with generated
-        // copies first, so a broad query's exact match fell outside --max 50. Ranking here
-        // makes the cut mean the same thing on every repository. The projection stays after
-        // the cut: PathUri.DisplayAsync costs a request per generated URI and a broad query
-        // drops most of its hits, so the tiebreak is on the raw URI rather than the label.
-        // WriteLocationsAsync labels first, deliberately: it folds rows on what they render
-        // as, and textDocument/references has no ranking to preserve.
-        var ranked = symbols
-            .OrderBy(s => Relevance(s.Name, query))
-            .ThenBy(s => Rank(s.Location.Uri))
-            .ThenBy(s => s.Location.Uri, StringComparer.Ordinal)
-            .ThenBy(s => s.Location.Range.Start.Line)
-            .ThenBy(s => s.Location.Range.Start.Character)
-            .Take(max);
-
-        var labelled = new List<Match>(Math.Min(max, symbols.Count));
-        foreach (var symbol in ranked)
-        {
-            labelled.Add(new Match(
-                await PathUri.DisplayAsync(root, symbol.Location.Uri, documents), symbol));
-        }
-
-        var shown = labelled
-            .OrderBy(h => h.Symbol.Name, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(h => h.Symbol.Location.Range.Start.Line)
-            .ThenBy(h => h.Symbol.Location.Range.Start.Character)
-            .ToList();
+        var rows = symbols.Select(s => new SymbolRow(s, s.Kind)).ToList();
+        var shown = await ShownAsync(root, query, rows, max, documents);
 
         if (json)
         {
             var payload = shown.Select(h => new
             {
-                name = h.Symbol.Name,
-                kind = Kind(h.Symbol.Kind),
-                container = h.Symbol.ContainerName,
+                name = h.Row.Symbol.Name,
+                kind = Kind(h.Row.Kind),
+                container = h.Row.Symbol.ContainerName,
                 path = h.Display,
-                line = h.Symbol.Location.Range.Start.Line + 1,
-                column = h.Symbol.Location.Range.Start.Character + 1,
-                generated = PathUri.IsGenerated(h.Symbol.Location.Uri),
-                metadata = PathUri.IsDecompiled(h.Symbol.Location.Uri),
+                line = h.Row.Symbol.Location.Range.Start.Line + 1,
+                column = h.Row.Symbol.Location.Range.Start.Character + 1,
+                generated = PathUri.IsGenerated(h.Row.Symbol.Location.Uri),
+                metadata = PathUri.IsDecompiled(h.Row.Symbol.Location.Uri),
             });
 
             Console.WriteLine(JsonSerializer.Serialize(
@@ -305,24 +285,100 @@ internal static class Output
             return;
         }
 
-        var kindWidth = shown.Max(h => Kind(h.Symbol.Kind).Length);
-        var nameWidth = shown.Max(h => h.Symbol.Name.Length);
-        var containerWidth = shown.Max(h => (h.Symbol.ContainerName ?? string.Empty).Length);
-        foreach (var hit in shown)
-        {
-            var start = hit.Symbol.Location.Range.Start;
-            var row =
-                $"{Kind(hit.Symbol.Kind).PadRight(kindWidth)}  " +
-                $"{hit.Symbol.Name.PadRight(nameWidth)}  " +
-                $"{(hit.Symbol.ContainerName ?? string.Empty).PadRight(containerWidth)}  " +
-                $"{hit.Display}:{start.Line + 1}:{start.Character + 1}";
-            Console.WriteLine(row);
-        }
+        foreach (var row in Rows(shown)) Console.WriteLine(row);
 
         if (symbols.Count > shown.Count)
         {
             Console.WriteLine();
             Console.WriteLine($"... {symbols.Count - shown.Count} more (use --max {symbols.Count} to see all)");
+        }
+    }
+
+    /// <summary>
+    /// A candidate listing, in <c>sym</c>'s row shape and its order, indented two spaces and
+    /// followed by the same truncation footer. Returned rather than printed because the two
+    /// listings that use it -- an ambiguous target and the <c>candidates:</c> dump of a target
+    /// that matched nothing -- are carried in a <see cref="CslqException"/> message. Every row
+    /// is therefore a <c>path:line:col</c> a caller can paste straight back as a target, which
+    /// is the whole point of being shown the candidates.
+    /// <para>
+    /// <paramref name="query"/> is the bare name the caller typed -- the listings' hits are
+    /// fuzzy, so relevance is what decides which survive the cap.
+    /// <see cref="SymbolRow.Kind"/> is the kind to render, which is the symbol's own unless the
+    /// caller already knows better: <c>workspace/symbol</c> reports a constructor as a method,
+    /// and only a declaration chain says otherwise.
+    /// </para>
+    /// </summary>
+    public static async Task<string> SymbolListingAsync(
+        string root,
+        string query,
+        IReadOnlyList<SymbolRow> candidates,
+        int max,
+        Documents documents)
+    {
+        var shown = await ShownAsync(root, query, candidates, max, documents);
+        var text = string.Join('\n', Rows(shown).Select(r => "  " + r));
+
+        return candidates.Count > shown.Count
+            ? text + $"\n... {candidates.Count - shown.Count} more (use --max {candidates.Count} to see all)"
+            : text;
+    }
+
+    /// <summary>
+    /// Rank against the query, then cut, then label, then sort for display. The cut used to be
+    /// symbols.Take(max) on the premise that Roslyn answers workspace/symbol in relevance
+    /// order; that holds on the fixture and was measured false on three real corpora, where
+    /// the answer arrives grouped per project and per target framework with generated copies
+    /// first, so a broad query's exact match fell outside --max 50. Ranking here makes the cut
+    /// mean the same thing on every repository. The projection stays after the cut:
+    /// PathUri.DisplayAsync costs a request per generated URI and a broad query drops most of
+    /// its hits, so the tiebreak is on the raw URI rather than the label.
+    /// WriteLocationsAsync labels first, deliberately: it folds rows on what they render as,
+    /// and textDocument/references has no ranking to preserve.
+    /// </summary>
+    private static async Task<List<Match>> ShownAsync(
+        string root, string query, IReadOnlyList<SymbolRow> rows, int max, Documents documents)
+    {
+        var ranked = rows
+            .OrderBy(r => Relevance(r.Symbol.Name, query))
+            .ThenBy(r => Rank(r.Symbol.Location.Uri))
+            .ThenBy(r => r.Symbol.Location.Uri, StringComparer.Ordinal)
+            .ThenBy(r => r.Symbol.Location.Range.Start.Line)
+            .ThenBy(r => r.Symbol.Location.Range.Start.Character)
+            .Take(max);
+
+        var labelled = new List<Match>(Math.Min(max, rows.Count));
+        foreach (var row in ranked)
+        {
+            labelled.Add(new Match(
+                await PathUri.DisplayAsync(root, row.Symbol.Location.Uri, documents), row));
+        }
+
+        return labelled
+            .OrderBy(h => Relevance(h.Row.Symbol.Name, query))
+            .ThenBy(h => Rank(h.Row.Symbol.Location.Uri))
+            .ThenBy(h => h.Display, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(h => h.Row.Symbol.Location.Range.Start.Line)
+            .ThenBy(h => h.Row.Symbol.Location.Range.Start.Character)
+            .ToList();
+    }
+
+    // kind  name  container  path:line:col, each column padded to the widest row shown.
+    private static IEnumerable<string> Rows(IReadOnlyList<Match> shown)
+    {
+        if (shown.Count == 0) yield break;
+
+        var kindWidth = shown.Max(h => Kind(h.Row.Kind).Length);
+        var nameWidth = shown.Max(h => h.Row.Symbol.Name.Length);
+        var containerWidth = shown.Max(h => (h.Row.Symbol.ContainerName ?? string.Empty).Length);
+        foreach (var hit in shown)
+        {
+            var start = hit.Row.Symbol.Location.Range.Start;
+            yield return
+                $"{Kind(hit.Row.Kind).PadRight(kindWidth)}  " +
+                $"{hit.Row.Symbol.Name.PadRight(nameWidth)}  " +
+                $"{(hit.Row.Symbol.ContainerName ?? string.Empty).PadRight(containerWidth)}  " +
+                $"{hit.Display}:{start.Line + 1}:{start.Character + 1}";
         }
     }
 
@@ -698,7 +754,7 @@ internal static class Output
         : 3;
 
     // 0 = an ordinary file, 1 = source-generated, 2 = decompiled metadata.
-    private static int Rank(string uri) =>
+    internal static int Rank(string uri) =>
         PathUri.IsGenerated(uri) ? 1 : PathUri.IsDecompiled(uri) ? 2 : 0;
 
     private static string? At(string[] lines, int zeroBased) =>
@@ -708,5 +764,5 @@ internal static class Output
 
     private sealed record Finding(string Uri, string Display, Diagnostic Diagnostic);
 
-    private sealed record Match(string Display, SymbolInformation Symbol);
+    private sealed record Match(string Display, SymbolRow Row);
 }

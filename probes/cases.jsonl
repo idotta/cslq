@@ -77,3 +77,13 @@
 {"name":"ambiguity-honours-max","args":"def Area --root fixture --max 1","exit":"1","expect":"is ambiguous; qualify it further|... 2 more (use --max 3 to see all)"}
 {"name":"generated-ambiguity-honours-max","args":"outline Stamp --root fixture2 --max 1","exit":"1","expect":"declared in several documents|... 1 more (use --max 2 to see all)"}
 {"name":"restore-json-honours-the-envelope","args":"restore --json","exit":"0","expect":"'count': 1|'truncated': false|'restored': true|'manifest'"}
+{"name":"fully-qualified-type-def","args":"def Fixture.Core.Greeter --root fixture","exit":"0","expect":"Core/Greeter.cs:3|public static class Greeter"}
+{"name":"namespace-suffix-refs","args":"refs Core.Greeter.Greet --root fixture","exit":"0","expect":"Core/Greeter.cs:5|App/Program.cs:9"}
+{"name":"wrong-namespace-fails","args":"refs Wrong.Namespace.Greeter.Greet --root fixture","exit":"1","expect":"no symbol matched|candidates:"}
+{"name":"discontiguous-namespace-fails","args":"refs Fixture.Greeter.Greet --root fixture","exit":"1","expect":"no symbol matched"}
+{"name":"bare-name-selects-type-over-constructors","args":"refs Widget --root fixture --json","exit":"0","expect":"'count': 6|'line': 11|'column': 21|'line': 50"}
+{"name":"constructor-target-selects-constructors","args":"refs Gadget.Gadget --root fixture --json","exit":"0","expect":"'count': 2|'line': 22|'column': 12|'line': 52"}
+{"name":"constructor-overloads-stay-ambiguous","args":"refs Widget.Widget --root fixture","exit":"1","expect":"is ambiguous; qualify it further|constructor  Widget|Core/Widget.cs:13|Core/Widget.cs:15"}
+{"name":"nested-type-segments-verified","args":"def Outer.Inner.Depth --root fixture --json","exit":"0","expect":"'count': 1|'line': 36|'column': 20"}
+{"name":"shadowed-nested-member-ambiguous","args":"def Inner.Depth --root fixture","exit":"1","expect":"is ambiguous; qualify it further|property  Depth|Core/Widget.cs:36:20|Core/Widget.cs:44:20"}
+{"name":"candidate-listing-honours-max","args":"def Widg --root fixture --max 1","exit":"1","expect":"no symbol matched|candidates:|class  Widget|Core/Widget.cs:11:21|... 3 more (use --max 4 to see all)"}

@@ -362,15 +362,24 @@ internal static partial class Program
     {
         // Overloads are not ambiguity here: several matches that share a document all outline
         // to the same thing, so collapse by document and only complain if they really differ.
-        var matches = await MatchSymbolsAsync(client, target, ct);
-        var uris = matches.Select(m => m.Location.Uri).Distinct(StringComparer.Ordinal).ToList();
+        var matches = await MatchSymbolsAsync(client, root, target, max, ct);
+        var uris = matches.Select(m => m.Symbol.Location.Uri).Distinct(StringComparer.Ordinal).ToList();
         if (uris.Count > 1)
         {
-            var rows = new List<string>(uris.Count);
-            foreach (var u in uris.Take(max))
+            // Labelled before the cap, unlike a symbol listing's rows: this one is a row per
+            // document, the label is all a row carries, and so it is what the order is on.
+            var labelled = new List<(string Uri, string Label)>(uris.Count);
+            foreach (var u in uris)
             {
-                rows.Add("  " + await PathUri.DisplayAsync(root, u, Documents.Of(client, ct)));
+                labelled.Add((u, await PathUri.DisplayAsync(root, u, Documents.Of(client, ct))));
             }
+
+            var rows = labelled
+                .OrderBy(l => Output.Rank(l.Uri))
+                .ThenBy(l => l.Label, StringComparer.Ordinal)
+                .Take(max)
+                .Select(l => "  " + l.Label)
+                .ToList();
 
             throw new CslqException(
                 $"'{target}' is declared in several documents; pick one:\n"
@@ -516,22 +525,16 @@ internal static partial class Program
             return (uri, new Position(line - 1, column - 1));
         }
 
-        var matches = await MatchSymbolsAsync(client, target, ct);
+        var matches = await MatchSymbolsAsync(client, root, target, max, ct);
         if (matches.Count > 1)
         {
-            var rows = new List<string>(matches.Count);
-            foreach (var m in matches.Take(max))
-            {
-                var display = await PathUri.DisplayAsync(root, m.Location.Uri, Documents.Of(client, ct));
-                rows.Add($"  {FullName(m)}  {display}:{m.Location.Range.Start.Line + 1}");
-            }
-
             throw new CslqException(
                 $"'{target}' is ambiguous; qualify it further:\n"
-                + string.Join('\n', rows) + More(matches.Count, rows.Count));
+                + await Output.SymbolListingAsync(
+                    root, LastSegment(target), matches, max, Documents.Of(client, ct)));
         }
 
-        var match = matches[0];
+        var match = matches[0].Symbol;
         return (match.Location.Uri, match.Location.Range.Start);
     }
 
@@ -547,21 +550,72 @@ internal static partial class Program
     /// miss cost 40 requests and 10s.
     /// </para>
     /// </summary>
-    private static async Task<List<SymbolInformation>> MatchSymbolsAsync(
-        LspClient client, string target, CancellationToken ct)
+    private static async Task<List<SymbolRow>> MatchSymbolsAsync(
+        LspClient client, string root, string target, int max, CancellationToken ct)
     {
-        var candidates = await client.SymbolsAsync(LastSegment(target), ct);
-        var matches = Distinct(candidates.Where(s => Matches(s, target)));
+        var name = LastSegment(target);
+        var candidates = await client.SymbolsAsync(name, ct);
+        var named = Distinct(candidates.Where(
+            s => string.Equals(s.Name, name, StringComparison.Ordinal)));
+        var matches = await SelectAsync(client, named, target, ct);
 
         if (matches.Count == 0)
         {
             var seen = candidates.Count == 0
                 ? string.Empty
-                : "\ncandidates:\n" + string.Join('\n', candidates.Select(c => "  " + FullName(c)));
+                : "\ncandidates:\n" + await Output.SymbolListingAsync(
+                    root, name, [.. Distinct(candidates).Select(c => new SymbolRow(c, c.Kind))],
+                    max, Documents.Of(client, ct));
             throw new CslqException($"no symbol matched '{target}'{seen}");
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// The two decisions of "Targeting a symbol by name" in <c>DESIGN.md</c>, applied to the
+    /// candidates whose name already equals the target's last segment. Both read a candidate's
+    /// declaration chain off the syntax tree, which costs one
+    /// <c>textDocument/documentSymbol</c> per distinct document, so both are gated: a dotted
+    /// target needs chains to verify its leading segments, a bare name only when more than one
+    /// candidate survived. A bare unambiguous name -- the common case -- costs no extra
+    /// request at all.
+    /// </summary>
+    private static async Task<List<SymbolRow>> SelectAsync(
+        LspClient client, List<SymbolInformation> named, string target, CancellationToken ct)
+    {
+        var dotted = target.Contains('.');
+        if (!dotted && named.Count < 2) return [.. named.Select(s => new SymbolRow(s, s.Kind))];
+
+        var trees = new Dictionary<string, IReadOnlyList<DocumentSymbol>>(StringComparer.Ordinal);
+        var chains = new List<Targets.Candidate>(named.Count);
+        foreach (var symbol in named)
+        {
+            var uri = symbol.Location.Uri;
+            if (!trees.TryGetValue(uri, out var tree))
+            {
+                tree = await client.DocumentSymbolsAsync(uri, ct);
+                trees[uri] = tree;
+            }
+
+            chains.Add(new Targets.Candidate(
+                symbol.Kind, Targets.Chain(tree, symbol.Location.Range.Start)));
+        }
+
+        // The chain is the only thing that knows a constructor is one, and the ambiguity
+        // listing is the one place these rows are shown, so the kind travels out with them
+        // rather than being recomputed from a request the renderer would have to make.
+        var rows = named
+            .Select((s, i) => new SymbolRow(s, Targets.IsConstructor(chains[i]) ? Targets.Constructor : s.Kind))
+            .ToList();
+
+        if (dotted)
+        {
+            return [.. rows.Where((_, i) => Targets.ChainMatches(chains[i].Chain, target))];
+        }
+
+        var type = Targets.TypeOverConstructors(chains);
+        return type < 0 ? rows : [rows[type]];
     }
 
     // Roslyn reports a symbol once per project that sees it, so a symbol in a multi-targeted
@@ -569,28 +623,6 @@ internal static partial class Program
     private static List<SymbolInformation> Distinct(IEnumerable<SymbolInformation> symbols) => symbols
         .DistinctBy(s => (s.Location.Uri, s.Location.Range.Start.Line, s.Location.Range.Start.Character))
         .ToList();
-
-    /// <summary>
-    /// Roslyn returns containerName as a localised display string ("in Greeter (project
-    /// Core (net10.0))"), not a namespace path, so a dotted target can only narrow by the
-    /// identifiers that appear in it — in practice the enclosing type. A target that stays
-    /// ambiguous is reported with its candidates so the caller can fall back to file:line:col.
-    /// </summary>
-    private static bool Matches(SymbolInformation symbol, string target)
-    {
-        var segments = target.Split('.');
-        if (!string.Equals(symbol.Name, segments[^1], StringComparison.Ordinal)) return false;
-        if (segments.Length == 1) return true;
-
-        var tokens = Identifier().Matches(symbol.ContainerName ?? string.Empty).Select(m => m.Value);
-        return tokens.Contains(segments[^2], StringComparer.Ordinal);
-    }
-
-    [GeneratedRegex(@"[A-Za-z_][A-Za-z0-9_]*")]
-    private static partial Regex Identifier();
-
-    private static string FullName(SymbolInformation s) =>
-        string.IsNullOrEmpty(s.ContainerName) ? s.Name : $"{s.Name}  {s.ContainerName}";
 
     private static string LastSegment(string target)
     {
