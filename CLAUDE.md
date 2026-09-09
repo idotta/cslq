@@ -56,7 +56,21 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **Never gate readiness on the symbol being queried.** An absent symbol then looks identical to
   a workspace that has not loaded, and the caller waits out the whole timeout for a typo.
 - **A query fired before load returns empty, not an error.** Never `sleep`; wait for
-  `workspace/projectInitializationComplete` and then poll a sentinel that must resolve.
+  `workspace/projectInitializationComplete` and then poll a sentinel that must resolve. Once
+  that notification has fired **in this process**, the wait is bounded to a further 20 s
+  (`LspClient.PostLoadGrace`) and then fails: on a cold load the server answers nothing until
+  the notification and then jumps straight to complete, so a candidate still unresolved after
+  it never will be — a project whose only type sits in an `#if false` branch is the shape,
+  ordinary `.csproj` and all, so no skip rule sees it. **Never bound it when the notification
+  has not fired**: on a daemon attach it fired before the process existed, and that is exactly
+  where the incomplete-answer window lives. `exhausted-candidate-fails-after-load` is the leg.
+- **A `%XX` in the root path is MSBuild's problem, not the URI layer's.** A root like
+  `.../pct%20x` never becomes ready, and the obvious suspect is wrong: `new Uri(path)` escapes
+  the literal `%` to `%25`, so `PathUri.FromPath` / `ToPath` round-trip it exactly (pinned by
+  `PathUriTests`). What fails is MSBuild, which unescapes `%XX` in the paths it reads — plain
+  `dotnet restore` on such a tree already errors with `pct x` — so nothing `cslq` does can fix
+  it. A `%` not followed by two hex digits is fine end to end: `cslq ready` on `pct%zzx`
+  resolves in ~4 s.
 - **Roslyn will not answer for documents it does not consider open** — `didOpen` first. The
   exception is a source-generated document: the server owns it, answers without a `didOpen`,
   and there is no file to read the text from. `OpenAsync` skips them.
@@ -210,20 +224,58 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   longer a build-only flag. It fails loudly, but it reads as a broken test project rather than
   a bad flag, and every other `dotnet` call in `run.sh` passes `--nologo`, so it is the obvious
   thing to add. Do not.
-- **Project discovery reads the root's solution, and only the root's.** `ProjectDirectories`
-  takes the project list from a single `.sln`/`.slnx` sitting at the top of `--root`, and falls
-  back to the recursive `.csproj` scan only when there is more than one. **No solution at all is
-  an error**, thrown before the server starts, because `--autoLoadProjects` never discovers a
-  bare `.csproj` and the scan would only buy a full timeout — so every temp tree a unit test
-  builds now needs a solution, which `Workspace` writes for it, and the two tests that still
-  mean to exercise the scan write two solutions on purpose. A solution one
+- **Project discovery reads the root's solution, and only the root's — there is no `.csproj`
+  scan fallback left.** `ProjectDirectories` takes the project list from the single
+  `.sln`/`.slnx` sitting at the top of `--root`. **No solution at all is an error, and so is
+  more than one**, both thrown before the server starts: `--autoLoadProjects` never discovers a
+  bare `.csproj`, and the scan that used to answer a two-solution root is over-inclusive, so a
+  project neither solution loads gets a sentinel that can never resolve and readiness burns the
+  whole timeout (3 of 3 tester runs). So every temp tree a unit test builds needs a solution,
+  which `Workspace` writes for it, and the tests that write two on purpose are now asserting
+  the error. `Solutions` still caps at two, which is all the message needs. A solution one
   directory down does not count — which is what keeps `fixture/Fixture.slnx` from narrowing a
   root above it, and what makes `--root fixture` and `--root .` two different workspaces rather
   than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
-  still a documented limit. This is the fix for the OrchardCore template failure above; scoping
-  `--root` below the templates was only the workaround.
+  still a documented limit. It is *half* the fix for the OrchardCore template failure above —
+  see the next bullet for the other half — and scoping `--root` below the templates was only
+  the workaround.
   Parse failures go through `CslqException`: `Main` catches that and nothing else, so a
   hand-edited `.slnx` that no longer parses would otherwise exit 127 with a stack trace.
+- **A nesting boundary is any `.csproj` on disk, listed in the solution or not, and reading the
+  solution alone did not fix OrchardCore.** `OrchardCore.slnx` **lists** the wrapper
+  `src/Templates/OrchardCore.ProjectTemplates` and excludes only the five `content/*/*.csproj`
+  under it, so the wrapper's own candidate scan still read types out of `content/**/*.cs` —
+  `dotnet new` template text Roslyn never binds — and `cslq ready` on the full root still burned
+  900 s. `Program.Probe` therefore computes both the `Candidates` file filter and
+  `Sentinel.Nested` from the *on-disk* `.csproj` set (`ScannedProjects`, unioned with the
+  discovered list so a project the solution places outside the root is still a boundary), and
+  reads the project's own `.csproj` through `ProjectSources`, which is pure text and unit-tested
+  as such. Two things come off it, and neither is visible to a source scan:
+  - `EnableDefaultItems=false` (or `EnableDefaultCompileItems=false`) with no
+    `<Compile Include>` means the project compiles **nothing** — the wrapper is exactly this —
+    so it gets no candidates however many `.cs` files sit under it.
+  - Sources linked in from outside the directory — a `*.projitems` import, or every
+    `<Compile Include>` pointing outside — plus no `.cs` of its own on disk means the project
+    is **skipped**: a hit for a linked document sits under the *source* directory, so
+    `Sentinel.Accepts` can never accept it and no candidate could prove it loaded even in
+    principle. Fourteen of CommunityToolkit's twenty-six projects are that shape, and
+    `ready --json` used to report `projects: 26` as if all had been probed. Measured 2026-09-09:
+    `projects: 12`, fourteen skipped, ~18 s.
+  A malformed `.csproj` must read as an *ordinary* project rather than throw — one unparseable
+  file somewhere in a 226-project tree would otherwise take readiness down — so
+  `ProjectSources.Read` swallows `XmlException` and answers "ordinary", which costs only the
+  candidates a scan would have found anyway.
+- **`ready --json` carries three numbers that must add up, and a project missing from all three
+  reads as loaded.** `projects` is the probed count, `skipped` names the linked-only projects of
+  the bullet above, and `unprobed` names the ones that own sources but declare no type the
+  candidate regex reads — top-level statements only, or only Razor or resources. Together they
+  are every project the solution yielded: OrchardCore is `projects: 214`, one skipped and twelve
+  unprobed, which is its 227 discovered project directories exactly (measured 2026-09-09,
+  ~165 s). Keep the
+  two arrays separate and keep both populated. Folding them would put "no sources of their own"
+  against projects that have them; dropping either — which is what the first cut of this did
+  with `unprobed` — leaves a dozen projects that nothing checked looking exactly like a dozen
+  that loaded. `Output.WriteReady` renders all three and `Program.Ready` is the only caller.
 - **`cslq` can now be pointed at its own repo, and `Cslq.slnx` is why.** The root solution lists
   `src/Cslq` and `tests/Cslq.Tests` and deliberately excludes `fixture/`, whose `App` does not
   compile on purpose. Put a fixture project in it and `dotnet build` at the root fails by
@@ -247,7 +299,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     first made every warm run burn its entire timeout, 300 s under `run.sh`, and looked
     exactly like a slow cold load.
   - **One sentinel no longer proved the workspace was loaded — now there is one per
-    project.** Cold load used to close that window by accident, costing a minute; warm attach
+    project, and `--sentinel` adds to that set rather than replacing it.** Cold load used to close that window by accident, costing a minute; warm attach
     reaches it in seconds. Two symptoms came out of it. Until a project is loaded, Roslyn
     binds a `ProjectReference` to the referenced project's *built assembly*, so `definition`
     answers with a decompiled temp file under `MetadataAsSource` — exit 0, no context lines,
@@ -259,6 +311,12 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     project directory. **Do not match a hit to a project by `containerName`** — it is
     localised display text. It cost a red CI run and two red gate runs that each failed a
     *different* pair of cases, so treat a lone flake of this shape as this, not as noise.
+    An explicit `--sentinel` used to *replace* the whole set with one root-scoped probe, which
+    handed exactly this bug back through the escape hatch — testers on OrchardCore got 321 hits
+    against 331 from `impl StartupBase`, at exit 0. `Program.Sentinels` now appends the explicit
+    probe (`Explicit: true`) to the inferred set and only falls back to it alone when
+    `InferSentinels` throws. That probe is not a project: `ready --json`'s three numbers must
+    exclude it, and `LspClient.Names` prints it as `explicit sentinel 'X'`.
 - **`probes/run.sh` must scope its own daemon.** It exports
   `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=cslq-probe-$$` and a 60 s keepalive. Without it the
   gate inherits whatever daemon the developer's session left running — a stale workspace can

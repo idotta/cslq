@@ -63,6 +63,51 @@ internal static partial class Program
         }
     }
 
+    /// <summary>
+    /// <c>projects</c> counts the projects readiness actually probed, and the two classes it
+    /// could not probe are named rather than counted as if they had been. Both are listed for
+    /// the same reason: <c>projects + skipped + unprobed</c> equalling the discovered project
+    /// count is what lets a caller see that readiness was partial, and a project missing from
+    /// all three would read as "loaded". The stderr line carries the same fact for text mode,
+    /// which prints only <c>ready</c> by design — behind <c>--log-level Information</c>
+    /// because the ordinary workspace has neither class, and a line on every run would train
+    /// a caller to ignore it.
+    /// </summary>
+    private static int Ready(Options opts, IReadOnlyList<Sentinel> sentinels)
+    {
+        // The probe an explicit `--sentinel` adds is not a project, so none of the three
+        // numbers may see it: counted, it would put the total one above the project count a
+        // caller can check it against.
+        var projects = sentinels.Where(s => !s.Explicit).ToList();
+        var skipped = RelativeDirectories(opts.Root, projects.Where(s => s.Skipped));
+        var unprobed = RelativeDirectories(
+            opts.Root, projects.Where(s => s.Candidates.Count == 0 && !s.Skipped));
+
+        var clauses = new List<string>();
+        if (skipped.Count > 0)
+        {
+            clauses.Add("no sources of their own: " + string.Join(", ", skipped));
+        }
+
+        if (unprobed.Count > 0)
+        {
+            clauses.Add("no type declaration found: " + string.Join(", ", unprobed));
+        }
+
+        if (clauses.Count > 0 && opts.Verbose)
+        {
+            Console.Error.WriteLine("cslq: not probed — " + string.Join("; ", clauses));
+        }
+
+        Output.WriteReady(
+            projects.Count(s => s.Candidates.Count > 0), skipped, unprobed, opts.Json);
+        return 0;
+    }
+
+    private static IReadOnlyList<string> RelativeDirectories(
+        string root, IEnumerable<Sentinel> sentinels) =>
+        [.. sentinels.Select(s => PathUri.Relative(root, s.Directory))];
+
     private static async Task<int> RunAsync(string[] argv)
     {
         switch (Preflight(argv))
@@ -128,8 +173,7 @@ internal static partial class Program
         {
             case "ready":
                 await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
-                Output.WriteReady(sentinels.Count, opts.Json);
-                return 0;
+                return Ready(opts, sentinels);
 
             case "refs":
                 return await RefsAsync(client, opts, sentinels, ct);
@@ -723,14 +767,29 @@ internal static partial class Program
     /// <summary>
     /// One readiness probe per project, because a single one only ever proved that
     /// <em>some</em> project had loaded — see <see cref="LspClient.WaitReadyAsync"/> for the
-    /// incomplete answers that produced. An explicit <c>--sentinel</c> replaces the whole set
-    /// with one probe scoped to the root, which is deliberately the weaker mode: it is the
-    /// escape hatch for a workspace whose layout this inference cannot read.
+    /// incomplete answers that produced. An explicit <c>--sentinel</c> <em>adds</em> a
+    /// root-scoped probe to that set rather than replacing it: replacing it reopened the
+    /// incomplete-answer bug through the escape hatch — on OrchardCore a <c>--sentinel</c> run
+    /// answered <c>impl StartupBase</c> with 321 hits against 331, at exit 0. It stands alone
+    /// only when inference finds nothing at all, which is the layout it is the escape hatch
+    /// for.
     /// </summary>
-    private static IReadOnlyList<Sentinel> Sentinels(Options opts) =>
-        opts.Sentinel is { } explicitSentinel
-            ? [new Sentinel(Path.GetFullPath(opts.Root), [explicitSentinel], [])]
-            : InferSentinels(opts.Root);
+    internal static IReadOnlyList<Sentinel> Sentinels(Options opts)
+    {
+        if (opts.Sentinel is not { } explicitSentinel) return InferSentinels(opts.Root);
+
+        var probe = new Sentinel(
+            Path.GetFullPath(opts.Root), [explicitSentinel], [], Explicit: true);
+
+        try
+        {
+            return [.. InferSentinels(opts.Root), probe];
+        }
+        catch (CslqException)
+        {
+            return [probe];
+        }
+    }
 
     /// <summary>
     /// A project per <c>.csproj</c>, and per project the type names declared in its own files,
@@ -747,11 +806,11 @@ internal static partial class Program
     /// rather than leaving it silently absent from readiness.
     /// </para>
     /// <para>
-    /// A root with no solution, or none with a <c>.csproj</c> under it, fails immediately.
-    /// Roslyn loads nothing for such a root, so every sentinel is unresolvable and every query
-    /// answers empty: waiting out the full timeout only delays the same conclusion.
-    /// <c>--sentinel</c> bypasses this, which is the escape hatch for a layout the scan cannot
-    /// read.
+    /// A root with no solution, with two of them, or with none holding a <c>.csproj</c>, fails
+    /// immediately. Roslyn loads nothing useful for such a root, so every sentinel is
+    /// unresolvable and every query answers empty: waiting out the full timeout only delays the
+    /// same conclusion. An explicit <c>--sentinel</c> falls back to its own probe alone when
+    /// this throws, which is the escape hatch for a layout this cannot read.
     /// </para>
     /// </summary>
     internal static IReadOnlyList<Sentinel> InferSentinels(string root)
@@ -759,21 +818,29 @@ internal static partial class Program
         var solutions = Solutions(root);
         if (solutions.Count == 0) throw new CslqException(NoSolution(root));
 
-        var projects = ProjectDirectories(root, solutions);
+        if (solutions.Count > 1) throw new CslqException(TwoSolutions(root, solutions));
+
+        var projects = ProjectDirectories(solutions[0]);
         if (projects.Count == 0)
         {
-            // Naming the solution when there is one: "no .csproj under <root>" would be a
+            // The solution is named rather than the root: "no .csproj under <root>" would be a
             // lie about a root whose solution simply lists no C# project, and would send the
             // reader looking for files that are sitting right there.
-            throw new CslqException(solutions.Count == 1
-                ? $"{Path.GetFileName(solutions[0])} lists no C# project; point --root at a "
-                    + "workspace or pass --sentinel"
-                : $"no .csproj under {root}; point --root at a workspace or pass --sentinel");
+            throw new CslqException(
+                $"{Path.GetFileName(solutions[0])} lists no C# project; point --root at a "
+                + "workspace or pass --sentinel");
         }
 
-        var sentinels = projects
-            .Select(d => new Sentinel(d, Candidates(d, projects), NestedProjects(d, projects)))
+        // Nesting boundaries come off the disk, not off the discovered list: a `.csproj` the
+        // solution does not list is still a directory Roslyn compiles separately, and reading
+        // types out of one is what burned 900s on OrchardCore's
+        // `src/Templates/OrchardCore.ProjectTemplates`. The discovered list is unioned in
+        // because a solution may list a project outside the root, which a scan under the root
+        // cannot see.
+        var boundaries = Directories(ScannedProjects(root))
+            .Union(projects, PathUri.PathComparer)
             .ToList();
+        var sentinels = projects.Select(d => Probe(d, boundaries)).ToList();
 
         return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
@@ -781,13 +848,8 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Type names declared in a project's <em>own</em> files. Own excludes anything under a
-    /// project nested inside this one, so a candidate taken from <c>A/B</c> cannot be what
-    /// marks A ready. That is only half of it: the hit has to be scoped too, which is what
-    /// <see cref="Sentinel.Nested"/> carries — <c>Web/</c> and <c>Web/Tests/</c> both
-    /// declaring <c>Program</c> is the ordinary shape, and a scan of A's own files alone does
-    /// not stop B's <c>Program</c> from answering A's query. A project left with no candidate
-    /// of its own is reported as unprobed rather than assumed loaded.
+    /// The type names declared in a project's own files, most-shallow-file-first. A project
+    /// left with no candidate is reported as unprobed rather than assumed loaded.
     /// <para>
     /// <see cref="NonCode"/> first, because <see cref="TypeDeclaration"/> matches English
     /// prose: "identifying the class and assembly context" in a doc comment yields the
@@ -798,22 +860,87 @@ internal static partial class Program
     /// every match per file rather than the first is not one either.
     /// </para>
     /// </summary>
-    private static IReadOnlyList<string> Candidates(string directory, IReadOnlyList<string> projects)
-    {
-        var nested = NestedProjects(directory, projects);
-
-        return SourceFiles(directory)
-            .Where(f => !nested.Any(n => IsUnder(f, n)))
+    private static IReadOnlyList<string> Candidates(IEnumerable<string> ownSourceFiles) =>
+        ownSourceFiles
             .SelectMany(f => TypeDeclaration().Matches(NonCode().Replace(File.ReadAllText(f), " ")))
             .Select(m => m.Groups["name"].Value)
             .Distinct(StringComparer.Ordinal)
             .Take(3)
             .ToList();
+
+    /// <summary>
+    /// One project's probe: what to query for, the boundaries that scope a hit, and whether
+    /// the project can be probed at all. A project whose <c>.csproj</c> says it compiles
+    /// nothing of its own gets no candidates however many <c>.cs</c> files sit under it —
+    /// MSBuild settles that and a source scan cannot override it — and one whose sources are
+    /// linked in from elsewhere is skipped, because a hit for a linked document lands under
+    /// the source directory and <see cref="Sentinel.Accepts"/> can never accept it.
+    /// </summary>
+    private static Sentinel Probe(string directory, IReadOnlyList<string> boundaries)
+    {
+        var nested = NestedProjects(directory, boundaries);
+        var sources = ProjectKind(directory);
+        // Materialised, not lazy: `Candidates` and the emptiness test would otherwise walk
+        // the directory tree twice for every project, 226 times over on OrchardCore.
+        List<string> own = sources.None ? [] : [.. OwnSourceFiles(directory, nested)];
+
+        return new Sentinel(
+            directory, Candidates(own), nested, Skipped: sources.Elsewhere && own.Count == 0);
     }
 
+    /// <summary>
+    /// A project's <em>own</em> C# files: everything under its directory that is not under a
+    /// project nested inside it. That exclusion is only half of the nesting fix — the hit has
+    /// to be scoped too, which is what <see cref="Sentinel.Nested"/> carries, since
+    /// <c>Web/</c> and <c>Web/Tests/</c> both declaring <c>Program</c> is the ordinary shape
+    /// and a scan of A's own files alone does not stop B's <c>Program</c> from answering A's
+    /// query.
+    /// </summary>
+    private static IEnumerable<string> OwnSourceFiles(
+        string directory, IReadOnlyList<string> nested) =>
+        SourceFiles(directory).Where(f => !nested.Any(n => IsUnder(f, n)));
+
+    /// <summary>
+    /// What the project's own <c>.csproj</c> text claims about where its sources live. Every
+    /// <c>.csproj</c> in the directory is read and a claim is taken only when all of them
+    /// agree: two project files in one directory are indistinguishable to the rest of this
+    /// inference — a documented limit — and the conservative reading leaves such a pair
+    /// probed. An unreadable file is an ordinary project, for the reason
+    /// <see cref="ProjectSources.Read"/> treats an unparseable one as one.
+    /// </summary>
+    private static ProjectSources.Kind ProjectKind(string directory)
+    {
+        var kinds = Directory
+            .EnumerateFiles(directory, "*.csproj", SearchOption.TopDirectoryOnly)
+            .Select(ReadKind)
+            .ToList();
+
+        return kinds.Count == 0
+            ? new ProjectSources.Kind(false, false)
+            : new ProjectSources.Kind(kinds.All(k => k.Elsewhere), kinds.All(k => k.None));
+
+        static ProjectSources.Kind ReadKind(string file)
+        {
+            try
+            {
+                return ProjectSources.Read(File.ReadAllText(file));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new ProjectSources.Kind(false, false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The nesting boundaries inside a project directory. Over the <em>on-disk</em>
+    /// <c>.csproj</c> set rather than the solution's list: a template or sample project the
+    /// solution excludes is still a directory whose sources belong to it and not to the
+    /// project above it.
+    /// </summary>
     private static IReadOnlyList<string> NestedProjects(
-        string directory, IReadOnlyList<string> projects) =>
-        [.. projects.Where(p => p != directory && IsUnder(p, directory))];
+        string directory, IReadOnlyList<string> boundaries) =>
+        [.. boundaries.Where(p => p != directory && IsUnder(p, directory))];
 
     private static bool IsUnder(string path, string directory) => path.StartsWith(
         directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
@@ -821,9 +948,8 @@ internal static partial class Program
         PathUri.PathComparison);
 
     /// <summary>
-    /// Every project directory under the root: the solution's list when the root holds exactly
-    /// one solution, and a <c>.csproj</c> scan otherwise. Either way it is an approximation of
-    /// what Roslyn actually loaded, because <b>the server cannot be asked</b> —
+    /// Every project directory the root's solution lists. An approximation of what Roslyn
+    /// actually loaded, because <b>the server cannot be asked</b> —
     /// <c>workspace/_roslyn_restorableProjects</c> is a server-to-client request and carries no
     /// project list.
     /// <para>
@@ -836,18 +962,17 @@ internal static partial class Program
     /// it was to point <c>--root</c> below the templates.
     /// </para>
     /// <para>
-    /// Exactly one solution, and only at the top of the root: two of them give no basis for
-    /// choosing, and the scan — over-inclusive but never short — is the safer answer to a
-    /// question this cannot answer. That is now the only thing the scan is for; no solution at
-    /// all is not a third case handled here, because <see cref="InferSentinels"/> rejects such
-    /// a root before it gets this far. A project the solution lists but that is not on disk is
-    /// dropped, since waiting on one would be the same unresolvable sentinel by another route.
-    /// A <c>.slnf</c> solution filter is not read, and no longer falls through to the scan: a
-    /// root holding only one is a root with no solution.
+    /// Exactly one solution reaches this: neither no solution nor two of them is a case handled
+    /// here, because <see cref="InferSentinels"/> rejects both roots before it gets this far.
+    /// A project the solution lists but that is not on disk is dropped, since waiting on one
+    /// would be the same unresolvable sentinel by another route. A <c>.slnf</c> solution filter
+    /// is not read: a root holding only one is a root with no solution.
     /// </para>
     /// </summary>
-    private static IReadOnlyList<string> ProjectDirectories(string root, IReadOnlyList<string> solutions) =>
-        (solutions.Count == 1 ? SolutionProjects(solutions[0]) : ScannedProjects(root))
+    private static IReadOnlyList<string> ProjectDirectories(string solution) =>
+        Directories(SolutionProjects(solution));
+
+    private static IReadOnlyList<string> Directories(IEnumerable<string> projectFiles) => projectFiles
         .Select(f => Path.GetFullPath(Path.GetDirectoryName(f)!))
         .Distinct(PathUri.PathComparer)
         .Order(PathUri.PathComparer)
@@ -856,7 +981,8 @@ internal static partial class Program
     /// <summary>
     /// The root's own solutions. Top-level only: a solution in a subdirectory describes that
     /// subtree rather than this root, and Roslyn would not open it for this root either.
-    /// Capped at two, which is all the caller distinguishes.
+    /// Capped at two, which is all the caller distinguishes: one is read, and two or more is
+    /// an error that names the two it found.
     /// </summary>
     private static IReadOnlyList<string> Solutions(string root) => Directory
         .EnumerateFiles(root, "*.sln*", SearchOption.TopDirectoryOnly)
@@ -871,14 +997,26 @@ internal static partial class Program
     /// said instantly instead.
     /// <para>
     /// Deliberately no "or pass <c>--sentinel</c>" here, though <see cref="Sentinels"/> does
-    /// bypass this check: Roslyn still loads nothing for such a root, so the hint would send
-    /// the reader straight into the timeout this exists to remove. The other two failures in
-    /// <see cref="InferSentinels"/> keep it, because there the workspace does load.
+    /// fall back to the explicit probe when this throws: Roslyn still loads nothing for such a
+    /// root, so the hint would send the reader straight into the timeout this exists to remove.
+    /// The other failures in <see cref="InferSentinels"/> keep it, because there the workspace
+    /// does load.
     /// </para>
     /// </summary>
     internal static string NoSolution(string root) =>
         $"no .sln or .slnx at {root}; cslq loads the projects the root's solution lists, so "
         + "--root must be the directory holding the .sln/.slnx";
+
+    /// <summary>
+    /// Two solutions give no basis for choosing between them, and guessing is not free: the
+    /// <c>.csproj</c> scan this replaced is over-inclusive, so a project neither solution loads
+    /// gets a sentinel that can never resolve and readiness burns its whole timeout — three
+    /// runs out of three on a real repository. Knowable before the server starts, like
+    /// <see cref="NoSolution"/>, and both files are named so the reader can see which two.
+    /// </summary>
+    internal static string TwoSolutions(string root, IEnumerable<string> solutions) =>
+        $"two solutions at {root}: {string.Join(", ", solutions.Select(Path.GetFileName))}; "
+        + "cslq reads exactly one, so point --root at a directory holding one solution";
 
     /// <summary>
     /// The C# projects a solution lists. <c>.slnx</c> is XML that nests projects under folder
@@ -933,10 +1071,10 @@ internal static partial class Program
     private static partial Regex SolutionEntry();
 
     /// <summary>
-    /// The fallback when the root has no solution to read. Over-inclusive by construction — it
-    /// cannot know what a project file is excluded from — but never short, which is the error
-    /// worth making: missing a project is the incomplete-answer-at-exit-0 bug that readiness
-    /// exists to close.
+    /// Every <c>.csproj</c> on disk under the root. Not a project list — the solution's is the
+    /// only one of those — but the nesting boundaries, which are a property of the disk: a
+    /// project file the solution excludes is still a directory whose sources belong to it and
+    /// not to the project above it.
     /// </summary>
     private static IEnumerable<string> ScannedProjects(string root) => Directory
         .EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories)
@@ -968,6 +1106,15 @@ internal static partial class Program
         bool Json,
         bool Daemon)
     {
+        /// <summary>
+        /// Whether the caller asked for more than warnings. The level is otherwise handed
+        /// straight to the server, so this is the only place <c>cslq</c> reads it: it is not
+        /// validated here either — an unrecognised level counts as quiet, and the server is
+        /// what rejects it — and the comparison is case-insensitive because the server's own
+        /// enum parse is.
+        /// </summary>
+        public bool Verbose => LogLevel.ToLowerInvariant() is "trace" or "debug" or "information";
+
         public static Options Parse(string[] argv)
         {
             // Here rather than in DispatchAsync's default branch, for the reason the numeric

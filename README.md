@@ -150,7 +150,12 @@ cslq ready --root <dir>
 
 `--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
 that solution lists. A root with no solution at its top is an error, reported in about a second
-rather than after the timeout, and a solution one directory down does not count.
+rather than after the timeout, and a solution one directory down does not count. A checkout
+whose path contains a `%XX` sequence (`.../pct%20x`) never loads at all — MSBuild unescapes it,
+so `dotnet restore` on such a tree fails too — and nothing in `cslq` can fix that: rename or
+move the checkout. Two `.csproj` in one directory are indistinguishable to readiness, since a
+hit under that directory cannot be attributed to one of them; the second is covered only
+incidentally.
 
 ## Use
 
@@ -302,19 +307,35 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 (default 180), `--log-level L`, `--errors-only` (`diag` only), `--json`.
 
 `--json` wraps every command in the same `{ count, truncated, results }` envelope, `ready`
-included — one result carrying `ready` and the number of projects waited for. In text mode
-`ready` still prints the single word `ready`, so a shell test stays a string comparison.
+included — one result carrying `ready`, `projects` (how many projects were actually probed) and
+two arrays naming the ones that were not, as directories relative to `--root` with forward
+slashes, both empty in the ordinary case. `projects + skipped.length + unprobed.length` is every
+project the root's solution yielded, so a partial readiness is visible rather than silent.
+
+- `skipped` — the project's `.csproj` says it compiles nothing of its own, or draws its sources
+  from outside its directory (a `*.projitems` import, `<Compile Include="../Shared/**">`) and
+  owns no `.cs` under it. A hit for such a document sits under the source directory, so nothing
+  can prove that project loaded. Fourteen of CommunityToolkit's twenty-six projects are that
+  shape.
+- `unprobed` — the project owns sources but declares no type the sentinel scan can read: only
+  top-level statements, or only Razor or resources. There is nothing to ask the server for, and
+  failing on it would break those projects outright, so readiness says nothing about them
+  either way. About a dozen of OrchardCore's projects are this.
+
+In text mode `ready` still prints the single word `ready`, so a shell test stays a string
+comparison; at `--log-level Information` it names both classes on stderr.
 
 Paths are relative to `--root`; lines and columns are one-based.
 
-`--sentinel` is an escape hatch, not a neutral override. By default `cslq` waits for *every*
-project under the root to load, one readiness probe per project the root's solution lists — or
-per `.csproj` when the root holds more than one solution, which gives no basis for choosing
-between them. A root holding *no* solution is an error, not a third route into the scan.
-Passing `--sentinel` replaces that whole set with a single probe scoped to the root, which gives
-up the guarantee and restores the window in which `refs`, `impl` and `sym` can answer
-incompletely at exit 0. Use it when the `.csproj` scan cannot read the workspace layout —
-including a root with no `.csproj`, which otherwise fails immediately.
+`--sentinel` *adds* a probe, it does not replace the inferred set. By default `cslq` waits for
+*every* project under the root to load, one readiness probe per project the root's solution
+lists; a root holding no solution, or two of them, is an error rather than a scan. Passing
+`--sentinel` keeps all of those and adds one more probe, scoped to the root, carrying the symbol
+you named. Replacing the set was the earlier behaviour, and it reopened the bug the per-project
+set exists to close: on OrchardCore a `--sentinel` run answered `impl StartupBase` with 321 hits
+against 331, at exit 0. The explicit probe stands alone only where inference finds nothing at
+all — no solution, two solutions, no C# project, no candidate anywhere — which is the layout it
+is the escape hatch for. It is not a project: `ready --json` neither counts nor lists it.
 
 `refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl`, `sym`

@@ -119,11 +119,14 @@ public class ProjectDiscoveryTests
     }
 
     /// <summary>
-    /// Two solutions give no basis for choosing between them, so the scan — over-inclusive but
-    /// never short — answers instead. This is the only thing the scan is still for.
+    /// Two solutions give no basis for choosing between them, and the <c>.csproj</c> scan that
+    /// used to answer instead is over-inclusive: a project neither solution loads gets a
+    /// sentinel that can never resolve, so readiness burned its whole timeout — three runs out
+    /// of three on a real repository. Both files are named, since the fix is to point
+    /// <c>--root</c> at one of them.
     /// </summary>
     [Fact]
-    public void Two_solutions_fall_back_to_the_scan()
+    public void Two_solutions_at_the_root_fail_before_the_server_starts()
     {
         using var ws = new Workspace(solution: false);
         ws.Project("One");
@@ -141,7 +144,11 @@ public class ProjectDiscoveryTests
             </Solution>
             """);
 
-        Assert.Equal(2, Program.InferSentinels(ws.Root).Count);
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
+
+        Assert.Contains("two solutions at", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("First.slnx", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Second.slnx", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -98,8 +98,14 @@ target. A `.csproj`, a `.json` or a path above the root is an error.
 `path:line:col` relative to the workspace root, then the matched line marked `>` with a line of
 context either side. `--max N` caps results (default 50) and `--context N` widens the window.
 `--json` gives `{ count, truncated, results }` for scripting — every command, `ready`
-included, where the one result carries `ready` and the number of projects waited for. Plain
-`cslq ready` still prints the single word `ready`.
+included, where the one result carries `ready`, `projects` (how many projects were actually
+probed) and two arrays naming the rest, as directories relative to `--root`, forward slashes,
+both empty in the ordinary case: `skipped` for a project whose `.csproj` compiles nothing of its
+own or links its sources in from outside its directory, so no query could ever prove it loaded,
+and `unprobed` for one that owns sources but declares no type to probe for. The three add up to
+the projects the root's solution yielded, so **a `ready` that checked only part of the workspace
+says so**. Plain `cslq ready` still prints the single word `ready`, and names both classes on
+stderr at `--log-level Information`.
 
 `outline` is the exception: the path once as a header, then one row per declaration indented by
 nesting, no per-row position and no context.
@@ -153,16 +159,16 @@ as "this implements something".
 --context N         source lines either side of a hit (default 1; inert for outline, sym, hover)
 --timeout N         seconds to wait for the workspace to load (default 180)
 --json              machine-readable output
---sentinel <sym>    escape hatch: probe readiness with this one symbol instead
+--sentinel <sym>    also require this symbol to resolve before answering
 --no-daemon         start a private server instead of sharing the daemon
 ```
 
-Do not reach for `--sentinel` to speed a run up. By default `cslq` waits for every project
-under the root to load, one probe per project the root's solution lists — or per `.csproj` when
-the root holds more than one solution. A root holding none is an error, not a fallback to the
-scan. `--sentinel` replaces that with a single root-scoped probe and drops the guarantee, so
-`refs`, `impl` and `sym` can come back missing a project's hits at exit 0. It is for a
-workspace whose layout the scan cannot read.
+`--sentinel` does not speed a run up. By default `cslq` waits for every project under the root
+to load, one probe per project the root's solution lists; a root holding no solution, or two of
+them, is an error rather than a `.csproj` scan. `--sentinel` adds one more probe, scoped to the
+root, on top of that set — every project still has to load, so the guarantee holds. It stands
+alone only where that inference finds nothing at all, which is the layout it is the escape
+hatch for.
 
 `cslq` shares one background server (the daemon) across invocations, so a warm query costs a
 couple of seconds instead of a full solution load. You do not need to manage it. If a run
@@ -176,11 +182,9 @@ prints `cslq: daemon unreachable`, the answer is still correct — it was just s
    count. This is the most common cause by far, and it announces itself — you will not see it
    as an empty answer.
 2. **A solution at the root is also what scopes readiness.** `cslq` waits for every project the
-   root's `.sln`/`.slnx` lists. A root holding *several* solutions gives no basis for choosing
-   one, so it falls back to scanning for `.csproj` — a root holding *none* is the error in item
-   1, not a fallback. On a repository carrying template or sample projects no solution includes,
-   that scan waits for projects the server never loaded, so point `--root` at the directory
-   holding the one solution you mean.
+   root's `.sln`/`.slnx` lists. A root holding *several* of them gives no basis for choosing
+   one and is an error too, naming both files: point `--root` at a directory holding the one
+   solution you mean.
 3. **Run `dotnet restore` first.** The language server does not restore for you, and anything
    needing resolved references comes back empty rather than erroring.
 4. **A source generator has to be built** before its output exists. If a generated symbol is

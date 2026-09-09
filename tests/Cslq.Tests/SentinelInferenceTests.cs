@@ -154,10 +154,10 @@ public class SentinelInferenceTests
     }
 
     /// <summary>
-    /// Two solutions on purpose: that is the only route to the <c>.csproj</c> scan now, and the
-    /// scan is the only thing the <c>bin</c>/<c>obj</c> filter protects. Read off a solution,
-    /// <c>Only/obj/Nested/Nested.csproj</c> would be excluded by not being listed, which pins
-    /// nothing.
+    /// Build output is neither a source of candidates nor a nesting boundary. The
+    /// <c>obj/Nested/Nested.csproj</c> is the second half: it is on disk, and every
+    /// <c>.csproj</c> on disk is a boundary, so without the filter it would take
+    /// <c>Only/obj</c>'s files away from <c>Only</c>.
     /// </summary>
     [Fact]
     public void Build_output_is_not_scanned()
@@ -168,32 +168,17 @@ public class SentinelInferenceTests
         ws.Write("Only/obj/Debug/Generated.cs", "internal class ObjGhost;");
         ws.Write("Only/bin/Debug/Copied.cs", "internal class BinGhost;");
         ws.Write("Only/obj/Nested/Nested.csproj", "<Project />");
-        ws.Write("First.slnx", "<Solution />");
-        ws.Write("Second.slnx", "<Solution />");
+        ws.Write("Only.slnx", """
+            <Solution>
+              <Project Path="Only/Only.csproj" />
+            </Solution>
+            """);
 
         var sentinels = Program.InferSentinels(ws.Root);
 
-        Assert.Equal(["Real"], Assert.Single(sentinels).Candidates);
-    }
-
-    /// <summary>
-    /// Roslyn loads nothing for a root with no project in it, so every sentinel would be
-    /// unresolvable and every query would answer empty. Waiting out the full timeout only
-    /// delays the same conclusion, so this fails before the server starts.
-    /// </summary>
-    [Fact]
-    public void A_root_with_no_project_fails_immediately()
-    {
-        // Two solutions again: with one, the message names it instead — see
-        // ProjectDiscoveryTests — and with none, the root is rejected before the scan runs.
-        using var ws = new Workspace(solution: false);
-        ws.Write("Loose.cs", "internal class Loose;");
-        ws.Write("First.slnx", "<Solution />");
-        ws.Write("Second.slnx", "<Solution />");
-
-        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
-
-        Assert.Contains("no .csproj", ex.Message, StringComparison.Ordinal);
+        var only = Assert.Single(sentinels);
+        Assert.Equal(["Real"], only.Candidates);
+        Assert.Empty(only.Nested);
     }
 
     [Fact]
@@ -206,5 +191,177 @@ public class SentinelInferenceTests
         var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
 
         Assert.Contains("--sentinel", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The OrchardCore failure the solution read did not fix. Its
+    /// <c>src/Templates/OrchardCore.ProjectTemplates</c> <em>is</em> listed, and the five
+    /// <c>content/*/*.csproj</c> template projects under it are not — so the wrapper's scan
+    /// read types out of <c>dotnet new</c> template text Roslyn never binds, and
+    /// <c>cslq ready</c> burned 900s on candidates that cannot resolve. A nesting boundary is
+    /// therefore any <c>.csproj</c> on disk, listed or not.
+    /// </summary>
+    [Fact]
+    public void A_csproj_the_solution_does_not_list_is_still_a_nesting_boundary()
+    {
+        using var ws = new Workspace();
+        var wrapper = ws.Project("Templates");
+        ws.Write("Templates/Wrapper.cs", "internal class Wrapper;");
+        ws.Write("Templates/content/T/T.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        ws.Write("Templates/content/T/Program.cs", "internal class TemplateGhost;");
+
+        var only = Assert.Single(Program.InferSentinels(ws.Root));
+
+        Assert.Equal(["Wrapper"], only.Candidates);
+        Assert.Equal([Path.Combine(wrapper, "content", "T")], only.Nested);
+    }
+
+    /// <summary>
+    /// The other half of the same failure, and the one that holds even for template content
+    /// carrying no <c>.csproj</c> of its own: <c>EnableDefaultItems=false</c> with no
+    /// <c>&lt;Compile Include&gt;</c> is MSBuild for "this project compiles nothing", which no
+    /// source scan may override.
+    /// </summary>
+    [Fact]
+    public void A_project_that_compiles_nothing_of_its_own_gets_no_candidates()
+    {
+        using var ws = new Workspace();
+        ws.Project("Lib");
+        ws.Write("Lib/Thing.cs", "internal class Thing;");
+        var templates = ws.Project("Templates");
+        ws.Write("Templates/Templates.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <EnableDefaultItems>False</EnableDefaultItems>
+              </PropertyGroup>
+            </Project>
+            """);
+        ws.Write("Templates/content/Program.cs", "internal class TemplateGhost;");
+
+        var sentinel = Program.InferSentinels(ws.Root).Single(s => s.Directory == templates);
+
+        Assert.Empty(sentinel.Candidates);
+        Assert.True(sentinel.Skipped);
+    }
+
+    /// <summary>
+    /// Turning the default glob off and then naming a file of its own is an ordinary project
+    /// with an explicit item list, not one that compiles nothing.
+    /// </summary>
+    [Fact]
+    public void An_explicit_compile_include_of_its_own_file_keeps_a_project_probed()
+    {
+        using var ws = new Workspace();
+        ws.Project("Only");
+        ws.Write("Only/Only.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <EnableDefaultItems>false</EnableDefaultItems>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="src\Real.cs" />
+              </ItemGroup>
+            </Project>
+            """);
+        ws.Write("Only/src/Real.cs", "internal class Real;");
+
+        var only = Assert.Single(Program.InferSentinels(ws.Root));
+
+        Assert.Equal(["Real"], only.Candidates);
+        Assert.False(only.Skipped);
+    }
+
+    /// <summary>
+    /// The CommunityToolkit shape: fourteen of its twenty-six projects import a shared
+    /// <c>.projitems</c> and own no <c>.cs</c> under their own directory. A hit for a linked
+    /// document sits under the <em>source</em> directory, so <c>Sentinel.Accepts</c> can never
+    /// accept it and no candidate could prove the project loaded. It is reported skipped
+    /// rather than counted as probed.
+    /// </summary>
+    [Fact]
+    public void A_project_whose_sources_are_linked_in_is_skipped()
+    {
+        using var ws = new Workspace();
+        ws.Project("Shared");
+        ws.Write("Shared/Thing.cs", "internal class Thing;");
+        var linked = ws.Project("Linked");
+        ws.Write("Linked/Linked.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <Import Project="..\Shared\Shared.projitems" Label="Shared" />
+            </Project>
+            """);
+
+        var sentinel = Program.InferSentinels(ws.Root).Single(s => s.Directory == linked);
+
+        Assert.Empty(sentinel.Candidates);
+        Assert.True(sentinel.Skipped);
+    }
+
+    /// <summary>
+    /// The same import beside a file of its own is not skipped: the project owns a document
+    /// whose location can be scoped, which is all the probe needs.
+    /// </summary>
+    [Fact]
+    public void A_linked_project_with_a_file_of_its_own_is_still_probed()
+    {
+        using var ws = new Workspace();
+        var mixed = ws.Project("Mixed");
+        ws.Write("Mixed/Mixed.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <Import Project="..\Shared\Shared.projitems" Label="Shared" />
+            </Project>
+            """);
+        ws.Write("Mixed/Own.cs", "internal class Own;");
+
+        var only = Assert.Single(Program.InferSentinels(ws.Root));
+
+        Assert.Equal(mixed, only.Directory);
+        Assert.Equal(["Own"], only.Candidates);
+        Assert.False(only.Skipped);
+    }
+
+    /// <summary>
+    /// An explicit <c>--sentinel</c> adds a root-scoped probe to the inferred set rather than
+    /// replacing it. Replacing it put the incomplete-answer bug back through the escape hatch:
+    /// on OrchardCore a <c>--sentinel</c> run answered <c>impl StartupBase</c> with 321 hits
+    /// against 331, at exit 0, because only one project had to have loaded.
+    /// </summary>
+    [Fact]
+    public void An_explicit_sentinel_is_added_to_the_inferred_set()
+    {
+        using var ws = new Workspace();
+        var one = ws.Project("One");
+        var two = ws.Project("Two");
+        ws.Write("One/A.cs", "internal class A;");
+        ws.Write("Two/B.cs", "internal class B;");
+
+        var sentinels = Program.Sentinels(
+            Program.Options.Parse(["ready", "--root", ws.Root, "--sentinel", "Chosen"]));
+
+        Assert.Equal([one, two, Path.GetFullPath(ws.Root)], sentinels.Select(s => s.Directory));
+        var probe = sentinels[^1];
+        Assert.Equal(["Chosen"], probe.Candidates);
+        Assert.Empty(probe.Nested);
+        Assert.True(probe.Explicit);
+        Assert.DoesNotContain(sentinels.Take(sentinels.Count - 1), s => s.Explicit);
+    }
+
+    /// <summary>
+    /// It still stands alone where inference finds nothing, which is the layout it is the
+    /// escape hatch for — a root with no solution is the one every probe row uses.
+    /// </summary>
+    [Fact]
+    public void An_explicit_sentinel_stands_alone_where_inference_finds_nothing()
+    {
+        using var ws = new Workspace(solution: false);
+        ws.Write("Loose.cs", "internal class Loose;");
+
+        var sentinels = Program.Sentinels(
+            Program.Options.Parse(["ready", "--root", ws.Root, "--sentinel", "Chosen"]));
+
+        var only = Assert.Single(sentinels);
+        Assert.Equal(Path.GetFullPath(ws.Root), only.Directory);
+        Assert.Equal(["Chosen"], only.Candidates);
+        Assert.True(only.Explicit);
     }
 }

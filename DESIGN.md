@@ -217,6 +217,26 @@ which is localised display text. The nested exclusion is not a corner case: `Web
 `Web/Tests/` both declaring `Program` is the ordinary shape, and without it Tests loading marks
 Web ready, which is the exact silently-incomplete failure above.
 
+The wait is bounded once, and only on a cold load. When `projectInitializationComplete` fires
+**in this process** — `--no-daemon`, or the first client of a fresh daemon — the still-pending
+sentinels get 20 s more and then the wait fails with the message that names them. Measured on
+the wire: against a cold server `workspace/symbol` answers nothing until that notification and
+then jumps straight to complete, so a candidate unresolved after it is not going to resolve.
+The shape that produces one is a project whose only type declaration sits inside an `#if false`
+branch: the regex reads it, no compilation ever contains it, and the `.csproj` is otherwise
+ordinary, so none of the skip rules above can see it. On a daemon attach the notification fired
+before this process existed and there is nothing to bound from — and that is precisely the case
+where the incomplete-answer window lives — so the full `--timeout` stands there. A `--timeout`
+shorter than the grace still wins.
+
+A root whose path contains a `%XX` sequence never becomes ready, and the cause is outside
+`cslq`. `new Uri(path).AbsoluteUri` escapes a literal `%` to `%25`, so `.../pct%20x` becomes
+`file:///.../pct%2520x` and `PathUri.ToPath` gives the directory back unchanged; the URIs `cslq`
+sends are correct. MSBuild is what unescapes `%XX` in the paths it reads, so the projects never
+load for the server any more than `dotnet restore` on the same tree succeeds — it fails naming
+`pct x`. Verified 2026-09-09 both ways: a `%` not followed by two hex digits (`pct%zzx`) is a
+~4 s `ready`. There is nothing to fix here, only the round-trip to keep pinned.
+
 Two limits are known and deliberate. A project the scan can infer no sentinel for — one that is
 only top-level statements, or only Razor or resources — is **not** waited on: there is nothing
 to ask the server for, and failing on it would break those projects outright. It is named on the
@@ -225,12 +245,30 @@ failure path instead, so its absence from readiness is visible rather than silen
 be attributed to one of them by path — no scan-based scoping can separate them, so the second
 project is covered only incidentally.
 
-Knowing the projects means reading the root's solution, and scanning for `*.csproj` under the
-root when there are several to read and no basis for choosing one — because **the server cannot
-be asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
-project list. A root with no solution at all is neither read nor scanned: it is an error, for
-the reason the next paragraph gives. Either way the answer is an approximation, and the two err
-in opposite directions.
+A third class cannot be probed even in principle, and is reported rather than waited on. A
+project whose sources are linked in from outside its own directory — a `*.projitems` import,
+or `<Compile Include="../Shared/**">` — owns no document whose location can be scoped to it:
+every hit sits under the *source* directory, which `Sentinel.Accepts` rejects for the same
+reason it rejects a nested project's hit. Fourteen of CommunityToolkit's twenty-six projects
+are that shape.
+
+Both unprobed classes are therefore reported, not merely counted: `ready --json`'s `projects` is
+the number actually probed, `skipped` names the linked-only ones and `unprobed` the ones with
+sources but no type declaration, each root-relative with forward slashes, and
+`projects + skipped + unprobed` is every project the solution yielded. Two separate arrays
+rather than one, because the two reasons are not interchangeable — "no sources of their own" is
+a lie about a project that has them — and both are named rather than left out, because a
+project absent from all three would read as loaded when nothing had checked it. That is the
+every-project-loaded guarantee reported as held when it had not been tested, which is exactly
+what `projects: 26` on a workspace with fourteen linked projects used to claim. At
+`--log-level Information` the same two lists go to stderr, which is the only channel text mode
+has.
+
+Knowing the projects means reading the root's solution — because **the server cannot be
+asked**: `workspace/_roslyn_restorableProjects` is a server-to-client request and carries no
+project list. A root with no solution, or with two of them, is an error rather than a
+`*.csproj` scan, for the reasons the next paragraphs give. The solution's list is still an
+approximation of what Roslyn loaded, but it errs the way that is survivable.
 
 The solution is read because **over-inclusion is not merely wasteful, it is fatal:** a `.csproj`
 the solution excludes is never loaded, so its types are never indexed, its sentinel can never
@@ -239,22 +277,42 @@ solution was read: `cslq ready` on OrchardCore v3.0.1 failed on
 `src/Templates/OrchardCore.ProjectTemplates/content/*`, which are `dotnet new` template content
 rather than solution projects, and the only way past it was to point `--root` below them.
 
-Exactly one solution counts, and only at the top of the root. Two give no basis for choosing
-between them; a solution in a subdirectory describes that subtree rather than this root, and
-Roslyn would not open it for this root either. Both fall back to the scan, which errs
-deliberately towards over-inclusion — the opposite mistake is the incomplete-answer bug this
-exists to close. A `.slnf` solution filter is not read. A project the solution lists but that is
-not on disk is dropped: waiting on one is the same unresolvable sentinel by another route. A
-root with no project at all fails immediately instead of timing out, naming the solution when
-there is one, because "no .csproj under <root>" would be a lie about a root whose solution
-simply lists no C# project. A `.slnx` that no longer parses fails the same way rather than as
-an unhandled `XmlException`: `Main` catches `CslqException` and nothing else, so a hand-edited
-solution file would otherwise be answered with a stack trace and exit 127. `--sentinel`
-bypasses all of it.
+Reading the solution is not enough on its own, because **a `.csproj` the solution does not list
+is still a nesting boundary**. `OrchardCore.slnx` lists the wrapper
+`src/Templates/OrchardCore.ProjectTemplates` and excludes only the five `content/*/*.csproj`
+under it, so the wrapper's own candidate scan kept reading types out of `content/**/*.cs` and
+`cslq ready` on the full root still burned 900 s. Both the file filter and `Sentinel.Nested` are
+therefore computed from the `.csproj` files **on disk**, unioned with the discovered list so a
+project the solution places outside the root is still a boundary. That is one of two independent
+fixes for the same failure: the other reads the project's own `.csproj` as text, where
+`EnableDefaultItems=false` with no `<Compile Include>` says the project compiles nothing at all
+— which the wrapper does say — so it contributes no candidate however many `.cs` files sit
+under it. A `.csproj` that does not parse reads as an ordinary project rather than throwing:
+one unparseable file in a tree of a couple of hundred must not take readiness down, and
+guessing "ordinary" costs only the candidates a scan would have found anyway.
 
-`--sentinel` is therefore the weak mode, not a neutral override: it replaces the whole
-per-project set with a single root-scoped probe, giving up the all-projects-loaded guarantee.
-It is the escape hatch for a layout the scan cannot read.
+Exactly one solution counts, and only at the top of the root. Two of them is an error naming
+both files, thrown before the server starts: there is no basis for choosing between them, and
+the `.csproj` scan that used to answer instead is over-inclusive, so a project neither solution
+loads gets a sentinel that can never resolve and readiness burns its whole timeout — three runs
+out of three when testers hit it. A solution in a subdirectory describes that subtree rather
+than this root, and Roslyn would not open it for this root either, so a root holding only that
+is a root with no solution. A `.slnf` solution filter is not read. A project the solution lists
+but that is not on disk is dropped: waiting on one is the same unresolvable sentinel by another
+route. A root whose solution lists no C# project fails immediately instead of timing out,
+naming the solution, because "no .csproj under <root>" would be a lie about a root whose
+projects are sitting right there. A `.slnx` that no longer parses fails the same way rather
+than as an unhandled `XmlException`: `Main` catches `CslqException` and nothing else, so a
+hand-edited solution file would otherwise be answered with a stack trace and exit 127.
+
+`--sentinel` adds a root-scoped probe carrying the named symbol to the inferred set; it does
+not replace it. Replacing it was the earlier design, and it handed the incomplete-answer bug
+back through the escape hatch: testers reaching for `--sentinel` to get past the failure above
+had `impl StartupBase` answer 321 hits against 331, at exit 0. Every project still has to
+resolve, and so does the explicit probe. It stands alone only when inference throws — no
+solution, two solutions, no C# project, no candidate anywhere — which is the layout it is the
+escape hatch for. It is not a project: `ready --json` neither counts nor lists it, and the
+failure path names it `explicit sentinel 'X'`.
 
 Sentinel candidates come from a regex, not a parser, and it matches English prose in doc
 comments: "identifying the class and assembly context" yields the candidate `and`. Comments and

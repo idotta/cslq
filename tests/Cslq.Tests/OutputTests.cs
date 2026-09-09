@@ -335,16 +335,59 @@ public class OutputTests
     [Fact]
     public async Task Ready_honours_the_envelope_under_json_and_stays_one_word_without_it()
     {
-        var json = JsonDocument.Parse(
-            await CaptureAsync(() => { Output.WriteReady(3, json: true); return Task.CompletedTask; })).RootElement;
+        var json = JsonDocument.Parse(await CaptureAsync(() =>
+        {
+            Output.WriteReady(3, [], [], json: true);
+            return Task.CompletedTask;
+        })).RootElement;
 
         Assert.Equal(1, json.GetProperty("count").GetInt32());
         Assert.False(json.GetProperty("truncated").GetBoolean());
         var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
         Assert.True(only.GetProperty("ready").GetBoolean());
         Assert.Equal(3, only.GetProperty("projects").GetInt32());
+        Assert.Empty(only.GetProperty("skipped").EnumerateArray().ToList());
+        Assert.Empty(only.GetProperty("unprobed").EnumerateArray().ToList());
 
-        var text = await CaptureAsync(() => { Output.WriteReady(3, json: false); return Task.CompletedTask; });
+        var text = await CaptureAsync(() =>
+        {
+            Output.WriteReady(3, [], [], json: false);
+            return Task.CompletedTask;
+        });
+        Assert.Equal("ready", text.Trim());
+    }
+
+    /// <summary>
+    /// A project readiness could not probe used to be counted in <c>projects</c> anyway —
+    /// fourteen of CommunityToolkit's twenty-six, and a dozen of OrchardCore's. The count is
+    /// now the probed ones and the other two classes are named separately, so the three add up
+    /// to what the solution yielded and a caller can tell a workspace that was fully checked
+    /// from one that was not. Directories, root-relative with forward slashes, because two
+    /// projects in a tree share a leaf name often enough.
+    /// </summary>
+    [Fact]
+    public async Task Ready_counts_only_probed_projects_and_names_the_rest()
+    {
+        var json = JsonDocument.Parse(await CaptureAsync(() =>
+        {
+            Output.WriteReady(2, ["src/Linked", "tests/Linked.Tests"], ["src/TopLevel"], json: true);
+            return Task.CompletedTask;
+        })).RootElement;
+
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal(2, only.GetProperty("projects").GetInt32());
+        Assert.Equal(
+            ["src/Linked", "tests/Linked.Tests"],
+            only.GetProperty("skipped").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(
+            ["src/TopLevel"],
+            only.GetProperty("unprobed").EnumerateArray().Select(e => e.GetString()));
+
+        var text = await CaptureAsync(() =>
+        {
+            Output.WriteReady(2, ["src/Linked"], [], json: false);
+            return Task.CompletedTask;
+        });
         Assert.Equal("ready", text.Trim());
     }
 

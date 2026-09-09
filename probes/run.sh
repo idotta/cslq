@@ -191,6 +191,10 @@ cp "$greeter" "$greeter_saved"
 # One EXIT hook for the whole run. The rename below has to be undone even on an interrupt --
 # see CLAUDE.md -- and the packaged-tool leg's throwaway tree is cleaned by the same hook.
 install_tmp=""
+# The two-solutions leg's throwaway root, cleaned by the same hook.
+ts_tmp=""
+# Set only while the exhausted-candidate leg below has its two-project tree on disk.
+ec_tmp=""
 # Set only while the restore leg below has the tool resolver cache entry moved aside. Leaving
 # it moved would make every later `dotnet tool run` on this machine re-resolve the pin.
 cache_saved=""
@@ -199,6 +203,8 @@ cleanup() {
   cp "$greeter_saved" "$greeter"
   rm -f "$greeter_saved"
   [ -n "$install_tmp" ] && rm -rf "$install_tmp"
+  [ -n "$ts_tmp" ] && rm -rf "$ts_tmp"
+  [ -n "$ec_tmp" ] && rm -rf "$ec_tmp"
   # The restore writes a fresh entry; the saved one is the developer's, and it covers every
   # manifest on the machine rather than only this repository's.
   if [ -n "$cache_saved" ] && [ -e "$cache_saved" ]; then
@@ -446,6 +452,102 @@ if [ "$ok" = 1 ]; then
   pass=$((pass + 1))
 else
   printf 'FAIL  %s (exit %s after %ss, wanted 1 in well under the timeout)\n'     "no-solution-root-fails-fast" "$rc" "$ns_elapsed"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# Two solutions at the root. Same shape and the same reason as the leg above: it is knowable
+# from the filesystem, and the elapsed bound is half the assertion -- the `.csproj` scan this
+# replaced answered instead, then burned the whole timeout on a project neither solution loads.
+ts_tmp=$(mktemp -d)
+: > "$ts_tmp/a.sln"
+: > "$ts_tmp/b.slnx"
+ts_abs=$( cd "$ts_tmp" && { pwd -W 2>/dev/null || pwd; } )
+
+ts_start=$(date +%s)
+out=$("$CSLQ" ready --root "$ts_abs" --timeout 300 2>&1)
+rc=$?
+ts_elapsed=$(( $(date +%s) - ts_start ))
+
+ok=1
+[ "$rc" = 1 ] || ok=0
+[ "$ts_elapsed" -lt 30 ] || ok=0
+for want in "cslq: two solutions at" "a.sln" "b.slnx" "point --root at a directory holding one solution"; do
+  case "$out" in
+    *"$want"*) ;;
+    *) ok=0 ;;
+  esac
+done
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "two-solutions-root-fails-fast"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 in well under the timeout, naming both files)\n' \
+    "two-solutions-root-fails-fast" "$rc" "$ts_elapsed"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# A candidate that can never resolve, on a cold load. `B`'s only type sits inside an
+# `#if false` branch, which the candidate regex reads and no compilation ever contains -- a
+# shape none of the csproj skip rules can see, because the project is perfectly ordinary. The
+# assertion is as much the elapsed time as the message: before the post-notification bound this
+# held the full `--timeout`, so a scripted leg rather than a `cases.jsonl` row, which can only
+# require a substring and would pass just as well after 150s. `--no-daemon` because the bound
+# only applies when `projectInitializationComplete` fires in this process, which on a daemon
+# attach it does not. Built from a temp tree rather than a fixture copy: a fixture that never
+# becomes ready would have to be excluded from every other leg.
+ec_tmp=$(mktemp -d)
+mkdir -p "$ec_tmp/A" "$ec_tmp/B"
+printf '<Solution>
+  <Project Path="A/A.csproj" />
+  <Project Path="B/B.csproj" />
+</Solution>
+'   > "$ec_tmp/Two.slnx"
+for proj in A B; do
+  printf '<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+'     > "$ec_tmp/$proj/$proj.csproj"
+done
+printf 'namespace A;
+
+public class Real { }
+' > "$ec_tmp/A/Real.cs"
+printf '#if false
+namespace B;
+
+public class Ghost { }
+#endif
+' > "$ec_tmp/B/Ghost.cs"
+# The server does not restore your projects.
+dotnet restore "$ec_tmp/Two.slnx" --nologo -v q > /dev/null 2>&1
+ec_abs=$( cd "$ec_tmp" && { pwd -W 2>/dev/null || pwd; } )
+
+ec_start=$(date +%s)
+out=$("$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
+rc=$?
+ec_elapsed=$(( $(date +%s) - ec_start ))
+rm -rf "$ec_tmp"
+ec_tmp=""
+
+ok=1
+[ "$rc" = 1 ] || ok=0
+[ "$ec_elapsed" -lt 90 ] || ok=0
+for want in "did not become ready" "Ghost" "project(s) B" "projectInitializationComplete fired"; do
+  case "$out" in
+    *"$want"*) ;;
+    *) ok=0 ;;
+  esac
+done
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%ss)\n' "exhausted-candidate-fails-after-load" "$ec_elapsed"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 under 90s naming B and the notification)\n' \
+    "exhausted-candidate-fails-after-load" "$rc" "$ec_elapsed"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
