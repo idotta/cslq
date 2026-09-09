@@ -41,12 +41,11 @@ cslq ready
 Blocks until the workspace has loaded and exits 0. Every other command waits for readiness on
 its own, so this looks optional. It is not, and latency is the smaller half of why.
 
-Run it **unpiped and uncaptured**. `cslq` starts a shared background daemon on first use, and
-the daemon inherits the stdout of whichever invocation launched it — so if that first
-invocation is piped or captured (`cslq refs Foo | head`, `out=$(cslq def Bar)`) the pipe never
-sees its last writer close and the command hangs indefinitely. It reads exactly like a slow
-cold load, so waiting longer does not help. A plain `cslq ready` takes the launch and gets the
-solution load out of the way; every query after it pipes and captures normally.
+`cslq` starts a shared background daemon on first use, and the first command pays the solution
+load for everything after it. Piping and capturing are safe, including on that first command —
+the daemon does not inherit the launching client's stdout. The exception is a shell that is
+itself captured (a PowerShell-hosted harness, whose own stdout is a pipe): there the launching
+command should be an unredirected `cslq ready`, or pass `--no-daemon`.
 
 ## Task → command
 

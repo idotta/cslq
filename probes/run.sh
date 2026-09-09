@@ -76,6 +76,9 @@ dotnet build src/Cslq/Cslq.csproj -c Release --nologo -v q || exit 1
 CSLQ="$root/src/Cslq/bin/Release/net10.0/cslq"
 [ -x "$CSLQ" ] || CSLQ="$CSLQ.exe"
 [ -x "$CSLQ" ] || { echo "cslq not found at $CSLQ" >&2; exit 1; }
+# The same binary as a Windows path, for the legs that hand it to a .NET harness rather
+# than running it from bash.
+CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 
 # Readiness is asserted before any case runs: project load is async and a query fired
 # too early returns empty results, not an error, so a naive probe reports a false pass.
@@ -306,10 +309,9 @@ rm -f "$fb_log"
 # in a never-used server -- would have nothing testing it. The rest of the walk is already
 # covered warm by deliberate-error-diag-workspace.
 cold_log=$(mktemp)
-# --no-daemon, not a private pipe name: a fresh pipe would make this run *launch* a daemon,
-# the daemon inherits stdout, and $(...) then blocks forever waiting for the pipe's last
-# writer. --no-daemon gives a dedicated server that has never seen the document, which is
-# the state under test anyway.
+# --no-daemon, not a private pipe name: it gives a dedicated server that has never seen the
+# document, which is the state under test, and it exits with the client rather than leaving a
+# second daemon holding a warm fixture behind this leg.
 "$CSLQ" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
 rc=$?
 out=$(cat "$cold_log")
@@ -356,9 +358,7 @@ fi
 installed="$install_tmp/bin/cslq"
 [ -x "$installed" ] || installed="$installed.exe"
 if [ "$ok" = 1 ] && [ -x "$installed" ]; then
-  # Redirected, never captured: this attaches to the suite's daemon rather than launching one,
-  # but the rule in CLAUDE.md is blanket -- the daemon inherits stdout and $(...) then waits
-  # forever for the pipe's last writer.
+  # Redirected to a log rather than captured, so the output survives for printing on failure.
   ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 ) \
     > "$install_tmp/ready.log" 2>&1
   rc=$?
@@ -381,10 +381,35 @@ else
   fail=$((fail + 1))
 fi
 
+# The daemon under a harness that captures stdout -- Windows only, and unpinnable from bash:
+# `> file` here hands cslq a real file handle and bash waits for exit, not EOF, so the leak
+# this leg is about is invisible from the shell running the suite. probes/stdout-capture.cs is
+# the harness instead, a .NET process with RedirectStandardOutput, on its own pipe.
+#
+# Redirected to a file and cat'd, never $(...): the bash capture pipe would leak through the
+# app into the daemon exactly the way the bug does, and the leg would hang for the reason it
+# is testing.
+if pwd -W >/dev/null 2>&1; then
+  log "captured stdout"
+  sc_log=$(mktemp)
+  dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
+  rc=$?
+  out=$(cat "$sc_log")
+  rm -f "$sc_log"
+  if [ "$rc" = 0 ]; then
+    printf 'PASS  %s\n' "daemon-survives-captured-stdout"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (exit %s)\n' "daemon-survives-captured-stdout" "$rc"
+    printf '%s\n' "$out" | sed 's/^/      | /'
+    fail=$((fail + 1))
+  fi
+fi
+
 # The three first-run failures a user who is not this repository hits, two of which are
-# checkable without a server. Both capture with $(...), which is only safe because neither
-# reaches a daemon: one fails in the filesystem scan before LspClient.StartAsync, the other
-# fails at Process.Start.
+# checkable without a server. Both are scripted legs rather than cases.jsonl rows because
+# the message alone proves nothing: what each one asserts is that the failure is immediate,
+# so the elapsed time has to be checked too.
 #
 # A root with no solution. --autoLoadProjects does not discover a bare .csproj, so this used
 # to load nothing, answer empty and exit 1 only after the whole timeout. The elapsed check is
@@ -471,8 +496,7 @@ cache_entry="${DOTNET_CLI_HOME:-$HOME}/.dotnet/toolResolverCache/1/roslyn-langua
 
 rs_log=$(mktemp)
 rs_start=$(date +%s)
-# Redirected rather than captured, like every other invocation here. `restore` reaches no daemon
-# at all, but the rule in CLAUDE.md is blanket.
+# Redirected to a log rather than captured, so the output survives for printing on failure.
 "$CSLQ" restore > "$rs_log" 2>&1
 rc=$?
 rs_elapsed=$(( $(date +%s) - rs_start ))

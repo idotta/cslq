@@ -381,20 +381,30 @@ takes its configuration from whoever launched it; and the thin client falls back
 cold server without failing if it cannot reach the daemon, so `cslq` watches its stderr for that
 and says `cslq: daemon unreachable` rather than leaving you to infer it from the latency.
 
-A third consequence is a trap rather than a cost, and it catches the **first** `cslq` command
-in a shell. The daemon inherits the stdout of whichever invocation launched it, so if that
-invocation is piped or captured — `cslq refs Foo | head`, `out=$(cslq def Bar)` — the pipe
-never sees its last writer close and the command hangs indefinitely instead of returning. It
-reads exactly like a slow cold load, so waiting it out does not help. Only that one invocation
-is exposed: once the daemon is up it owns its own stdout, and everything after it pipes and
-captures normally. Take the launch with a plain unredirected `cslq ready`, or redirect to a
-file and read that, or pass `--no-daemon`, whose private server exits with the client.
+The daemon used to inherit the stdout of whichever invocation launched it, so a piped or
+captured launch — `cslq refs Foo | head`, `out=$(cslq def Bar)`, any agent harness that
+captures every command — blocked for the whole keepalive and then returned with the daemon
+already dead, which under the 900 s default read as a hang. `cslq` now clears the
+inherit flag on its own std handles before it launches anything, so piping and capturing are
+safe from the first command: measured on the fixture with a 20 s keepalive, the launching
+`out=$(cslq ready --root fixture)` went from 25 s to 4 s, and the daemon survives it.
+
+One case is left, and it is not `cslq`'s to fix: if you launch `cslq` from a process that
+itself holds an inheritable capture pipe — a .NET `Process.Start` with
+`RedirectStandardOutput`, whose *own* stdout is a pipe — that pipe is inherited into `cslq` as
+an ordinary handle and travels on into the daemon. The concrete instance is a PowerShell-hosted
+harness: measured with a 10 s keepalive, bash `out=$(cslq ready)` returns in 4 s but
+`out=$(pwsh -c '$x = & cslq ready; $x')` takes 18 s, which is what an agent whose shell tool is
+PowerShell — Claude Code on Windows, Actions `shell: pwsh` — sees. Redirect the intermediary to
+a file rather than capturing it, take the launching call as an unredirected `cslq ready`, or
+pass `--no-daemon`, whose private server exits with the client.
 
 `probes/run.sh` scopes itself to its own daemon with
 `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` and a short keepalive, so the gate cannot inherit a
-stale workspace and its opening `cslq ready` is still a real cold load. That opening `ready` is
-also the one leg the script leaves uncaptured, for the reason above; every case after it is
-captured with `$(...)` and none of them blocks.
+stale workspace and its opening `cslq ready` is still a real cold load. Its
+`daemon-survives-captured-stdout` leg, Windows only, is what holds the paragraph above:
+`probes/stdout-capture.cs` starts `cslq ready` under `RedirectStandardOutput` and asserts it
+returns well inside the keepalive with the daemon still listening.
 
 ## The pin
 
