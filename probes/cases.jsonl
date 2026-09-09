@@ -73,7 +73,8 @@
 {"name":"project-json","args":"project Core/Greeter.cs --root fixture --json","exit":"0","expect":"'count': 1|'path': 'Core/Greeter.cs'|'project': 'Core/Core.csproj'|'tfm': 'net10.0'"}
 {"name":"project-non-project-file-fails","args":"project Ambient/Stray.cs --root fixture","exit":"1","expect":"no project"}
 {"name":"project-missing-file-fails","args":"project Core/Missing.cs --root fixture","exit":"1","expect":"cslq: no such file: Core/Missing.cs"}
-{"name":"ready-json-honours-the-envelope","args":"ready --root fixture --json","exit":"0","expect":"'count': 1|'truncated': false|'ready': true|'projects': 3"}
+{"name":"ready-json-honours-the-envelope","args":"ready --root fixture --json","exit":"0","expect":"'count': 1|'truncated': false|'ready': true|'projects': 3|'skipped': []|'unprobed': []"}
+{"name":"ready-with-explicit-sentinel-still-probes-every-project","args":"ready --root fixture --sentinel Greeter --json","exit":"0","expect":"'ready': true|'projects': 3"}
 {"name":"ambiguity-honours-max","args":"def Area --root fixture --max 1","exit":"1","expect":"is ambiguous; qualify it further|... 2 more (use --max 3 to see all)"}
 {"name":"generated-ambiguity-honours-max","args":"outline Stamp --root fixture2 --max 1","exit":"1","expect":"declared in several documents|... 1 more (use --max 2 to see all)"}
 {"name":"restore-json-honours-the-envelope","args":"restore --json","exit":"0","expect":"'count': 1|'truncated': false|'restored': true|'manifest'"}

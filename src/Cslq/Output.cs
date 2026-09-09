@@ -540,8 +540,19 @@ internal static class Output
     /// which broke the envelope on the one command every session runs first. Text mode still
     /// prints <c>ready</c> and nothing else — it is the cheapest possible thing for a shell to
     /// test — so this is the only command whose two modes carry different information.
+    /// <para>
+    /// <paramref name="projects"/> is the probed count, not the discovered one, and the two
+    /// lists account for the difference: <c>projects + skipped + unprobed</c> is every project
+    /// the root's solution yielded. A project absent from all three would read as loaded when
+    /// nothing had checked it, which is the whole failure the per-project sentinel exists to
+    /// close.
+    /// </para>
     /// </summary>
-    public static void WriteReady(int projects, bool json)
+    public static void WriteReady(
+        int projects,
+        IReadOnlyList<string> skipped,
+        IReadOnlyList<string> unprobed,
+        bool json)
     {
         if (!json)
         {
@@ -554,7 +565,7 @@ internal static class Output
             {
                 count = 1,
                 truncated = false,
-                results = new[] { new { ready = true, projects } },
+                results = new[] { new { ready = true, projects, skipped, unprobed } },
             },
             JsonOut));
     }

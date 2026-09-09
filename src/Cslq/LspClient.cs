@@ -19,6 +19,14 @@ internal sealed class LspClient : IAsyncDisposable
 
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How long <see cref="WaitReadyAsync"/> keeps asking after this process saw
+    /// <c>projectInitializationComplete</c>. Generous against the one thing that could still
+    /// be in flight — the indexer catching up on a large solution — and short against the
+    /// case it exists for, a candidate that can never resolve holding the full timeout.
+    /// </summary>
+    private static readonly TimeSpan PostLoadGrace = TimeSpan.FromSeconds(20);
+
     private const int HandleFlagInherit = 0x1;
 
     public string Root { get; }
@@ -350,13 +358,29 @@ internal sealed class LspClient : IAsyncDisposable
     /// than silent. <c>Program.InferSentinels</c> guarantees at least one project does
     /// contribute, so this never degrades to waiting for nothing at all.
     /// </para>
+    /// <para>
+    /// The wait is bounded to <see cref="PostLoadGrace"/> past
+    /// <c>projectInitializationComplete</c>, but only when that notification arrived <em>in
+    /// this process</em> — which is what <c>ProjectInitialized.IsCompleted</c> means, since
+    /// nothing but our own notification handler ever completes that task. The two cases
+    /// differ because of the wire behaviour above: on a cold load the server answers nothing
+    /// until the notification and then jumps straight to complete, so a candidate still
+    /// unresolved after it is never going to resolve — a project whose only type the regex
+    /// read out of an <c>#if false</c> branch is the shape that does this, and it should fail
+    /// in seconds rather than hold the whole <c>--timeout</c>. On a daemon attach the
+    /// notification fired before this process existed and there is nothing to bound from;
+    /// that is also the case where the incomplete-answer window lives, so the full timeout is
+    /// exactly what is wanted there. A <c>--timeout</c> shorter than the grace still wins.
+    /// </para>
     /// </summary>
     public async Task WaitReadyAsync(
         IReadOnlyList<Sentinel> sentinels, TimeSpan timeout, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
         var pending = sentinels.Where(s => s.Candidates.Count > 0).ToList();
-        var unprobed = sentinels.Where(s => s.Candidates.Count == 0).ToList();
+        var unprobed = sentinels.Where(s => s.Candidates.Count == 0 && !s.Skipped).ToList();
+        var linked = sentinels.Where(s => s.Skipped).ToList();
+        DateTime? loaded = null;
 
         while (true)
         {
@@ -365,7 +389,11 @@ internal sealed class LspClient : IAsyncDisposable
             var resolved = await Task.WhenAll(pending.Select(s => ResolvesAsync(s, ct)));
             pending = [.. pending.Where((_, i) => !resolved[i])];
             if (pending.Count == 0) return;
-            if (DateTime.UtcNow >= deadline) break;
+            if (_endpoints.ProjectInitialized.IsCompleted) loaded ??= DateTime.UtcNow;
+            var bound = loaded is null || deadline < loaded.Value + PostLoadGrace
+                ? deadline
+                : loaded.Value + PostLoadGrace;
+            if (DateTime.UtcNow >= bound) break;
             await Task.Delay(250, ct);
         }
 
@@ -373,9 +401,13 @@ internal sealed class LspClient : IAsyncDisposable
         var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
         // Projects nothing probed are named too: readiness says nothing about them either way,
         // and leaving them out is the same quiet degradation the per-project set exists to end.
-        var skipped = unprobed.Count == 0
-            ? string.Empty
-            : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.";
+        var skipped = string.Concat(
+            unprobed.Count == 0
+                ? string.Empty
+                : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.",
+            linked.Count == 0
+                ? string.Empty
+                : $" Not probed at all, having no sources of their own: {Names(linked)}.");
         throw new CslqException(
             $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
             $"returned no symbols for project(s) {Names(pending)} " +
@@ -399,10 +431,17 @@ internal sealed class LspClient : IAsyncDisposable
         return false;
     }
 
+    /// <summary>
+    /// A project is named by its directory; the probe an explicit <c>--sentinel</c> adds is not
+    /// a project and is named as what it is, since its directory is the root and would read as
+    /// a project called after the repository.
+    /// </summary>
     private static string Names(IEnumerable<Sentinel> sentinels) => string.Join(
         ", ",
-        sentinels.Select(s => Path.GetFileName(s.Directory.TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
+        sentinels.Select(s => s.Explicit
+            ? $"explicit sentinel '{string.Join("' / '", s.Candidates)}'"
+            : Path.GetFileName(s.Directory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
 
     public async Task<IReadOnlyList<SymbolInformation>> SymbolsAsync(string query, CancellationToken ct)
     {
@@ -928,8 +967,21 @@ internal sealed class LspClient : IAsyncDisposable
 /// candidate type names to look for, in the order they were found, and the directories of
 /// projects nested inside this one, which a hit must <em>not</em> sit under.
 /// </summary>
+/// <param name="Skipped">
+/// Whether this project cannot be probed at all, as against merely having contributed no
+/// candidate. A project whose sources are linked in from outside its directory — a
+/// <c>*.projitems</c> import, a <c>&lt;Compile Include="../Shared/**"&gt;</c> — owns no
+/// document whose location <see cref="Accepts"/> could ever accept, so no candidate could
+/// prove it loaded even in principle. Fourteen of CommunityToolkit's twenty-six projects are
+/// that shape, and before this they were counted in <c>ready --json</c>'s <c>projects</c> as
+/// if they had been probed.
+/// </param>
 internal sealed record Sentinel(
-    string Directory, IReadOnlyList<string> Candidates, IReadOnlyList<string> Nested)
+    string Directory,
+    IReadOnlyList<string> Candidates,
+    IReadOnlyList<string> Nested,
+    bool Skipped = false,
+    bool Explicit = false)
 {
     /// <summary>
     /// Whether a sentinel hit proves <em>this</em> project loaded. Inside the directory and

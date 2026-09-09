@@ -366,11 +366,12 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       in, on top of the feed's own first line. And `InferSentinels` rejects a root with no
       `.sln`/`.slnx` at its top before `LspClient.StartAsync` is reached — 1 s instead of the
       whole timeout — saying that `cslq` loads the projects the root's solution lists, so
-      `--root` must be the directory holding it. The `.csproj` scan is now reachable only for
-      a root holding more than one solution, which `ProjectDirectories` says in as many words;
-      `Workspace` in the test suite grew an auto-written solution because a solutionless temp
-      tree is no longer a valid workspace, and the two tests that still need the scan write
-      two solutions on purpose. Probe legs `no-solution-root-fails-fast` (which asserts the
+      `--root` must be the directory holding it. A root holding *two* solutions is rejected the
+      same way, also before the server starts, so the `.csproj` scan is no longer a project
+      list at all: it survives only as the nesting-boundary source, which is a property of the
+      disk rather than of any solution. `Workspace` in the test suite grew an auto-written
+      solution because a solutionless temp tree is no longer a valid workspace, and the tests
+      that write two solutions on purpose assert that error. Probe legs `no-solution-root-fails-fast` (which asserts the
       elapsed time, not just the message) and `dotnet-off-path-reports`; the case
       `no-project-root-reports` became `no-solution-root-reports`.
 - [x] **README install section, and stop the docs disagreeing.** README had no
@@ -610,9 +611,19 @@ against 5.12.0-1.26426.8 / win-x64.
   the `.csproj` scan's over-inclusion is fatal there, not merely wasteful. Scoped below the
   templates, `cslq ready` on `src/OrchardCore` resolves all 101 projects in ~83 s.
   Verified 2026-09-06 against 5.12.0-1.26426.8. **Superseded as the workaround:**
-  `ProjectDirectories` now reads the root's solution when there is exactly one, and
-  `OrchardCore.slnx` excludes precisely those template projects, so `--root` no longer has to
-  be pointed below them.
+  `ProjectDirectories` now reads the root's solution when there is exactly one, and a nesting
+  boundary is any `.csproj` on disk, so `--root` no longer has to be pointed below the
+  templates. Reading the solution was not enough on its own, and this is the correction of an
+  earlier claim here that it excluded "precisely those template projects": `OrchardCore.slnx`
+  **lists** the wrapper `src/Templates/OrchardCore.ProjectTemplates` and excludes only the five
+  `content/*/*.csproj` beneath it, so the wrapper was still scanned and still took its
+  candidates out of `content/**/*.cs` -- template text Roslyn never binds. Computing the
+  boundary off the disk rather than off the discovered list fixes it, and reading
+  `EnableDefaultItems=false` out of the wrapper's own `.csproj` fixes it a second way: a
+  project that compiles nothing of its own is reported as skipped rather than probed. Measured
+  2026-09-09 against the same server: `cslq ready --root <OrchardCore> --timeout 600 --json`
+  resolves in ~165 s with `projects: 214`, that one wrapper in `skipped` and twelve projects
+  that declare no type in `unprobed` -- 227 discovered project directories, all accounted for.
 - **Project discovery reads the root's solution; the `.csproj` scan is now the fallback.**
   Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list; more than one
   falls back to the recursive scan, and **none is now an error** rather than a third route into
@@ -632,7 +643,7 @@ against 5.12.0-1.26426.8 / win-x64.
   (Core) -- exact, prefix, substring, with the exact match's project coming second in document
   order, so neither project order nor declaration order explains it. Identical across two runs.
   This is what made `sym`'s truncate-before-sort meaningful. The order did not hold on three
-  real corpora (T-23) — the answer arrived grouped per project and per target framework, with
+  real corpora — the answer arrived grouped per project and per target framework, with
   generated copies first — so `sym` no longer relies on it and ranks client-side before the cut.
   Verified 2026-09-05 against 5.12.0-1.26426.8.
 - `textDocument/implementation` answers `Location[]`, with zero-width ranges at the

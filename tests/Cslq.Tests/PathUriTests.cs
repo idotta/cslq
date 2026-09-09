@@ -351,4 +351,27 @@ public class PathUriTests
 
         Assert.Equal(path, PathUri.ToPath(PathUri.FromPath(path)));
     }
+
+    /// <summary>
+    /// A percent sign in a directory name is the case where a URI helper could plausibly read
+    /// an escape it should have written: <c>pct%20x</c> decoded once too often is <c>pct x</c>,
+    /// a directory that does not exist. It does not happen — <see cref="Uri"/> escapes the
+    /// literal <c>%</c> to <c>%25</c>, so the URI carries <c>pct%2520x</c> and the path comes
+    /// back intact — and this pins that, because such a root really does fail to load and the
+    /// cause is MSBuild's own <c>%XX</c> unescaping, nowhere near here.
+    /// </summary>
+    [Theory]
+    [InlineData("pct%20x")]
+    [InlineData("100%")]
+    public void A_percent_in_a_path_survives_the_uri_round_trip(string directory)
+    {
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "repo", directory));
+        var path = Path.Combine(root, "Core", "Greeter.cs");
+
+        var uri = PathUri.FromPath(path);
+
+        Assert.Equal(path, PathUri.ToPath(uri));
+        Assert.Equal("Core/Greeter.cs", PathUri.Relative(root, PathUri.ToPath(uri)));
+        Assert.True(PathUri.IsUnder(root, PathUri.ToPath(uri)));
+    }
 }
