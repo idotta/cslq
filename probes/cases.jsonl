@@ -42,7 +42,13 @@
 {"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"cslq: --max needs an integer"}
 {"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"cslq: line is one-based: 0"}
 {"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"cslq: line out of range"}
+{"name":"line-past-eof-fails","args":"refs App/Program.cs:99:1 --root fixture","exit":"1","expect":"line out of range: 99 (App/Program.cs has 13 lines)"}
+{"name":"empty-file-line-out-of-range","args":"outline Ambient/Empty.cs:2:1 --root fixture","exit":"1","expect":"line out of range: 2 (Ambient/Empty.cs has 0 lines)"}
 {"name":"malformed-position-reports","args":"refs Core/Greeter.cs:+1:2 --root fixture","exit":"1","expect":"is not a position: expected file:line:col"}
+{"name":"non-csharp-diag-target-reports","args":"diag App/App.csproj --root fixture","exit":"1","expect":"cslq: App/App.csproj is not a C# document"}
+{"name":"non-csharp-project-target-reports","args":"project App/App.csproj --root fixture","exit":"1","expect":"cslq: App/App.csproj is not a C# document"}
+{"name":"project-directory-reports","args":"project App --root fixture","exit":"1","expect":"cslq: project needs a file, not a directory: App"}
+{"name":"outside-root-diag-target-reports","args":"diag ../README.md --root fixture","exit":"1","expect":"cslq: ../README.md is outside --root"}
 {"name":"non-project-file-not-indexed","args":"sym Stray --root fixture","exit":"1","expect":"no results"}
 {"name":"non-project-file-outlines","args":"outline Ambient/Stray.cs --root fixture","exit":"0","expect":"public sealed class Stray"}
 {"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}

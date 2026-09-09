@@ -376,7 +376,7 @@ internal sealed class LspClient : IAsyncDisposable
 
     public async Task<IReadOnlyList<SymbolInformation>> SymbolsAsync(string query, CancellationToken ct)
     {
-        var result = await _rpc.InvokeWithParameterObjectAsync<SymbolInformation[]?>(
+        var result = await RequestAsync<SymbolInformation[]?>(
             "workspace/symbol", new WorkspaceSymbolParams(query), ct);
         return result ?? [];
     }
@@ -385,7 +385,7 @@ internal sealed class LspClient : IAsyncDisposable
     {
         await OpenAsync(uri, ct);
         return await SettleAsync(async () =>
-            await _rpc.InvokeWithParameterObjectAsync<Location[]?>(
+            await RequestAsync<Location[]?>(
                 "textDocument/references",
                 new ReferenceParams(new TextDocumentIdentifier(uri), position, new ReferenceContext(true)),
                 ct) ?? [], ct);
@@ -401,7 +401,7 @@ internal sealed class LspClient : IAsyncDisposable
     {
         await OpenAsync(uri, ct);
         return await SettleAsync(async () =>
-            await _rpc.InvokeWithParameterObjectAsync<Location[]?>(
+            await RequestAsync<Location[]?>(
                 "textDocument/definition",
                 new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
                 ct) ?? [], ct);
@@ -419,7 +419,7 @@ internal sealed class LspClient : IAsyncDisposable
     {
         await OpenAsync(uri, ct);
         return await SettleAsync(async () =>
-            await _rpc.InvokeWithParameterObjectAsync<Location[]?>(
+            await RequestAsync<Location[]?>(
                 "textDocument/implementation",
                 new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
                 ct) ?? [], ct);
@@ -511,7 +511,7 @@ internal sealed class LspClient : IAsyncDisposable
     public async Task<Hover?> HoverAsync(string uri, Position position, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await _rpc.InvokeWithParameterObjectAsync<Hover?>(
+        return await RequestAsync<Hover?>(
             "textDocument/hover",
             new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
             ct);
@@ -520,7 +520,7 @@ internal sealed class LspClient : IAsyncDisposable
     public async Task<IReadOnlyList<DocumentSymbol>> DocumentSymbolsAsync(string uri, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var result = await _rpc.InvokeWithParameterObjectAsync<DocumentSymbol[]?>(
+        var result = await RequestAsync<DocumentSymbol[]?>(
             "textDocument/documentSymbol",
             new DocumentSymbolParams(new TextDocumentIdentifier(uri)),
             ct);
@@ -545,7 +545,7 @@ internal sealed class LspClient : IAsyncDisposable
     public async Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string uri, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var report = await _rpc.InvokeWithParameterObjectAsync<DocumentDiagnosticReport?>(
+        var report = await RequestAsync<DocumentDiagnosticReport?>(
             "textDocument/diagnostic",
             new DocumentDiagnosticParams(new TextDocumentIdentifier(uri)),
             ct);
@@ -561,7 +561,7 @@ internal sealed class LspClient : IAsyncDisposable
     {
         if (PathUri.IsGenerated(uri) || !_open.Add(uri)) return;
         var text = await File.ReadAllTextAsync(PathUri.ToPath(uri), ct);
-        await _rpc.NotifyWithParameterObjectAsync(
+        await NotifyAsync(
             "textDocument/didOpen",
             new DidOpenTextDocumentParams(new TextDocumentItem(uri, "csharp", 1, text)));
     }
@@ -578,7 +578,7 @@ internal sealed class LspClient : IAsyncDisposable
         string[] lines;
         if (PathUri.IsGenerated(uri))
         {
-            var content = await _rpc.InvokeWithParameterObjectAsync<TextDocumentContentResult?>(
+            var content = await RequestAsync<TextDocumentContentResult?>(
                 "workspace/textDocumentContent", new TextDocumentContentParams(uri), ct);
             // Trailing newline dropped so a generated document splits the way
             // File.ReadAllLines would, instead of printing a phantom blank context row.
@@ -664,6 +664,12 @@ internal sealed class LspClient : IAsyncDisposable
             // extension answers RemoteMethodNotFoundException, which is a sibling of the
             // latter, not a subclass -- catching the narrower type would turn a coarser label
             // into a crash. The generator-only label is a correct if coarser answer.
+            //
+            // The one call that deliberately bypasses RequestAsync, for that reason: this is
+            // an optional VS extension the server need not implement, so a failure here is a
+            // label to soften rather than a command to fail. Every other request wants the
+            // wrapper's CslqException, which this catch would swallow into a silent (null,
+            // null) project.
         }
 
         _projects[uri] = project;
@@ -720,6 +726,67 @@ internal sealed class LspClient : IAsyncDisposable
         "Falling back to non-daemon mode",
         "non-daemon fallback mode",
     ];
+
+    /// <summary>
+    /// Every post-initialize request goes through here. <c>Main</c> catches
+    /// <see cref="CslqException"/> and <see cref="OperationCanceledException"/> and nothing
+    /// else, so a bare <c>_rpc.Invoke</c> turns a server-side rejection or a daemon that died
+    /// mid-request into a stack trace and exit 127. <c>initialize</c> keeps its own wrapping
+    /// in <see cref="StartCoreAsync"/> — it has a different message and its own disposal — and
+    /// <see cref="ProjectContextAsync"/> is the one deliberate bypass; see the catch there.
+    /// </summary>
+    private async Task<T?> RequestAsync<T>(string method, object? @params, CancellationToken ct)
+    {
+        try
+        {
+            return await _rpc.InvokeWithParameterObjectAsync<T?>(method, @params, ct);
+        }
+        catch (Exception ex) when (Describe(method, ex, PipeName) is { } message)
+        {
+            throw new CslqException(message + (ex is ConnectionLostException ? StderrTail() : string.Empty));
+        }
+    }
+
+    /// <summary>
+    /// The notification twin. A notification is never answered, so it cannot be rejected —
+    /// but it is still a write to the connection, and a daemon that has gone away fails it
+    /// with the same <see cref="ConnectionLostException"/> a request would.
+    /// </summary>
+    private async Task NotifyAsync(string method, object? @params)
+    {
+        try
+        {
+            await _rpc.NotifyWithParameterObjectAsync(method, @params);
+        }
+        catch (Exception ex) when (Describe(method, ex, PipeName) is { } message)
+        {
+            throw new CslqException(message + (ex is ConnectionLostException ? StderrTail() : string.Empty));
+        }
+    }
+
+    /// <summary>
+    /// The message for a failed request, or null for an exception that must escape untouched
+    /// — a cancellation above all, since Ctrl+C is exit 130 and wrapping it as a
+    /// <see cref="CslqException"/> would report it as exit 1. Pure, so the wording is
+    /// testable without a live connection.
+    /// </summary>
+    internal static string? Describe(string method, Exception ex, string? pipe) => ex switch
+    {
+        ConnectionLostException => $"the language server connection was lost during {method}" +
+            (pipe is null ? string.Empty : $" (daemon pipe '{pipe}')") +
+            "; rerun to relaunch it.",
+        RemoteRpcException => $"{method} failed: {ex.Message}",
+        _ => null,
+    };
+
+    /// <summary>
+    /// The daemon pipe this run is talking over, for the connection-lost message, or null
+    /// when there is no daemon to name — <c>--no-daemon</c>, a run that fell back to its own
+    /// server, or a default pipe name only the thin client knows.
+    /// </summary>
+    private string? PipeName => Dedicated
+        ? null
+        : Environment.GetEnvironmentVariable("ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME");
 
     public string StderrTail(int lines = 12)
     {
