@@ -44,8 +44,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   not recognise straight through to the server, so a renamed flag produces no error at all. The
   probes are the only thing that catches it.
 - **Roslyn's `containerName` is localised display text** (`in Greeter (project Core (net10.0))`),
-  not a namespace path. A dotted symbol target can only narrow by enclosing type.
+  not a namespace path, and nothing may match against it.
   `DOTNET_CLI_UI_LANGUAGE=en` is pinned on the server so it does not vary by machine locale.
+- **`hover` cannot verify a dotted target, and the reason is invisible on a type.** Its first
+  line is fully qualified for types only — `class Fixture.Core.Greeter` — while a member prints
+  the minimal form, `string Greeter.Greet(string name)` and `int Volume.Litres { get; }`.
+  Measured on the fixture 2026-09-09. So the obvious cheap check (one `hover` per candidate,
+  compare its first line) passes every type test you would write and silently cannot see a
+  member's namespace, which is the case that was wrong. `Targets` reads the chain off
+  `textDocument/documentSymbol` instead, where the namespace node's name is already dotted.
 - **Never gate readiness on the symbol being queried.** An absent symbol then looks identical to
   a workspace that has not loaded, and the caller waits out the whole timeout for a typo.
 - **A query fired before load returns empty, not an error.** Never `sleep`; wait for

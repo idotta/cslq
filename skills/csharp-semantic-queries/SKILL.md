@@ -69,10 +69,14 @@ A text search cannot tell a call from a comment, and it cannot see a caller in a
 
 `refs`, `def`, `impl`, `hover` and `outline` take either form:
 
-- **A symbol:** `Greet`, `Greeter.Greet`, `Fixture.Core.Greeter.Greet`. Only the last two
-  segments are matched — the enclosing type and the member — because Roslyn returns the
-  container as localised display text, not a namespace path. An ambiguous target exits 1 and
-  lists the candidates with their locations.
+- **A symbol:** `Greet`, `Greeter.Greet`, `Fixture.Core.Greeter.Greet`. Every segment is
+  matched, namespaces included, against the declaring document's syntax tree; the segments must
+  be a contiguous suffix of the declaration path, so `Fixture.Greeter.Greet` with the
+  `Core` missing selects nothing. A bare name selects the type when the only other candidates
+  are its own constructors — `Widget.Widget` selects those. An ambiguous target exits 1 and
+  lists the candidates as `sym` rows — `kind  name  container  path:line:col`, capped by
+  `--max` — so a row can be pasted straight back as a `file:line:col` target. A target that
+  matches nothing lists the near misses the same way, under `candidates:`.
 - **A position:** `App/Program.cs:9:35`, relative to the workspace root, **one-based** line and
   column, and columns are UTF-16 code units. Paste a position straight out of any `cslq` result.
 

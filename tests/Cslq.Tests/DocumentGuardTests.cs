@@ -24,7 +24,7 @@ public class DocumentGuardTests
             Program.CheckDocument(workspace.Root, target));
     }
 
-    /// <summary>Razor answers in file mode, which is why it is not `.cs` alone — see T-50.</summary>
+    /// <summary>Razor answers in file mode, which is why it is not `.cs` alone.</summary>
     [Theory]
     [InlineData("Core/Core.csproj")]
     [InlineData("Core/Legacy.vb")]
