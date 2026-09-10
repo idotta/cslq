@@ -158,10 +158,20 @@ as "this implements something".
 --max N             cap results (default 50)
 --context N         source lines either side of a hit (default 1; inert for outline, sym, hover)
 --timeout N         seconds to wait for the workspace to load (default 180)
+--tfm T             answer in this target framework's context only
 --json              machine-readable output
 --sentinel <sym>    also require this symbol to resolve before answering
 --no-daemon         start a private server instead of sharing the daemon
 ```
+
+`--tfm T` is for multi-targeted projects. A file in a `net10.0;net9.0` project is compiled
+twice with different preprocessor symbols, so a type inside `#if NET9_0` exists in one context
+and not the other. `hover`, `def` and `project` handle that themselves — they ask every context
+in a fixed order, answer from the first that answers, and print
+`answered in net9.0 of 2 contexts: net10.0, net9.0` (`tfm` and `contexts` under `--json`) — so
+you only need `--tfm` to ask a *specific* framework, which is the question "does net9.0 see
+this". `project` lists every context, one row each. `refs`, `impl`, `diag` and `outline` do not
+choose a context yet: on a multi-targeted document their answer is one unlabelled view.
 
 `--sentinel` does not speed a run up. By default `cslq` waits for every project under the root
 to load, one probe per project the root's solution lists; a root holding no solution, or two of

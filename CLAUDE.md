@@ -132,6 +132,35 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   assembly may emit the same `hintName` — and every rendering path has to go
   through it — the two ambiguity listings in `Program` did not, and printed the same string
   twice under "pick one".
+- **A positional request on a multi-targeted document is answered in one context, and
+  `_vs_defaultIndex` is not the one to blame.** Measured 2026-09-10 on `fixture2/Multi`
+  (`net10.0;net9.0`): `_vs_defaultIndex` was `0` in 6 of 6 runs while the *order* of the
+  `_vs_getProjectContexts` array varied per attach, and the unqualified answer followed
+  `contexts[0]` in 6 of 6. So `hover Only9` answered 4 times in 8 and `project` alternated
+  `net10.0`/`net9.0` — one bug, not two. The fix is `_vs_projectContext` in the
+  `TextDocumentIdentifier` (36 of 36 forced right, 12 of 12 forced wrong answered empty), and
+  it comes with three traps:
+  - **The `_vs_id` must go back verbatim and in the same attach.** Roslyn matches on it alone,
+    and the projectId guid inside it is regenerated on every attach, so a dump-then-use across
+    two processes sends a stale id. `LspClient.ContextsAsync` caches per document per attach
+    for exactly that reason.
+  - **A fixed context alone is a worse bug than the coin flip.** A type inside `#if NET9_0`
+    does not exist in the `net10.0` context, so pinning the first context turns 4 misses in 8
+    into 8 in 8. `AskEachAsync` asks the contexts in `Contexts.Order`'s order and stops at the
+    first that answers; deleting the retry to "make it deterministic" is the regression this
+    bullet exists to prevent.
+  - **A server that stops honouring the field fails silently.** An unrecognised member of a
+    request payload is ignored — unlike `_vs_getProjectContexts`, which answers or fails — so
+    the symptom is T-27's intermittency returning, an answer that is right most of the time.
+    `tfm-excludes-the-other-branch` is the only guard: it asserts `hover Only10 --tfm net9.0`
+    finds **nothing**, which can only hold if the context was honoured. It is an absence, so
+    do not "fix" it into an assertion about output.
+  `refs`, `impl`, `diag` and `outline` still answer from one unlabelled context (T-28, T-29,
+  batch 7 round 3). `fixture2/Multi` is the fixture: `Both` in both contexts, `Only10`/`Only9`
+  one branch each, and a CS0029 in `TfmError.cs` that exists only in `net9.0`. Nothing builds
+  it, so `dotnet build fixture2/Fixture2.slnx` fails by design — `run.sh` builds `Alpha` and
+  `Beta` alone, and readiness is unaffected because `workspace/symbol` is context-independent
+  (it listed both conditional declarations in 8 of 8 runs).
 - **`fixture2/` is the two-consumers-of-one-generator shape, and it cannot live in
   `fixture/`.** `App` references `Core`, so a second copy of the generated type collides at
   the use site with CS0433. `fixture2/Alpha` and `fixture2/Beta` reference nothing of each

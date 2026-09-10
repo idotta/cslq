@@ -144,6 +144,59 @@ and `def` at `Console.WriteLine` went 12.5 s to 2.5 s. A workspace that declares
 The stale case cannot be reproduced by a probe — that is what the measurement says — so only the
 pure halves of the discriminator are pinned, by `PathUriTests`.
 
+**A multi-targeted document has several project contexts, and every one of them is a different
+answer.** `net10.0;net9.0` means Roslyn compiles the file twice, with different preprocessor
+symbols, so a type inside `#if NET9_0` exists in one context and not the other. Positional and
+document requests are answered in **one** context, and the client is what picks it.
+
+The contexts come from `textDocument/_vs_getProjectContexts`, one per `(.csproj, TFM)` pair, and
+`cslq` orders them itself — `.csproj` path, then TFM, both ordinal. **Never the order the
+server sent and never `_vs_defaultIndex`.** Measured 2026-09-10 on `fixture2/Multi` against
+5.12.0-1.26426.8: `_vs_defaultIndex` was `0` in 6 of 6 runs while the array order around it
+varied per attach, and the unqualified answer followed `contexts[0]` in 6 of 6 — which is the
+whole of T-26 (`project` naming a different TFM each run) and T-27 (`hover`/`def` on a
+conditional type answering 4 times in 8). The index carries no information; the load order it
+reflects is not ours to control; an order of our own is the only thing that makes an answer
+repeatable.
+
+The chosen context rides on the request as `_vs_projectContext` inside the
+`TextDocumentIdentifier`, carrying the `_vs_id` **verbatim** — Roslyn matches on that alone, and
+the projectId guid inside it is regenerated on every attach, so the fetch and the use have to
+happen in one process. With it, 36 of 36 forced requests answered from the context asked for,
+including 24 whose `contexts[0]` was the other TFM, and 12 of 12 forced at the *wrong* context
+answered empty. Both directions are the measurement: the field decides the answer.
+
+**Determinism alone would be a regression, and this is the part worth remembering.** A symbol
+inside `#if NET9_0` does not exist in the `net10.0` context, so a fixed first context turns a
+coin flip into a *guaranteed* miss for every symbol living in the other branch — `hover Only9`
+would go from 4 misses in 8 to 8 in 8. So a context-bound request asks the contexts **in
+order, stopping at the first that answers**, and reports the one that did. Every context
+answering empty returns the first context's answer, so "nothing" is one determinate answer
+rather than whichever context was tried last.
+
+`--tfm <name>` restricts the set to the matching contexts — plural, because a file linked into
+two projects can be compiled for one framework twice — and a framework the document has no
+context for is an error naming the ones it has. It is what answers "does net9.0 build" without
+reading a `net10.0` view, and the escape hatch if a later server stops honouring
+`_vs_projectContext`.
+
+`project` prints **one row per context**, in that same order, with `count` equal to the number
+of contexts: it exists to tell an agent whether it has to reason about `#if` branches at all,
+and one row with `count: 1` said the file had a single home. An answer from a document with
+more than one context carries the context it came from — a trailing
+`answered in net9.0 of 2 contexts: net10.0, net9.0` in text, `tfm` and `contexts` on the
+`--json` envelope — and an empty one says how many were tried. A single-context document says
+nothing, which is every document in an ordinary repository: a note on every answer would train
+a caller to skip it.
+
+**Nothing but a pinned deterministic answer can catch a server that drops
+`_vs_projectContext`.** `_vs_getProjectContexts` either answers or fails, and the failure is
+handled; an unrecognised *member of a request payload* is silently ignored, and the symptom is
+the intermittency of T-27 coming back — an answer that is right most of the time. So
+`tfm-excludes-the-other-branch` in `cases.jsonl` asserts that `hover Only10 --tfm net9.0` finds
+**nothing**: it can only pass if the server honoured the context it was handed. Keep it, and
+keep it as an absence.
+
 ## Targeting a symbol by name
 
 A dotted target is verified against the **syntax tree**, one

@@ -60,7 +60,8 @@ internal static class Output
         int max,
         int context,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var labelled = new List<Hit>(locations.Count);
         foreach (var location in locations)
@@ -109,7 +110,7 @@ internal static class Output
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = hits.Count, truncated = hits.Count > shown.Count, results = payload },
+                Envelope(hits.Count, hits.Count > shown.Count, payload, note),
                 JsonOut));
             return;
         }
@@ -117,6 +118,7 @@ internal static class Output
         if (shown.Count == 0)
         {
             Console.WriteLine("no results");
+            WriteContextNote(note, empty: true);
             return;
         }
 
@@ -143,6 +145,50 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {hits.Count - shown.Count} more (use --max {hits.Count} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
+    }
+
+    /// <summary>
+    /// The <c>{ count, truncated, results }</c> envelope, plus the two keys a context-bound
+    /// answer adds: <c>tfm</c> is the context that answered and <c>contexts</c> how many the
+    /// document has, so a caller can see at a glance whether the answer was one view of
+    /// several and re-ask with <c>--tfm</c>. Both are absent for the commands that do not
+    /// choose a context, rather than present and meaningless.
+    /// </summary>
+    private static object Envelope(int count, bool truncated, object results, ContextNote? note) =>
+        note is null
+            ? new { count, truncated, results }
+            : new
+            {
+                count,
+                truncated,
+                tfm = note.Answered?.Tfm,
+                contexts = note.All.Count,
+                results,
+            };
+
+    /// <summary>
+    /// The line that says which project context answered, last and after a blank line like the
+    /// truncation footer. Only for a document with more than one context: a single-context
+    /// answer is the ordinary case and a note on every one of them would train a caller to
+    /// skip it. The <c>N of M</c> shape covers the three cases — answered in one, tried them
+    /// all and found nothing, tried the <c>--tfm</c> subset and found nothing — and names
+    /// every context either way, because the useful next move is asking a different one.
+    /// </summary>
+    private static void WriteContextNote(ContextNote? note, bool empty)
+    {
+        if (note is null || note.All.Count < 2) return;
+
+        var all = Contexts.Names(note.All);
+        var tried = note.Asked.Count == note.All.Count
+            ? $"all {note.All.Count}"
+            : $"{Contexts.Names(note.Asked)} of {note.All.Count}";
+
+        Console.WriteLine();
+        Console.WriteLine(empty
+            ? $"tried {tried} contexts: {all}"
+            : $"answered in {Contexts.Label(note.All, note.Answered!)} of {note.All.Count} contexts: {all}");
     }
 
     /// <summary>
@@ -459,7 +505,8 @@ internal static class Output
         Hover? hover,
         int max,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var value = hover?.Contents?.Value;
         var (signature, documentation) = HoverText(value);
@@ -490,7 +537,7 @@ internal static class Output
                 ];
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = results.Count, truncated = kept.Count < lines.Length, results },
+                Envelope(results.Count, kept.Count < lines.Length, results, note),
                 JsonOut));
             return;
         }
@@ -498,6 +545,7 @@ internal static class Output
         if (value is null)
         {
             Console.WriteLine("no results");
+            WriteContextNote(note, empty: true);
             return;
         }
 
@@ -510,6 +558,8 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {lines.Length - kept.Count} more (use --max {lines.Length} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
     }
 
     /// <summary>
@@ -631,34 +681,55 @@ internal static class Output
     /// <c>metadata</c> for the same reason every other row does: a caller never has to parse
     /// a label to know what kind of place it names.
     /// </summary>
-    public static void WriteProject(string root, string path, string? project, string? tfm, bool json)
+    /// <summary>
+    /// One row per project context, in <see cref="Contexts.Order"/>'s order, because a
+    /// multi-targeted document is compiled several times and <c>count: 1</c> claimed
+    /// otherwise. <c>--max</c> applies for the same reason the envelope carries
+    /// <c>truncated</c>; a linked file in a 16-context solution is the shape that needs it.
+    /// </summary>
+    public static void WriteProject(
+        string root, string path, IReadOnlyList<DocumentContext> contexts, int max, bool json)
     {
-        var display = project is null ? null : PathUri.Display(root, PathUri.FromPath(project));
+        var display = PathUri.Display(root, PathUri.FromPath(path));
+        var rows = contexts
+            .Select(c => (Project: PathUri.Display(root, PathUri.FromPath(c.File)), c.Tfm))
+            .ToList();
+        var shown = rows.Take(max).ToList();
 
         if (json)
         {
-            List<object> results = display is null
-                ? []
-                :
-                [
-                    new
-                    {
-                        path = PathUri.Display(root, PathUri.FromPath(path)),
-                        project = display,
-                        tfm,
-                        generated = false,
-                        metadata = false,
-                    },
-                ];
+            var results = shown
+                .Select(r => new
+                {
+                    path = display,
+                    project = r.Project,
+                    tfm = r.Tfm,
+                    generated = false,
+                    metadata = false,
+                })
+                .ToList();
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = results.Count, truncated = false, results },
+                new { count = rows.Count, truncated = rows.Count > shown.Count, results },
                 JsonOut));
             return;
         }
 
-        Console.WriteLine(display is null
-            ? "no project"
-            : tfm is null ? display : $"{display}  {tfm}");
+        if (shown.Count == 0)
+        {
+            Console.WriteLine("no project");
+            return;
+        }
+
+        foreach (var row in shown)
+        {
+            Console.WriteLine(row.Tfm is null ? row.Project : $"{row.Project}  {row.Tfm}");
+        }
+
+        if (rows.Count > shown.Count)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"... {rows.Count - shown.Count} more (use --max {rows.Count} to see all)");
+        }
     }
 
     private static int Count(IReadOnlyList<DocumentSymbol> symbols) =>

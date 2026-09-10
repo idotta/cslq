@@ -27,7 +27,25 @@ internal sealed record Range(Position Start, Position End);
 
 internal sealed record Location(string Uri, Range Range);
 
-internal sealed record TextDocumentIdentifier(string Uri);
+// _vs_projectContext is VS's own extension to the identifier, and it is what makes a
+// positional request on a multi-targeted document repeatable: without it Roslyn answers
+// from whichever context sorted first that attach. Null on every single-context request, so
+// the wire shape is unchanged there -- JsonIgnoreCondition.WhenWritingNull drops it.
+internal sealed record TextDocumentIdentifier(string Uri)
+{
+    [JsonPropertyName("_vs_projectContext")]
+    public VsProjectContext? ProjectContext { get; init; }
+}
+
+// The context to answer in, sent back with the _vs_id exactly as received: Roslyn matches on
+// that alone, the label being display text like _vs_label everywhere else. The server neither
+// advertises the field nor requires a client capability for it, and -- unlike
+// _vs_getProjectContexts, which answers or fails -- an unrecognised member of a request
+// payload is silently ignored, so nothing but a pinned deterministic answer can tell whether
+// it is still honoured. Measured against 5.12.0-1.26426.8 on 2026-09-10.
+internal sealed record VsProjectContext(
+    [property: JsonPropertyName("_vs_id")] string Id,
+    [property: JsonPropertyName("_vs_label")] string Label);
 
 internal sealed record TextDocumentItem(string Uri, string LanguageId, int Version, string Text);
 
@@ -86,6 +104,11 @@ internal sealed record TextDocumentContentResult(string Text);
 internal sealed record ProjectContextParams(
     [property: JsonPropertyName("_vs_textDocument")] TextDocumentIdentifier TextDocument);
 
+// _vs_defaultIndex is deserialised and deliberately not used: measured 0 in 6 of 6 runs on a
+// two-context document while the array order around it varied per attach, so it says nothing
+// about which context to prefer. It stays on the record because it is part of the shape the
+// server sends, and the next reader needs to see that ignoring it was a measurement rather
+// than an oversight. Contexts.Order is what picks instead.
 internal sealed record ProjectContextList(
     [property: JsonPropertyName("_vs_projectContexts")] ProjectContext[]? Contexts,
     [property: JsonPropertyName("_vs_defaultIndex")] int DefaultIndex);

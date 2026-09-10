@@ -88,3 +88,13 @@
 {"name":"nested-type-segments-verified","args":"def Outer.Inner.Depth --root fixture --json","exit":"0","expect":"'count': 1|'line': 36|'column': 20"}
 {"name":"shadowed-nested-member-ambiguous","args":"def Inner.Depth --root fixture","exit":"1","expect":"is ambiguous; qualify it further|property  Depth|Core/Widget.cs:36:20|Core/Widget.cs:44:20"}
 {"name":"candidate-listing-honours-max","args":"def Widg --root fixture --max 1","exit":"1","expect":"no symbol matched|candidates:|class  Widget|Core/Widget.cs:11:21|... 3 more (use --max 4 to see all)"}
+{"name":"multi-tfm-project-lists-every-context","args":"project Multi/Conditional.cs --root fixture2","exit":"0","expect":"Multi/Multi.csproj  net10.0|Multi/Multi.csproj  net9.0"}
+{"name":"multi-tfm-project-json-counts-contexts","args":"project Multi/Conditional.cs --root fixture2 --json","exit":"0","expect":"'count': 2|'tfm': 'net10.0'|'tfm': 'net9.0'"}
+{"name":"hover-in-the-first-context-names-it","args":"hover Only10 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:4:21|class Fixture2.Multi.Only10|answered in net10.0 of 2 contexts: net10.0, net9.0"}
+{"name":"hover-retries-the-other-context","args":"hover Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|class Fixture2.Multi.Only9|answered in net9.0 of 2 contexts: net10.0, net9.0"}
+{"name":"hover-context-json-carries-the-tfm","args":"hover Only9 --root fixture2 --json","exit":"0","expect":"'tfm': 'net9.0'|'contexts': 2|'signature': 'class Fixture2.Multi.Only9'"}
+{"name":"def-in-the-first-context-names-it","args":"def Only10 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:4:21|public sealed class Only10|answered in net10.0 of 2 contexts"}
+{"name":"def-retries-the-other-context","args":"def Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|public sealed class Only9|answered in net9.0 of 2 contexts"}
+{"name":"tfm-restricts-the-context-asked","args":"hover Only9 --root fixture2 --tfm net9.0","exit":"0","expect":"Multi/Conditional.cs:11:21|class Fixture2.Multi.Only9"}
+{"name":"tfm-excludes-the-other-branch","args":"hover Only10 --root fixture2 --tfm net9.0","exit":"1","expect":"no results|tried net9.0 of 2 contexts: net10.0, net9.0"}
+{"name":"tfm-with-no-such-context-reports","args":"project Multi/Conditional.cs --root fixture2 --tfm net8.0","exit":"1","expect":"cslq: no context for --tfm net8.0: Multi/Conditional.cs has net10.0, net9.0"}

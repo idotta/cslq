@@ -162,13 +162,13 @@ incidentally.
 ```
 cslq ready                                    # block until the workspace has loaded
 cslq refs <symbol | file:line:col> [--max N]  # every reference, with context
-cslq def <symbol | file:line:col>             # where it is declared
+cslq def <symbol | file:line:col> [--tfm T]   # where it is declared
 cslq impl <symbol | file:line:col>            # what implements or overrides it
-cslq hover <symbol | file:line:col>           # what it is: type, signature, docs
+cslq hover <symbol | file:line:col> [--tfm T] # what it is: type, signature, docs
 cslq sym <query> [--max N]                    # search the workspace by name
 cslq outline <file | symbol> [--max N]        # the declarations in one document
 cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
-cslq project <file>                           # which .csproj compiles it, for which TFM
+cslq project <file> [--tfm T]                 # every .csproj + TFM that compiles it
 cslq restore                                  # fetch the pinned language server, then exit
 ```
 
@@ -304,7 +304,14 @@ registration means.
 
 Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (default 50),
 `--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
-(default 180), `--log-level L`, `--errors-only` (`diag` only), `--json`.
+(default 180), `--log-level L`, `--errors-only` (`diag` only), `--tfm T`, `--json`.
+
+`--tfm T` answers in one target framework's context. A file in a `net10.0;net9.0` project is
+compiled twice, so a type inside `#if NET9_0` exists in one context and not the other, and
+`hover`, `def` and `project` would otherwise answer for whichever context Roslyn happened to
+bind the document to. They now ask every context in a fixed order and report which one
+answered; `--tfm` narrows that to one, which is what "does net9.0 build" needs. A framework the
+document has no context for is an error naming the ones it has.
 
 `--json` wraps every command in the same `{ count, truncated, results }` envelope, `ready`
 included — one result carrying `ready`, `projects` (how many projects were actually probed) and
