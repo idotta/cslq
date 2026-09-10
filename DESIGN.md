@@ -60,8 +60,20 @@ near-useless to a model.
   timeouts, ambiguity and unresolved targets were plain text whatever was asked for. `--json`
   is read off `argv` rather than off the parsed options, because half the failures are thrown
   by the parse itself. Exit codes keep the meanings they had; only the channel and the `--json`
-  coverage move. The one message still outside the rule is the no-argument usage text, on
-  stdout at exit 2 — that is T-66–T-68's item, not this one's.
+  coverage move.
+- **The usage text is inside the rule too, and exit 2 is what it means.** A usage error — no
+  command, an unknown command or option, a missing or invalid option value, an argument the
+  command does not take — is the `cslq: ` line followed by the usage block on **stderr**, at
+  exit **2**, with `{ "error": "<the same line>" }` on stdout under `--json` like every other
+  failure. The usage block stays out of the JSON: it is thirty lines of prose for a human
+  reading the log, and folding it in would make one JSON string of them. The two usage
+  failures used to disagree — no arguments printed usage on *stdout* at exit 2, an unknown
+  command printed it on stderr at exit 1 — and exit 2 was documented nowhere. It now says one
+  thing: the command line is what has to change, not the workspace. Exit 1 keeps everything
+  the parser understood and the query then failed on, `no such directory` and a malformed
+  position included. `UsageException` carries the distinction, so which exit code a check
+  produces is visible at the `throw` rather than at the catch. `--help` and `--version` are
+  answers rather than errors and stay exit 0 on stdout.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.

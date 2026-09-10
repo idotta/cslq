@@ -72,4 +72,13 @@ internal static class ServerArgs
     }
 }
 
-internal sealed class CslqException(string message) : Exception(message);
+internal class CslqException(string message) : Exception(message);
+
+/// <summary>
+/// The invocation itself could not be understood — an unknown command or option, an option
+/// with no value or a value outside the set it names, an argument the command does not take.
+/// Exit 2 rather than 1, and the usage block follows the message on stderr: the caller has to
+/// fix the command line, not the workspace. Everything the parser understands and the query
+/// then fails on is an ordinary <see cref="CslqException"/> at exit 1.
+/// </summary>
+internal sealed class UsageException(string message) : CslqException(message);

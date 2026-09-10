@@ -513,6 +513,13 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
 - `probes/run.sh` parses `cases.jsonl` with `sed` alone. **No `jq`** — it does not exist in Git
   Bash on the dev machine. (`python` does, 3.14.6, despite what this file used to claim; the
   `sed`-only rule still stands for the GitHub runner.) Keep `cases.jsonl` to four flat string fields.
+- **An `expect` string cannot contain an apostrophe.** `run.sh` rewrites every `'` in the field
+  to `"` before matching — that is how a `cases.jsonl` row asks for JSON like `'count': 2` — so
+  an expectation quoting a symbol the way `cslq` does, `got 'Greet'`, is compared against
+  `got "Greet"` and can never match. It cost a gate run: two new exit-2 rows went red while the
+  program printed exactly the right line. Write the expectation around the quotes instead —
+  `cslq: ready takes no argument; got ` and `(did you mean --sentinel Greet?)` as two
+  substrings — rather than trying to escape one.
 - **A backslash immediately before `$` in a double-quoted bash string escapes the dollar.**
   `"Global\${pipe}.client"` yields a literal `${pipe}`, not the expansion; `\\` is what
   produces the intended `Global\<pipe>.client`. It cost a probe run:

@@ -27,13 +27,25 @@ internal static partial class Program
           --max N           cap results (default: 50)
           --context N       source lines either side of a hit (default: 1; unused by outline, sym, hover)
           --timeout N       seconds to wait for workspace load (default: 180)
-          --log-level L     server log level (default: Warning)
+          --log-level L     server log level: Trace, Debug, Information, Warning (default),
+                            Error, Critical, None. A daemon someone else started keeps the
+                            level it was launched with, so this is a no-op against one.
           --tfm T           answer in this target framework's context only
+                            (refs, def, impl, hover, outline, diag, project)
           --errors-only     diag: drop warnings and below
           --json            machine-readable output
           --no-daemon       start a dedicated server instead of the shared daemon
           --version         print the cslq version
           -h, --help        this message
+
+        Options may appear anywhere, before or after the command and its argument.
+
+        exit codes:
+          0    the query was answered
+          1    the query failed: no results, no such symbol, the workspace never loaded
+          2    the invocation could not be understood; this message goes to stderr
+          127  an unhandled internal failure
+          130  interrupted
         """;
 
     internal static readonly string[] Commands =
@@ -44,11 +56,33 @@ internal static partial class Program
     // position-shaped.
     private static readonly string[] TakesPosition = ["refs", "def", "impl", "hover", "outline"];
 
+    // `diag`'s path and `project`'s file are optional and required respectively; these two
+    // are the commands that take no positional at all.
+    private static readonly string[] NoArgument = ["ready", "restore"];
+
+    // Everything that resolves a document and can therefore be answered in one project
+    // context. `sym` goes through `workspace/symbol`, which is context-independent, and
+    // `ready` and `restore` name no document at all.
+    internal static readonly string[] TakesTfm =
+        ["refs", "def", "impl", "hover", "outline", "diag", "project"];
+
     private static async Task<int> Main(string[] argv)
     {
         try
         {
             return await RunAsync(argv);
+        }
+        catch (UsageException ex)
+        {
+            // The usage block rides on stderr behind the same `cslq: ` line every other
+            // failure gets, and exit 2 says the command line is what has to change. Under
+            // `--json` the error object on stdout carries the message alone: the usage text
+            // is for a human reading the log, and folding it into the object would make one
+            // JSON string out of thirty lines.
+            Output.WriteError(ex.Message, WantsJson(argv));
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(Usage);
+            return 2;
         }
         catch (CslqException ex)
         {
@@ -116,7 +150,10 @@ internal static partial class Program
     {
         switch (Preflight(argv))
         {
-            case Immediate.Usage: Console.WriteLine(Usage); return 2;
+            // No command at all is a usage error like any other, so it takes the same route:
+            // the line and the usage block on stderr, exit 2. It used to be the one message
+            // printed on stdout at a non-zero exit.
+            case Immediate.Usage: throw new UsageException("no command given");
             case Immediate.Help: Console.WriteLine(Usage); return 0;
             case Immediate.Version: Console.WriteLine(Build.Version); return 0;
         }
@@ -1227,14 +1264,7 @@ internal static partial class Program
 
         public static Options Parse(string[] argv)
         {
-            // Here rather than in DispatchAsync's default branch, for the reason the numeric
-            // checks are here: everything between the two starts a server and scans the
-            // workspace, so a typo would be answered by whatever failed first. It was —
-            // `cslq bogus --root <dir with no .csproj>` reported the missing project.
-            string command = argv[0] is var c && Commands.Contains(c)
-                ? c
-                : throw new CslqException($"unknown command '{argv[0]}'\n\n{Usage}");
-            string? argument = null;
+            var positional = new List<string>();
             var root = Directory.GetCurrentDirectory();
             string? sentinel = null;
             var max = Output.DefaultMax;
@@ -1246,7 +1276,12 @@ internal static partial class Program
             var daemon = true;
             string? tfm = null;
 
-            for (var i = 1; i < argv.Length; i++)
+            // Options are extracted wherever they appear and the positionals are what is left,
+            // so `cslq --root . --timeout 600 def ContentItem` works like every other dotnet
+            // CLI. It is unambiguous rather than a guess: the option set is closed and every
+            // member is either a flag or takes exactly one value, so the scan knows at each
+            // index whether the next token is a value or a positional.
+            for (var i = 0; i < argv.Length; i++)
             {
                 switch (argv[i])
                 {
@@ -1258,17 +1293,47 @@ internal static partial class Program
                     // proves a query fired before load fails loudly rather than answering
                     // empty. Only a negative one is rejected.
                     case "--timeout": timeout = TimeSpan.FromSeconds(Int(argv, ref i, 0)); break;
-                    case "--log-level": logLevel = Next(argv, ref i); break;
+                    case "--log-level": logLevel = Level(argv, ref i); break;
                     case "--tfm": tfm = Next(argv, ref i); break;
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
                     case "--no-daemon": daemon = false; break;
                     default:
-                        if (argv[i].StartsWith('-')) throw new CslqException($"unknown option '{argv[i]}'");
-                        if (argument is not null) throw new CslqException($"unexpected argument '{argv[i]}'");
-                        argument = argv[i];
+                        if (argv[i].StartsWith('-')) throw new UsageException($"unknown option '{argv[i]}'");
+                        positional.Add(argv[i]);
                         break;
                 }
+            }
+
+            // Here rather than in DispatchAsync's default branch, for the reason the numeric
+            // checks are here: everything between the two starts a server and scans the
+            // workspace, so a typo would be answered by whatever failed first. It was —
+            // `cslq bogus --root <dir with no .csproj>` reported the missing project.
+            if (positional.Count == 0) throw new UsageException("no command given");
+            var command = positional[0];
+            if (!Commands.Contains(command)) throw new UsageException($"unknown command '{command}'");
+
+            var argument = positional.Count > 1 ? positional[1] : null;
+            if (positional.Count > 2) throw new UsageException($"unexpected argument '{positional[2]}'");
+
+            // A command that takes no argument used to differ by command: `restore` rejected
+            // one and `ready` ignored it, so `ready Greet` — an agent that meant
+            // `--sentinel Greet` — reported a workspace nothing had probed for it, at exit 0.
+            if (argument is not null && NoArgument.Contains(command))
+            {
+                throw new UsageException(command == "ready"
+                    ? $"ready takes no argument; got '{argument}' (did you mean --sentinel {argument}?)"
+                    : $"{command} takes no argument; got '{argument}'");
+            }
+
+            // `workspace/symbol` is context-independent and `ready` and `restore` resolve no
+            // document at all, so there is no project context for `--tfm` to choose: accepted
+            // there it filtered nothing, and the caller read an unfiltered answer as filtered.
+            if (tfm is not null && !TakesTfm.Contains(command))
+            {
+                throw new UsageException(
+                    $"--tfm does not apply to {command}; it is honoured by " +
+                    string.Join(", ", TakesTfm));
             }
 
             if (!Directory.Exists(root)) throw new CslqException($"no such directory: {root}");
@@ -1278,12 +1343,6 @@ internal static partial class Program
             // argument error. Only for the commands that accept a position: `sym Foo:1` is a
             // legitimate query and `diag nope:x` a path, and validating those rejected both.
             if (argument is not null && TakesPosition.Contains(command)) ValidatePosition(argument);
-
-            // `restore` names nothing: the manifest it restores is the one packed beside the
-            // running binary, found by walking up from it, and a path here would read as if
-            // it could be pointed somewhere else.
-            if (command == "restore" && argument is not null)
-                throw new CslqException($"restore takes no argument; got '{argument}'");
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
@@ -1302,8 +1361,32 @@ internal static partial class Program
         {
             var name = argv[i];
             if (++i >= argv.Length || string.IsNullOrWhiteSpace(argv[i]))
-                throw new CslqException($"option '{name}' needs a value");
+                throw new UsageException($"option '{name}' needs a value");
             return argv[i];
+        }
+
+        /// <summary>
+        /// The seven names the server's own <c>--logLevel</c> takes. Validated here because
+        /// the flag is forwarded rather than read: under <c>--no-daemon</c> a bad one came
+        /// back as the server's <c>Cannot parse argument 'bogus'</c>, and against a running
+        /// daemon it was accepted and did nothing at all — a daemon keeps the level whoever
+        /// launched it asked for. Case-insensitive, matching the server's own enum parse, and
+        /// the value is forwarded as written.
+        /// </summary>
+        internal static readonly string[] LogLevels =
+            ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"];
+
+        private static string Level(string[] argv, ref int i)
+        {
+            var name = argv[i];
+            var value = Next(argv, ref i);
+            if (!LogLevels.Contains(value, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new UsageException(
+                    $"unknown {name} '{value}'; expected one of " + string.Join(", ", LogLevels));
+            }
+
+            return value;
         }
 
         private static int Int(string[] argv, ref int i, int floor)
@@ -1315,12 +1398,12 @@ internal static partial class Program
                 // Overflow is not garbage: `--max 99999999999` is a number, just not one that
                 // fits, and "needs an integer" reads as a lie about the input.
                 var magnitude = text.StartsWith('-') ? text[1..] : text;
-                throw new CslqException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
+                throw new UsageException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
                     ? $"{name} out of range: {text}"
                     : $"{name} needs an integer");
             }
 
-            if (value < floor) throw new CslqException($"{name} needs to be {floor} or more");
+            if (value < floor) throw new UsageException($"{name} needs to be {floor} or more");
             return value;
         }
     }

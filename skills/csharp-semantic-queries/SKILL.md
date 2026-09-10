@@ -138,7 +138,9 @@ which is the only thing separating two documents one generator emitted into two 
 |---|---|
 | 0 | The query was answered. For `diag` this includes a clean file — no diagnostics is a successful query |
 | 1 | The lookup failed: no such symbol, an ambiguous symbol, no references, no definition, no such file, or the workspace never loaded |
-| 2 | No arguments |
+| 2 | The invocation could not be understood: no command, an unknown command or option, a missing or invalid option value, an argument the command does not take. The message and the usage block go to stderr |
+| 127 | An unhandled internal failure |
+| 130 | Interrupted |
 
 `refs`, `def`, `impl`, `sym` and `hover` exit 1 on an empty result, because an empty answer
 means the target was not what you thought. `project` exits 1 with `no project` for a `.cs` file
@@ -170,7 +172,21 @@ as "this implements something".
 --json              machine-readable output
 --sentinel <sym>    also require this symbol to resolve before answering
 --no-daemon         start a private server instead of sharing the daemon
+--log-level L       server log level: Trace, Debug, Information, Warning (default),
+                    Error, Critical, None
 ```
+
+Options go anywhere — before the command, between it and its argument, or after both — so
+`cslq --root . --timeout 600 def ContentItem` is the same invocation as
+`cslq def ContentItem --root . --timeout 600`. An unknown one is exit 2, not a silent pass.
+
+`--log-level` is checked against those seven names before anything starts, but it cannot
+change a daemon that is already running: the daemon keeps the level whoever launched it asked
+for, so raising it means `--no-daemon` or a daemon that has expired.
+
+`--tfm` is rejected on `sym`, `ready` and `restore` rather than ignored: `workspace/symbol` is
+context-independent and the other two name no document, so there is no context to choose and
+the option filtered nothing.
 
 `--tfm T` is for multi-targeted projects, and **you do not need it to get a correct answer**.
 A file in a `net10.0;net9.0` project is compiled twice with different preprocessor symbols, so a

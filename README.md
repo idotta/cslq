@@ -306,6 +306,23 @@ Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (defaul
 `--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
 (default 180), `--log-level L`, `--errors-only` (`diag` only), `--tfm T`, `--json`.
 
+**Options may appear anywhere** — before the command, between the command and its argument, or
+after both — the way every other `dotnet` CLI takes them. The set is closed and each member is
+either a flag or takes exactly one value, so the positionals are simply what is left:
+`cslq --root . --timeout 600 def ContentItem` and `cslq def ContentItem --root . --timeout 600`
+are the same invocation. A value is consumed by the option that asked for it, so
+`--sentinel ready refs Greet` runs `refs`.
+
+`--log-level L` takes one of the seven names the server's own `--logLevel` parses — `Trace`,
+`Debug`, `Information`, `Warning` (the default), `Error`, `Critical`, `None` — and anything else
+is rejected before a server starts. It cannot change a daemon that is already running: see
+[Latency](#latency).
+
+`--tfm T` is rejected by `sym`, `ready` and `restore` rather than accepted and ignored.
+`workspace/symbol` is context-independent and the other two resolve no document, so there is no
+project context for the option to choose; it used to filter nothing and leave the caller reading
+an unfiltered answer as filtered.
+
 `--tfm T` answers in one target framework's context. A file in a `net10.0;net9.0` project is
 compiled twice, so a type inside `#if NET9_0` exists in one context and not the other, and every
 command that asks something *of a document* would otherwise answer for whichever context Roslyn
@@ -346,6 +363,20 @@ project the root's solution yielded, so a partial readiness is visible rather th
 
 In text mode `ready` still prints the single word `ready`, so a shell test stays a string
 comparison; at `--log-level Information` it names both classes on stderr.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The query was answered. A clean `diag` and an empty `outline` are answers |
+| 1 | The query failed: no results, no such symbol, an ambiguous target, no such file, the workspace never loaded |
+| 2 | The invocation could not be understood: no command, an unknown command or option, a missing or invalid option value, an argument the command does not take |
+| 127 | An unhandled internal failure — a bug; the stack trace is the report |
+| 130 | Interrupted (Ctrl+C) |
+
+Exit 2 follows the same rule as every other failure: the `cslq: ` line and the usage block go
+to **stderr**, and `--json` still puts `{ "error": "<message>" }` on stdout. `--help` and
+`--version` are answers, so they stay exit 0 on stdout.
 
 Paths are relative to `--root`; lines and columns are one-based.
 
@@ -454,9 +485,10 @@ through `dotnet tool run`.
 One daemon is shared across every workspace on the machine, keyed by user identity and the
 server's versioned path rather than by the root, and it outlives the client that started it
 (900 s after the last client disconnects, by default). Two costs worth knowing:
-`--log-level` is silently a no-op against a daemon someone else started, because the daemon
-takes its configuration from whoever launched it; and the thin client falls back to a private
-cold server without failing if it cannot reach the daemon, so `cslq` watches its stderr for that
+`--log-level` is a no-op against a daemon someone else started, because the daemon takes its
+configuration from whoever launched it — the name is validated client-side, so a typo is exit 2
+either way, but a valid level cannot raise a running daemon's; and the thin client falls back
+to a private cold server without failing if it cannot reach the daemon, so `cslq` watches its stderr for that
 and says `cslq: daemon unreachable` rather than leaving you to infer it from the latency.
 
 The daemon used to inherit the stdout of whichever invocation launched it, so a piped or

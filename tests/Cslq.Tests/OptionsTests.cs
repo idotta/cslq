@@ -44,7 +44,7 @@ public class OptionsTests
     [Fact]
     public void A_target_framework_needs_a_value()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["hover", "X", "--tfm"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["hover", "X", "--tfm"]));
 
         Assert.Equal("option '--tfm' needs a value", ex.Message);
     }
@@ -52,7 +52,7 @@ public class OptionsTests
     [Fact]
     public void An_unknown_command_is_rejected_before_anything_starts()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["bogus"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["bogus"]));
 
         Assert.Contains("unknown command 'bogus'", ex.Message, StringComparison.Ordinal);
     }
@@ -60,7 +60,7 @@ public class OptionsTests
     [Fact]
     public void An_unknown_option_is_rejected()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", "--nope"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["refs", "--nope"]));
 
         Assert.Contains("unknown option '--nope'", ex.Message, StringComparison.Ordinal);
     }
@@ -68,7 +68,7 @@ public class OptionsTests
     [Fact]
     public void A_second_positional_argument_is_rejected()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", "A", "B"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["refs", "A", "B"]));
 
         Assert.Contains("unexpected argument 'B'", ex.Message, StringComparison.Ordinal);
     }
@@ -76,7 +76,7 @@ public class OptionsTests
     [Fact]
     public void An_option_without_a_value_is_rejected()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["sym", "A", "--max"]));
 
         Assert.Contains("needs a value", ex.Message, StringComparison.Ordinal);
     }
@@ -94,7 +94,7 @@ public class OptionsTests
     [InlineData("--max", "")]
     public void An_option_given_a_blank_value_is_rejected(string option, string value)
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", option, value]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["sym", "A", option, value]));
 
         Assert.Equal($"option '{option}' needs a value", ex.Message);
     }
@@ -109,7 +109,7 @@ public class OptionsTests
     [InlineData("x", "needs an integer")]
     public void A_numeric_option_distinguishes_overflow_from_garbage(string value, string expected)
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max", value]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["sym", "A", "--max", value]));
 
         Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
     }
@@ -117,7 +117,7 @@ public class OptionsTests
     [Fact]
     public void A_max_below_one_is_rejected_but_a_zero_timeout_is_not()
     {
-        Assert.Throws<CslqException>(() => Program.Options.Parse(["sym", "A", "--max", "0"]));
+        Assert.Throws<UsageException>(() => Program.Options.Parse(["sym", "A", "--max", "0"]));
 
         // A zero timeout is how `premature-query-fails-loudly` proves that a query fired
         // before load fails loudly rather than answering empty.
@@ -198,8 +198,203 @@ public class OptionsTests
     [Fact]
     public void Restore_rejects_an_argument()
     {
-        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["restore", "somewhere"]));
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["restore", "somewhere"]));
 
         Assert.Contains("restore takes no argument", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An option is an option wherever it sits: `cslq --root . --timeout 600 def ContentItem`
+    /// was `unknown command '--root'` plus a usage block that never said the command had to
+    /// come first. The option set is closed and each member is a flag or takes exactly one
+    /// value, so what is left after the options are lifted out is the positionals, in order.
+    /// </summary>
+    [Fact]
+    public void Options_are_accepted_before_the_command()
+    {
+        var opts = Program.Options.Parse(["--root", ".", "--timeout", "600", "def", "ContentItem"]);
+
+        Assert.Equal("def", opts.Command);
+        Assert.Equal("ContentItem", opts.Argument);
+        Assert.Equal(TimeSpan.FromSeconds(600), opts.Timeout);
+    }
+
+    /// <summary>
+    /// Between the command and its argument, and after both: the same parse either way, and
+    /// the same one as the all-trailing form the usage text shows.
+    /// </summary>
+    [Fact]
+    public void Options_are_accepted_between_and_after_the_positionals()
+    {
+        var between = Program.Options.Parse(["refs", "--max", "5", "Greet", "--json"]);
+        var after = Program.Options.Parse(["refs", "Greet", "--max", "5", "--json"]);
+
+        Assert.Equal(after, between);
+        Assert.Equal("Greet", between.Argument);
+        Assert.Equal(5, between.Max);
+        Assert.True(between.Json);
+    }
+
+    /// <summary>
+    /// A value is consumed by the option that asked for it, so a value that happens to spell
+    /// a command is a value: `--sentinel ready refs Greet` asks `refs`, not `ready`.
+    /// </summary>
+    [Fact]
+    public void An_option_value_is_never_read_as_a_positional()
+    {
+        var opts = Program.Options.Parse(["--sentinel", "ready", "refs", "Greet"]);
+
+        Assert.Equal("refs", opts.Command);
+        Assert.Equal("Greet", opts.Argument);
+        Assert.Equal("ready", opts.Sentinel);
+    }
+
+    [Fact]
+    public void No_command_at_all_is_a_usage_error()
+    {
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["--json"]));
+
+        Assert.Equal("no command given", ex.Message);
+    }
+
+    /// <summary>
+    /// Exit 2 is the invocation the parser could not understand, and the type is what carries
+    /// it: `Main` answers a <c>UsageException</c> with the line, the usage block and 2, and
+    /// everything else with the line and 1. The usage text is no longer folded into the
+    /// message, so it is not asserted here.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "bogus" }, "unknown command 'bogus'")]
+    [InlineData(new[] { "refs", "--nope" }, "unknown option '--nope'")]
+    [InlineData(new[] { "refs", "A", "B" }, "unexpected argument 'B'")]
+    [InlineData(new[] { "sym", "A", "--max" }, "option '--max' needs a value")]
+    [InlineData(new[] { "sym", "A", "--max", "x" }, "--max needs an integer")]
+    [InlineData(new[] { "sym", "A", "--max", "0" }, "--max needs to be 1 or more")]
+    public void A_malformed_invocation_is_a_usage_error(string[] argv, string expected)
+    {
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(argv));
+
+        Assert.Equal(expected, ex.Message);
+    }
+
+    /// <summary>
+    /// A workspace that is not there is not a usage mistake: the command line was understood
+    /// and the query failed, which is exit 1. The same for a malformed position — it is the
+    /// target, not the grammar.
+    /// </summary>
+    [Fact]
+    public void A_failure_the_parser_understood_is_not_a_usage_error()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "cslq-tests", Path.GetRandomFileName());
+
+        Assert.IsNotType<UsageException>(
+            Assert.Throws<CslqException>(() => Program.Options.Parse(["ready", "--root", missing])));
+        Assert.IsNotType<UsageException>(
+            Assert.Throws<CslqException>(() => Program.Options.Parse(["refs", "Core/Greeter.cs:0:1"])));
+    }
+
+    /// <summary>
+    /// `ready Greet --root fixture` printed `ready` and exited 0, so an agent that meant
+    /// `--sentinel Greet` was told the workspace was ready for a symbol nothing had probed
+    /// for. The message names the option it was probably reaching for.
+    /// </summary>
+    [Fact]
+    public void Ready_rejects_a_stray_positional_and_points_at_the_sentinel()
+    {
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(["ready", "Greet"]));
+
+        Assert.Equal(
+            "ready takes no argument; got 'Greet' (did you mean --sentinel Greet?)", ex.Message);
+    }
+
+    /// <summary>
+    /// The commands that do take one still do, `diag`'s optional path included.
+    /// </summary>
+    [Theory]
+    [InlineData("sym")]
+    [InlineData("diag")]
+    [InlineData("outline")]
+    [InlineData("project")]
+    public void A_command_that_takes_an_argument_still_takes_one(string command)
+    {
+        Assert.Equal("Foo", Program.Options.Parse([command, "Foo"]).Argument);
+    }
+
+    /// <summary>
+    /// The seven names the server's own <c>--logLevel</c> parses, checked here rather than
+    /// forwarded: against a running daemon a bad one was accepted and did nothing at all.
+    /// </summary>
+    [Theory]
+    [InlineData("Trace")]
+    [InlineData("Information")]
+    [InlineData("information")]
+    [InlineData("NONE")]
+    public void A_log_level_the_server_knows_is_forwarded_as_written(string level)
+    {
+        Assert.Equal(level, Program.Options.Parse(["ready", "--log-level", level]).LogLevel);
+    }
+
+    [Fact]
+    public void A_log_level_the_server_does_not_know_is_a_usage_error()
+    {
+        var ex = Assert.Throws<UsageException>(
+            () => Program.Options.Parse(["ready", "--log-level", "bogus"]));
+
+        Assert.Equal(
+            "unknown --log-level 'bogus'; expected one of " +
+            "Trace, Debug, Information, Warning, Error, Critical, None",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// Only `Trace`, `Debug` and `Information` ask for more than warnings, and the check is
+    /// case-insensitive because the level is taken as the caller wrote it.
+    /// </summary>
+    [Theory]
+    [InlineData("Information", true)]
+    [InlineData("debug", true)]
+    [InlineData("Warning", false)]
+    [InlineData("None", false)]
+    public void Verbose_is_the_levels_below_warning(string level, bool verbose)
+    {
+        Assert.Equal(verbose, Program.Options.Parse(["ready", "--log-level", level]).Verbose);
+    }
+
+    /// <summary>
+    /// `sym Only10 --root fixture2 --tfm net9.0` printed the net10.0 hit too, at exit 0:
+    /// `workspace/symbol` is context-independent, and `ready` and `restore` name no document,
+    /// so there is no context for the option to choose and it filtered nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("sym")]
+    [InlineData("ready")]
+    [InlineData("restore")]
+    public void A_command_with_no_project_context_rejects_a_target_framework(string command)
+    {
+        string[] argv = command == "sym" ? [command, "Only10", "--tfm", "net9.0"] : [command, "--tfm", "net9.0"];
+
+        var ex = Assert.Throws<UsageException>(() => Program.Options.Parse(argv));
+
+        Assert.Equal(
+            $"--tfm does not apply to {command}; it is honoured by " +
+            "refs, def, impl, hover, outline, diag, project",
+            ex.Message);
+    }
+
+    /// <summary>
+    /// The rejection list and the honouring list are complements: every command is in exactly
+    /// one of them, so a command added to `Commands` and to neither list would be caught here
+    /// rather than by silently accepting an option it ignores.
+    /// </summary>
+    [Fact]
+    public void Every_command_either_honours_the_target_framework_or_rejects_it()
+    {
+        foreach (var command in Program.Commands)
+        {
+            if (Program.TakesTfm.Contains(command)) continue;
+
+            string[] argv = command == "sym" ? [command, "Q", "--tfm", "net9.0"] : [command, "--tfm", "net9.0"];
+            Assert.Throws<UsageException>(() => Program.Options.Parse(argv));
+        }
     }
 }
