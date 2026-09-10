@@ -271,8 +271,8 @@ App/App.csproj  net10.0
 ```
 
 `project` names the `.csproj` that compiles a file and the target framework it compiles it for.
-A file no project compiles answers `no project` at exit 1 — which is also why `sym` cannot see
-the types declared in it and `diag` reports nothing for it.
+A file no project compiles answers `cslq: no project` on stderr at exit 1 — which is also why
+`sym` cannot see the types declared in it and `diag` reports nothing for it.
 
 ```
 $ cslq sym Area --root fixture
@@ -359,13 +359,30 @@ against 331, at exit 0. The explicit probe stands alone only where inference fin
 all — no solution, two solutions, no C# project, no candidate anywhere — which is the layout it
 is the escape hatch for. It is not a project: `ready --json` neither counts nor lists it.
 
-`refs` exits 1 with `no results` when a symbol resolves but has no references, and 1 with a
+`refs` exits 1 with `cslq: no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl`, `sym`
 and `hover` follow the same rule.
 
 `diag` exits 0 whenever the query was answered, findings or not — a clean file is a successful
 `diag`, unlike an empty `refs`, which means the lookup failed. It exits 1 only when the workspace
 never loaded or the path does not exist.
+
+**One rule for non-answers and failures.** In text mode stdout carries the answer and nothing
+else: every non-answer that exits non-zero — `no results`, `no project` — and every failure is
+one `cslq: `-prefixed line on **stderr**, so a script may treat stdout as data. `diag`'s
+`no diagnostics` and `outline`'s `no symbols` stay on stdout because they exit 0, which makes
+them answers; the exit code is what says which stream to read. With `--json` the answer is
+always a JSON object on stdout, on the failing paths too: an empty answer is the ordinary
+`{ "count": 0, "truncated": false, "results": [] }` envelope, and a failure is
+`{ "error": "<message>" }` with the same human line still on stderr. An answer envelope never
+carries `error` and an error object never carries `count`, so one field tells them apart.
+
+```
+$ cslq refs NoSuch --root fixture --json
+{
+  "error": "no symbol matched 'NoSuch'"
+}
+```
 
 ### Symbol names
 

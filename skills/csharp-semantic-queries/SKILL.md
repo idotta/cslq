@@ -146,6 +146,14 @@ no project compiles — which is also why `sym` cannot find the types in it and 
 nothing for it. `diag` and `outline` exit 0 on an empty result, because nothing
 to report is an answer.
 
+In text mode **stdout carries the answer and nothing else**: every non-answer that exits
+non-zero (`no results`, `no project`) and every failure is one `cslq: `-prefixed line on
+stderr, so you can treat stdout as data. `no diagnostics` and `no symbols` are on stdout
+because they exit 0. With `--json` the answer is a JSON object on stdout on every path,
+failures included: an empty answer is the ordinary `{ "count": 0, ..., "results": [] }`
+envelope, a failure is `{ "error": "<message>" }` — and the human line still goes to stderr.
+Check for an `error` key to tell the two apart; an answer envelope never has one.
+
 One trap in `impl`: a member with no implementations does **not** come back empty. Roslyn falls
 through to the declaration, so `cslq impl` on an ordinary method prints the same thing `cslq def`
 would. Read a single result at the symbol's own declaration as "nothing implements this", not

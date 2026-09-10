@@ -52,14 +52,17 @@ internal static partial class Program
         }
         catch (CslqException ex)
         {
-            Console.Error.WriteLine("cslq: " + ex.Message);
+            // `--json` is read off argv rather than off Options: half the failures that reach
+            // here are thrown by Options.Parse itself, so there is nothing parsed to ask. An
+            // argument that is literally `--json` is not representable anyway.
+            Output.WriteError(ex.Message, WantsJson(argv));
             return 1;
         }
         catch (OperationCanceledException)
         {
             // Ctrl+C. Without this the cancellation escapes as an unhandled exception and the
             // interrupt is answered with a stack trace and exit 134.
-            Console.Error.WriteLine("cslq: interrupted.");
+            Output.WriteError("interrupted.", WantsJson(argv));
             return 130;
         }
     }
@@ -150,6 +153,13 @@ internal static partial class Program
             }
         }
     }
+
+    /// <summary>
+    /// Whether the caller asked for JSON, answerable before <c>Options.Parse</c> and after it
+    /// has thrown. <c>--json</c> is a flag rather than a value, so a scan of <c>argv</c> is
+    /// exactly as accurate as the parse would be.
+    /// </summary>
+    internal static bool WantsJson(string[] argv) => argv.Contains("--json");
 
     internal enum Immediate { None, Usage, Help, Version }
 

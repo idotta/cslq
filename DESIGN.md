@@ -36,6 +36,32 @@ near-useless to a model.
   inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
   not an absence — it means that row is in every context asked, which is exactly the thing its
   marked neighbours are not — and row keys stay stable across the rows of one answer.
+- **In text mode stdout carries the answer and nothing else: every non-answer and every
+  failure is one `cslq: `-prefixed line on stderr.** `refs`' `no results` and `project`'s
+  `no project` used to print on stdout without the prefix, so a script treating stdout as data
+  stored `no results` as a hit while every other failure was already on stderr. They exit
+  non-zero, which is what makes them failures. `diag`'s `no diagnostics` and `outline`'s
+  `no symbols` stay on stdout because they exit **0** — a clean file and an empty document are
+  answers, and that is the whole distinction: the exit code says which stream carries the
+  message. An empty answer's context note rides on the same `cslq:` line, after a `; `, rather
+  than sitting under it as its own paragraph, because a failure is one line. Stderr is not
+  failures-only, and the rule does not make it so: `not probed —`, `daemon unreachable` and
+  the one-time restore notice are advisories that ride there at exit 0 beside a perfectly good
+  answer on stdout. What the rule fixes is where a command's **own** message goes, and the
+  exit code is the whole of the answer to that.
+- **`--json` is honoured on every path, including the ones that exit non-zero, and `error` is
+  the discriminator.** An empty answer keeps the ordinary `{ count, truncated, results }`
+  envelope with `count: 0`: a caller parsing JSON never meets a missing body. A failure prints
+  a single `{ "error": "<the same message>" }` object on stdout, and the human line still goes
+  to stderr so a log reads. An answer envelope never carries `error` and an error object never
+  carries `count`, so **one field** separates the two shapes a caller can be handed at the same
+  exit code — which was the complaint: `refs <a position with no hits> --json` answered with an
+  empty envelope and `refs NoSuch --json` with no stdout at all, both at exit 1, and readiness
+  timeouts, ambiguity and unresolved targets were plain text whatever was asked for. `--json`
+  is read off `argv` rather than off the parsed options, because half the failures are thrown
+  by the parse itself. Exit codes keep the meanings they had; only the channel and the `--json`
+  coverage move. The one message still outside the rule is the no-argument usage text, on
+  stdout at exit 2 — that is T-66–T-68's item, not this one's.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.

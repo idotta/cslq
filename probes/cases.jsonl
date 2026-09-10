@@ -110,3 +110,5 @@
 {"name":"multi-tfm-impl-answers-in-either-branch","args":"impl Only10 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:4:21|public sealed class Only10|merged from 2 contexts"}
 {"name":"multi-tfm-refs-folds-a-hit-both-contexts-report","args":"refs Both --root fixture2 --json","exit":"0","expect":"'count': 1|'path': 'Multi/Both.cs'|'line': 8|'contexts': 2"}
 {"name":"multi-tfm-dotted-target-reads-every-branch","args":"def Fixture2.Multi.Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|public sealed class Only9"}
+{"name":"json-error-is-an-object-and-a-stderr-line","args":"refs NoSuch --root fixture --json","exit":"1","expect":"'error': 'no symbol matched|cslq: no symbol matched"}
+{"name":"json-empty-answer-keeps-the-envelope","args":"def App/Program.cs:12:1 --root fixture --json","exit":"1","expect":"'count': 0|'results': []"}

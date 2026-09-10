@@ -52,6 +52,35 @@ public class OutputTests
     }
 
     /// <summary>
+    /// Both streams, because the channel is the thing under test for a non-answer: in text
+    /// mode stdout carries the answer and nothing else, so an empty answer has to leave it
+    /// empty. A capture of the two folded together cannot see that.
+    /// </summary>
+    private static async Task<(string Out, string Error)> CaptureBothAsync(Func<Task> action)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        Console.SetOut(stdout);
+        Console.SetError(stderr);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+
+        return (stdout.ToString(), stderr.ToString());
+    }
+
+    private static string[] Lines(string text) =>
+        text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>
     /// The cap keeps the best matches, not an alphabetical prefix of them and not an arrival
     /// prefix either: answered AbcZed / ZedHelper / Zed, a cap of two keeps the exact match
     /// and the prefix match, and displays them alphabetically.
@@ -88,9 +117,11 @@ public class OutputTests
     [Fact]
     public async Task An_empty_answer_says_so_rather_than_printing_nothing()
     {
-        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, "A", [], 50, json: false, Plain));
+        var (stdout, stderr) = await CaptureBothAsync(
+            () => Output.WriteSymbolsAsync(Root, "A", [], 50, json: false, Plain));
 
-        Assert.Equal("no results", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no results", stderr.Trim());
     }
 
     /// <summary>
@@ -324,10 +355,11 @@ public class OutputTests
         Assert.Equal(0, json.GetProperty("count").GetInt32());
         Assert.Empty(json.GetProperty("results").EnumerateArray().ToList());
 
-        var text = await CaptureAsync(() => Output.WriteHoverAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteHoverAsync(
             Root, Uri("App/Program.cs"), new Position(11, 0), null, 50, json: false, Plain));
 
-        Assert.Equal("no results", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no results", stderr.Trim());
     }
 
     /// <summary>
@@ -524,13 +556,13 @@ public class OutputTests
     [Fact]
     public async Task An_empty_answer_says_how_many_contexts_were_tried()
     {
-        var text = await CaptureAsync(() => Output.WriteHoverAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteHoverAsync(
             Root, Uri("Multi/Conditional.cs"), new Position(1, 0), null,
             50, json: false, Plain, Note(0)));
 
-        Assert.Equal(
-            ["no results", "tried all 2 contexts: net10.0, net9.0"],
-            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        // One line, not a paragraph: the note rides on the `cslq:` line rather than under it.
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal(["cslq: no results; tried all 2 contexts: net10.0, net9.0"], Lines(stderr));
     }
 
     /// <summary>
@@ -543,12 +575,12 @@ public class OutputTests
         var csproj = Path.Combine(Root, "Multi", "Multi.csproj");
         DocumentContext[] all = [Context(csproj, "net10.0"), Context(csproj, "net9.0")];
 
-        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteLocationsAsync(
             Root, [], 50, 1, json: false, Plain, new ContextNote(all, [all[1]], all[1])));
 
+        Assert.Equal(string.Empty, stdout);
         Assert.Equal(
-            ["no results", "tried net9.0 of 2 contexts: net10.0, net9.0"],
-            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            ["cslq: no results; tried net9.0 of 2 contexts: net10.0, net9.0"], Lines(stderr));
     }
 
     /// <summary>
@@ -744,10 +776,10 @@ public class OutputTests
     [Fact]
     public async Task An_empty_union_still_says_it_tried()
     {
-        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+        var (_, stderr) = await CaptureBothAsync(() => Output.WriteLocationsAsync(
             Root, [], 50, 0, json: false, Plain, UnionNote()));
 
-        Assert.Contains("tried all 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
+        Assert.Contains("tried all 2 contexts: net10.0, net9.0", stderr, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -821,13 +853,68 @@ public class OutputTests
     [Fact]
     public async Task A_file_no_project_compiles_says_no_project()
     {
-        var text = await CaptureAsync(() =>
+        var (stdout, stderr) = await CaptureBothAsync(() =>
         {
             Output.WriteProject(Root, Path.Combine(Root, "Ambient", "Stray.cs"), [], 50, json: false);
             return Task.CompletedTask;
         });
 
-        Assert.Equal("no project", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no project", stderr.Trim());
+    }
+
+    /// <summary>
+    /// The other half of the rule: <c>--json</c> is honoured on the empty answer too, and the
+    /// envelope stays the ordinary one — <c>count: 0</c> is how a machine reads "no results",
+    /// so there is nothing for stderr to add. A caller parsing JSON therefore never has to
+    /// handle a body that is missing.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_answer_under_json_keeps_the_envelope_and_says_nothing_on_stderr()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(
+            () => Output.WriteLocationsAsync(Root, [], 50, 1, json: true, Plain));
+
+        var json = JsonDocument.Parse(stdout).RootElement;
+        Assert.Equal(0, json.GetProperty("count").GetInt32());
+        Assert.False(json.GetProperty("truncated").GetBoolean());
+        Assert.Empty(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.False(json.TryGetProperty("error", out _));
+        Assert.Equal(string.Empty, stderr);
+    }
+
+    /// <summary>
+    /// A failure under <c>--json</c> is a single object on stdout carrying the same message,
+    /// and the human line still goes to stderr so a log reads. <c>error</c> is the
+    /// discriminator: an answer envelope never carries it, so one field separates the two
+    /// shapes a caller sees at the same exit code.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_under_json_is_an_error_object_on_stdout_and_a_line_on_stderr()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(() =>
+        {
+            Output.WriteError("no symbol matched 'NoSuch'", json: true);
+            return Task.CompletedTask;
+        });
+
+        var json = JsonDocument.Parse(stdout).RootElement;
+        Assert.Equal("no symbol matched 'NoSuch'", json.GetProperty("error").GetString());
+        Assert.False(json.TryGetProperty("count", out _));
+        Assert.Equal("cslq: no symbol matched 'NoSuch'", stderr.Trim());
+    }
+
+    [Fact]
+    public async Task A_failure_without_json_leaves_stdout_empty()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(() =>
+        {
+            Output.WriteError("no such file: nope.cs", json: false);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no such file: nope.cs", stderr.Trim());
     }
 
     /// <summary>

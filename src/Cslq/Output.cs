@@ -125,8 +125,7 @@ internal static class Output
 
         if (shown.Count == 0)
         {
-            Console.WriteLine("no results");
-            WriteContextNote(note, empty: true);
+            WriteMissing("no results", note);
             return;
         }
 
@@ -199,20 +198,60 @@ internal static class Output
     /// </summary>
     private static void WriteContextNote(ContextNote? note, bool empty)
     {
-        if (note is null || note.All.Count < 2) return;
+        if (ContextSentence(note, empty) is not { } sentence) return;
+
+        Console.WriteLine();
+        Console.WriteLine(sentence);
+    }
+
+    /// <summary>
+    /// The sentence itself, split off <see cref="WriteContextNote"/> because a non-answer no
+    /// longer prints where an answer does: it is one <c>cslq:</c> line on stderr, and the note
+    /// is part of that line rather than a paragraph under it.
+    /// </summary>
+    private static string? ContextSentence(ContextNote? note, bool empty)
+    {
+        if (note is null || note.All.Count < 2) return null;
 
         var all = Contexts.Names(note.All);
         var subset = note.Asked.Count == note.All.Count
             ? null
             : $"{Contexts.Names(note.Asked)} of ";
 
-        Console.WriteLine();
-        Console.WriteLine(true switch
+        return true switch
         {
             _ when empty => $"tried {subset ?? "all "}{note.All.Count} contexts: {all}",
             _ when note.Answered is null => $"merged from {subset}{note.All.Count} contexts: {all}",
             _ => $"answered in {Contexts.Label(note.All, note.Answered)} of {note.All.Count} contexts: {all}",
-        });
+        };
+    }
+
+    /// <summary>
+    /// An empty answer that exits non-zero — <c>no results</c>, <c>no project</c>. In text mode
+    /// stdout carries the answer and nothing else, so this is one <c>cslq:</c>-prefixed line on
+    /// stderr like any other failure: a caller that treats stdout as data used to store
+    /// <c>no results</c> as a hit. The context note, when there is one, rides on the same line.
+    /// <c>--json</c> is the other half of the rule and does not come here: an empty answer
+    /// keeps the ordinary <c>{ count, truncated, results }</c> envelope on stdout, where
+    /// <c>count: 0</c> already says the same thing in a machine-readable way.
+    /// </summary>
+    private static void WriteMissing(string message, ContextNote? note = null)
+    {
+        var sentence = ContextSentence(note, empty: true);
+        Console.Error.WriteLine(sentence is null ? $"cslq: {message}" : $"cslq: {message}; {sentence}");
+    }
+
+    /// <summary>
+    /// A failure, in whichever mode was asked for. The human line goes to stderr always, so a
+    /// log still reads; <c>--json</c> adds a single <c>{ "error": ... }</c> object on stdout
+    /// carrying the same message. That object is the discriminator a caller needs: an answer
+    /// envelope never has an <c>error</c> key and an error object never has <c>count</c>, so
+    /// one field separates the two shapes without inspecting the exit code.
+    /// </summary>
+    public static void WriteError(string message, bool json)
+    {
+        if (json) Console.WriteLine(JsonSerializer.Serialize(new { error = message }, JsonOut));
+        Console.Error.WriteLine("cslq: " + message);
     }
 
     /// <summary>
@@ -372,7 +411,7 @@ internal static class Output
 
         if (shown.Count == 0)
         {
-            Console.WriteLine("no results");
+            WriteMissing("no results");
             return;
         }
 
@@ -601,8 +640,7 @@ internal static class Output
 
         if (value is null)
         {
-            Console.WriteLine("no results");
-            WriteContextNote(note, empty: true);
+            WriteMissing("no results", note);
             return;
         }
 
@@ -773,7 +811,7 @@ internal static class Output
 
         if (shown.Count == 0)
         {
-            Console.WriteLine("no project");
+            WriteMissing("no project");
             return;
         }
 
