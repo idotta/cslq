@@ -98,3 +98,15 @@
 {"name":"tfm-restricts-the-context-asked","args":"hover Only9 --root fixture2 --tfm net9.0","exit":"0","expect":"Multi/Conditional.cs:11:21|class Fixture2.Multi.Only9"}
 {"name":"tfm-excludes-the-other-branch","args":"hover Only10 --root fixture2 --tfm net9.0","exit":"1","expect":"no results|tried net9.0 of 2 contexts: net10.0, net9.0"}
 {"name":"tfm-with-no-such-context-reports","args":"project Multi/Conditional.cs --root fixture2 --tfm net8.0","exit":"1","expect":"cslq: no context for --tfm net8.0: Multi/Conditional.cs has net10.0, net9.0"}
+{"name":"multi-tfm-outline-unions-both-branches","args":"outline Multi/Conditional.cs --root fixture2","exit":"0","expect":"public sealed class Only10  [net10.0]|public sealed class Only9  [net9.0]|tried all 2 contexts: net10.0, net9.0"}
+{"name":"multi-tfm-outline-sees-a-tfm-only-file","args":"outline Multi/TfmError.cs --root fixture2","exit":"0","expect":"public static class TfmError  [net9.0]|public static int Broken()  [net9.0]"}
+{"name":"multi-tfm-outline-leaves-common-declarations-unmarked","args":"outline Multi/Both.cs --root fixture2","exit":"0","expect":"public sealed class Both|tried all 2 contexts"}
+{"name":"multi-tfm-outline-json-marks-the-row","args":"outline Multi/Conditional.cs --root fixture2 --json","exit":"0","expect":"'count': 5|'contexts': 2|'name': 'Only10'|'tfm': 'net10.0'|'name': 'Only9'|'tfm': 'net9.0'"}
+{"name":"multi-tfm-outline-honours-tfm","args":"outline Multi/Conditional.cs --root fixture2 --tfm net9.0","exit":"0","expect":"public sealed class Only9|tried net9.0 of 2 contexts: net10.0, net9.0"}
+{"name":"multi-tfm-diag-reports-a-tfm-only-error","args":"diag Multi/TfmError.cs --root fixture2 --errors-only","exit":"0","expect":"Multi/TfmError.cs:10:17 error CS0029: Cannot implicitly convert type|[net9.0]"}
+{"name":"multi-tfm-diag-json-marks-the-row","args":"diag Multi/TfmError.cs --root fixture2 --errors-only --json","exit":"0","expect":"'count': 1|'code': 'CS0029'|'tfm': 'net9.0'|'contexts': 2"}
+{"name":"multi-tfm-diag-honours-tfm","args":"diag Multi/TfmError.cs --root fixture2 --errors-only --tfm net10.0","exit":"0","expect":"no diagnostics|tried net10.0 of 2 contexts: net10.0, net9.0"}
+{"name":"multi-tfm-refs-answers-in-either-branch","args":"refs Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|public sealed class Only9|tried all 2 contexts: net10.0, net9.0"}
+{"name":"multi-tfm-impl-answers-in-either-branch","args":"impl Only10 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:4:21|public sealed class Only10|tried all 2 contexts"}
+{"name":"multi-tfm-refs-folds-a-hit-both-contexts-report","args":"refs Both --root fixture2 --json","exit":"0","expect":"'count': 1|'path': 'Multi/Both.cs'|'line': 8|'contexts': 2"}
+{"name":"multi-tfm-dotted-target-reads-every-branch","args":"def Fixture2.Multi.Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|public sealed class Only9"}

@@ -197,6 +197,64 @@ the intermittency of T-27 coming back — an answer that is right most of the ti
 **nothing**: it can only pass if the server honoured the context it was handed. Keep it, and
 keep it as an absence.
 
+**An answer that is a *set* asks every context and unions them, and that is a different rule
+from `hover` and `def`.** A single-answer command can stop at the first context that answers,
+because there is one right answer and the retry finds it. `refs`, `impl`, `outline` and `diag`
+answer with a set, and a set that stops early is *wrong*: a reference inside an `#if NET9_0`
+block exists only in that context, and omitting it is silent. So these four ask every context in
+the set — all of them, or the `--tfm` subset — and union what comes back:
+
+- **`refs` and `impl`** concatenate, and the existing fold does the rest: rows are folded on
+  their rendered label plus range, before `--max`, so a hit both contexts report is one row.
+  That is the same fold that already collapsed a generated document's per-framework twins, and
+  it is why the union does not reintroduce the duplication T-30 was about.
+- **`outline`** unions by declaration, keyed on name, kind and identifier position — every
+  context parses the same text, so those agree. A declaration's *extent* does not: on
+  `fixture2/Multi/Conditional.cs` the namespace ends at line 6 in `net10.0` and line 13 in
+  `net9.0`, each context seeing only its own branch, so a merged node takes the **widest**
+  range. Keeping the first context's made a child sit outside its own parent, and
+  `Targets.Chain` walks down by full-range containment, so `def Fixture2.Multi.Only9` went from
+  failing 2 runs in 6 to failing 4 in 4. Declarations that are not in every context asked carry
+  them — `public sealed class Only9  [net9.0]` — and the ones that are carry nothing, so an
+  unconditional file renders exactly as it did before.
+- **`diag`** pulls every context, folds rows on what a reader sees (position, severity, code and
+  message) and labels a row only some contexts report. This is T-28: `net9.0`-only CS0029 in
+  `TfmError.cs` was reported by an unqualified pull in 1 run of 4 and silently absent in the
+  other 3. The fold key includes the message because two contexts disagreeing about the *text*
+  at one position are two findings — serilog answers `Substring can be simplified` in one
+  context and `Slice can be simplified` in another — while an identical row from both is one
+  finding, which is what keeps `diag` free of the per-framework duplication testers confirmed it
+  never had.
+
+The cost is one extra pull per context per document, and it was measured before the rule was
+adopted rather than after. On `fixture2` (6 documents, 3 of them two-context) a whole-tree
+`diag` walk went from 2694/2740/2956 ms to 2827/2885/3030 ms warm, about +5%; on `fixture` (4
+single-context documents) 2690/2925 ms to 2534/2592/2732 ms, which is no change at all. A
+single-context document pays nothing but the one `_vs_getProjectContexts` request every
+context-bound command makes, and a document with N contexts pays N pulls because N pulls is
+what the answer is made of.
+
+**The dotted-target chain reads the union too, and ignores `--tfm` doing it.** `SelectAsync`
+resolves `Fixture2.Multi.Only9` by reading the declaration chain off the document's syntax tree;
+one context's tree cannot see the other branch's declaration at all, so the target failed with
+`no symbol matched` in 2 runs of 6 while the bare `Only9` was already deterministic. It now
+merges every context's tree — every context, not the `--tfm` subset, because this is "where in
+the file is this declared" and `--tfm` has no business constraining a lookup. The option still
+constrains the answer.
+
+A set answer's note says what was **tried** rather than what answered, because every context
+asked contributed to it: `tried all 2 contexts: net10.0, net9.0`, or
+`tried net9.0 of 2 contexts: …` under `--tfm`, empty or not. `--json` carries `contexts` on the
+envelope for all four, `tfm: null` on the envelope for `refs`, `impl` and `diag` — no single
+context answered — and the per-row `tfm` is where the fact lives: on an `outline` node, the
+contexts that declare it; on a `diag` row, the contexts that report it; null on both when every
+context does. `outline` deliberately has no envelope-level `tfm` at all, since an outline is a
+union and each row carries its own.
+
+`diag` takes a note only when it was given a single file. A note names one document's contexts
+and a walk spans documents with different context sets; the per-row labels are what carry the
+fact there.
+
 ## Targeting a symbol by name
 
 A dotted target is verified against the **syntax tree**, one

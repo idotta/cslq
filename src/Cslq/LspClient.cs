@@ -452,14 +452,26 @@ internal sealed class LspClient : IAsyncDisposable
         return result ?? [];
     }
 
-    public async Task<IReadOnlyList<Location>> ReferencesAsync(string uri, Position position, CancellationToken ct)
+    /// <summary>
+    /// Every reference, from every context asked, concatenated. Not the first context that
+    /// answers, unlike <see cref="DefinitionAsync"/>: a reference inside an
+    /// <c>#if NET9_0</c> block exists only in that context, so stopping early omits it
+    /// silently. The fold that collapses a hit two contexts both report is
+    /// <c>Output.WriteLocationsAsync</c>'s, on the rendered label plus range, and it is the
+    /// same fold that already collapsed a generated document's per-framework twins.
+    /// </summary>
+    public async Task<IReadOnlyList<Location>> ReferencesAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await SettleAsync(async () =>
-            await RequestAsync<Location[]?>(
-                "textDocument/references",
-                new ReferenceParams(new TextDocumentIdentifier(uri), position, new ReferenceContext(true)),
-                ct) ?? [], ct);
+        return await AskAllAsync(
+            uri,
+            contexts,
+            doc => SettleAsync(async () =>
+                await RequestAsync<Location[]?>(
+                    "textDocument/references",
+                    new ReferenceParams(doc, position, new ReferenceContext(true)),
+                    ct) ?? [], ct));
     }
 
     /// <summary>
@@ -528,14 +540,65 @@ internal sealed class LspClient : IAsyncDisposable
     /// this degenerates to <c>definition</c> on an ordinary method. Empty means the position
     /// resolved to no symbol.
     /// </summary>
-    public async Task<IReadOnlyList<Location>> ImplementationsAsync(string uri, Position position, CancellationToken ct)
+    public async Task<IReadOnlyList<Location>> ImplementationsAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await SettleAsync(async () =>
-            await RequestAsync<Location[]?>(
-                "textDocument/implementation",
-                new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
-                ct) ?? [], ct);
+        return await AskAllAsync(
+            uri,
+            contexts,
+            doc => SettleAsync(async () =>
+                await RequestAsync<Location[]?>(
+                    "textDocument/implementation", new TextDocumentPositionParams(doc, position), ct) ?? [], ct));
+    }
+
+    /// <summary>
+    /// One request per context, every answer concatenated — the set-valued counterpart to
+    /// <see cref="AskEachAsync{T}"/>. A document with no context at all is asked once with no
+    /// context, which is what every request looked like before any of this existed.
+    /// </summary>
+    private static async Task<IReadOnlyList<T>> AskAllAsync<T>(
+        string uri,
+        IReadOnlyList<DocumentContext> contexts,
+        Func<TextDocumentIdentifier, Task<IReadOnlyList<T>>> ask)
+    {
+        if (contexts.Count == 0) return await ask(new TextDocumentIdentifier(uri));
+
+        var all = new List<T>();
+        foreach (var context in contexts)
+        {
+            all.AddRange(await ask(new TextDocumentIdentifier(uri) { ProjectContext = context.Wire }));
+        }
+
+        return all;
+    }
+
+    /// <summary>
+    /// The same fan-out, keeping each context's answer separate: <c>outline</c> and
+    /// <c>diag</c> both have to say which contexts a row came from, which a concatenation
+    /// throws away. The name is the context's label, or the empty string for a document with
+    /// no context, so a caller can render a mark without knowing about contexts at all.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Name, IReadOnlyList<T> Values)>> AskEveryAsync<T>(
+        string uri,
+        IReadOnlyList<DocumentContext> contexts,
+        IReadOnlyList<string> names,
+        Func<TextDocumentIdentifier, Task<IReadOnlyList<T>>> ask)
+    {
+        if (contexts.Count == 0)
+        {
+            return [(string.Empty, await ask(new TextDocumentIdentifier(uri)))];
+        }
+
+        var views = new List<(string, IReadOnlyList<T>)>(contexts.Count);
+        for (var i = 0; i < contexts.Count; i++)
+        {
+            views.Add((
+                names[i],
+                await ask(new TextDocumentIdentifier(uri) { ProjectContext = contexts[i].Wire })));
+        }
+
+        return views;
     }
 
     /// <summary>
@@ -633,14 +696,23 @@ internal sealed class LspClient : IAsyncDisposable
             h => h?.Contents?.Value is not null);
     }
 
-    public async Task<IReadOnlyList<DocumentSymbol>> DocumentSymbolsAsync(string uri, CancellationToken ct)
+    /// <summary>
+    /// Each context's view of the document's declarations, kept apart for
+    /// <see cref="Outline.Merge"/> to union. Every caller wants the union — the renderer to
+    /// print a mark, the dotted-target chain so that a declaration in either branch resolves.
+    /// </summary>
+    public async Task<IReadOnlyList<OutlineView>> DocumentSymbolsAsync(
+        string uri, IReadOnlyList<DocumentContext> contexts, IReadOnlyList<string> names,
+        CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var result = await RequestAsync<DocumentSymbol[]?>(
-            "textDocument/documentSymbol",
-            new DocumentSymbolParams(new TextDocumentIdentifier(uri)),
-            ct);
-        return result ?? [];
+        var views = await AskEveryAsync<DocumentSymbol>(
+            uri,
+            contexts,
+            names,
+            async doc => await RequestAsync<DocumentSymbol[]?>(
+                "textDocument/documentSymbol", new DocumentSymbolParams(doc), ct) ?? []);
+        return [.. views.Select(v => new OutlineView(v.Name, v.Values))];
     }
 
     /// <summary>
@@ -658,14 +730,23 @@ internal sealed class LspClient : IAsyncDisposable
     /// daemon has never opened, which is the one state where answering before binding shows up.
     /// Note the old loop could not have caught that case anyway: two equally-wrong pulls agree.
     /// </summary>
-    public async Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string uri, CancellationToken ct)
+    /// <remarks>
+    /// One pull <em>per context</em>, though. A diagnostic can exist in one framework and not
+    /// another — the whole of T-28 — so a single pull reports one context's view of the file
+    /// and silently drops the rest. <c>fixture2/Multi/TfmError.cs</c> holds a CS0029 that only
+    /// <c>net9.0</c> has, and an unqualified pull reported it in 1 run of 4.
+    /// </remarks>
+    public async Task<IReadOnlyList<(string Name, IReadOnlyList<Diagnostic> Items)>> DiagnosticsAsync(
+        string uri, IReadOnlyList<DocumentContext> contexts, IReadOnlyList<string> names,
+        CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var report = await RequestAsync<DocumentDiagnosticReport?>(
-            "textDocument/diagnostic",
-            new DocumentDiagnosticParams(new TextDocumentIdentifier(uri)),
-            ct);
-        return report?.Items ?? [];
+        return await AskEveryAsync<Diagnostic>(
+            uri,
+            contexts,
+            names,
+            async doc => (await RequestAsync<DocumentDiagnosticReport?>(
+                "textDocument/diagnostic", new DocumentDiagnosticParams(doc), ct))?.Items ?? []);
     }
 
     /// <summary>

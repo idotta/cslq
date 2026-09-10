@@ -526,7 +526,7 @@ public class OutputTests
     {
         var text = await CaptureAsync(() => Output.WriteHoverAsync(
             Root, Uri("Multi/Conditional.cs"), new Position(1, 0), null,
-            50, json: false, Plain, Note(null)));
+            50, json: false, Plain, Note(0)));
 
         Assert.Equal(
             ["no results", "tried all 2 contexts: net10.0, net9.0"],
@@ -582,11 +582,192 @@ public class OutputTests
         Assert.False(json.TryGetProperty("contexts", out _));
     }
 
+
+    /// <summary>
+    /// An outline of a multi-targeted document is the union of its contexts, and the
+    /// declarations that are not in every one of them carry the contexts they are in. A file
+    /// whose whole body sat inside one <c>#if</c> answered <c>no symbols</c> at exit 0 before
+    /// this — T-29, a wrong answer rather than a partial one.
+    /// </summary>
+    [Fact]
+    public async Task An_outline_marks_the_declarations_that_are_not_in_every_context()
+    {
+        var text = await CaptureAsync(() => Output.WriteOutlineAsync(
+            Root,
+            Uri("Multi/Conditional.cs"),
+            Outline.Merge(
+            [
+                new OutlineView("net10.0", [Node("Only10", 4)]),
+                new OutlineView("net9.0", [Node("Only9", 11)]),
+            ]),
+            contexts: 2,
+            50,
+            json: false,
+            Plain,
+            UnionNote()));
+
+        Assert.Equal(
+            [
+                "Multi/Conditional.cs",
+                "   4 | Only10  [net10.0]",
+                "  11 | Only9  [net9.0]",
+                "tried all 2 contexts: net10.0, net9.0",
+            ],
+            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// One context, or a declaration every context compiles: no mark, no note, byte-for-byte
+    /// what an outline was before contexts existed.
+    /// </summary>
+    [Fact]
+    public async Task A_single_context_outline_is_unchanged()
+    {
+        var text = await CaptureAsync(() => Output.WriteOutlineAsync(
+            Root,
+            Uri("Core/Greeter.cs"),
+            Outline.Merge([new OutlineView(string.Empty, [Node("Greeter", 3)])]),
+            contexts: 1,
+            50,
+            json: false,
+            Plain));
+
+        Assert.Equal(
+            ["Core/Greeter.cs", "  3 | Greeter"],
+            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public async Task Outline_json_carries_the_context_count_and_a_per_row_tfm()
+    {
+        var json = JsonDocument.Parse(await CaptureAsync(() => Output.WriteOutlineAsync(
+            Root,
+            Uri("Multi/Conditional.cs"),
+            Outline.Merge(
+            [
+                new OutlineView("net10.0", [Node("Both", 8), Node("Only10", 4)]),
+                new OutlineView("net9.0", [Node("Both", 8)]),
+            ]),
+            contexts: 2,
+            50,
+            json: true,
+            Plain,
+            UnionNote()))).RootElement;
+
+        Assert.Equal(2, json.GetProperty("contexts").GetInt32());
+        var rows = json.GetProperty("results").EnumerateArray().ToList();
+        Assert.Equal(["Only10", "Both"], rows.Select(r => r.GetProperty("name").GetString()));
+        Assert.Equal("net10.0", rows[0].GetProperty("tfm").GetString());
+        Assert.Equal(JsonValueKind.Null, rows[1].GetProperty("tfm").ValueKind);
+    }
+
+    /// <summary>
+    /// A diagnostic only one context reports carries that context — T-28's <c>net9.0</c>-only
+    /// CS0029, which an unqualified pull reported in 1 run of 4 and otherwise not at all — and
+    /// one every context reports carries nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_diagnostic_only_some_contexts_report_names_them()
+    {
+        var only = new Report(Uri("Multi/TfmError.cs"), Error("CS0029", 10), ["net9.0"], 2);
+        var shared = new Report(
+            Uri("Multi/TfmError.cs"), Error("IDE0002", 3), ["net10.0", "net9.0"], 2);
+
+        var text = await CaptureAsync(() => Output.WriteDiagnosticsAsync(
+            Root, [shared, only], 50, 0, json: false, Plain, UnionNote()));
+
+        Assert.Equal(
+            [
+                "Multi/TfmError.cs:3:1 error IDE0002: boom",
+                "Multi/TfmError.cs:10:1 error CS0029: boom [net9.0]",
+                "tried all 2 contexts: net10.0, net9.0",
+            ],
+            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public async Task Diagnostic_json_carries_the_context_on_the_row()
+    {
+        var json = JsonDocument.Parse(await CaptureAsync(() => Output.WriteDiagnosticsAsync(
+            Root,
+            [new Report(Uri("Multi/TfmError.cs"), Error("CS0029", 10), ["net9.0"], 2)],
+            50,
+            0,
+            json: true,
+            Plain,
+            UnionNote()))).RootElement;
+
+        Assert.Equal(2, json.GetProperty("contexts").GetInt32());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("tfm").ValueKind);
+        var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.Equal("net9.0", only.GetProperty("tfm").GetString());
+    }
+
+    /// <summary>
+    /// A single-context document says nothing and marks nothing, which is every document in an
+    /// ordinary repository.
+    /// </summary>
+    [Fact]
+    public async Task A_single_context_diagnostic_is_unchanged()
+    {
+        var text = await CaptureAsync(() => Output.WriteDiagnosticsAsync(
+            Root, [new Report(Uri("App/Program.cs"), Error("CS0029", 4), [string.Empty], 1)],
+            50, 0, json: false, Plain));
+
+        Assert.Equal(
+            ["App/Program.cs:4:1 error CS0029: boom"],
+            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// A set answer names what it asked rather than what answered: every context contributed,
+    /// so no single one is the answer. <c>refs</c>, <c>impl</c>, <c>outline</c> and
+    /// <c>diag</c> all read this way, empty or not.
+    /// </summary>
+    [Fact]
+    public async Task A_union_answer_says_what_was_tried_rather_than_what_answered()
+    {
+        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+            Root, [Location("Multi/Both.cs", 8)], 50, 0, json: false, Plain, UnionNote()));
+
+        Assert.Contains("tried all 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("answered in", text, StringComparison.Ordinal);
+    }
+
+    private static DocumentSymbol Node(string name, int line) =>
+        new(
+            name,
+            name,
+            5,
+            new Range(new Position(line - 1, 0), new Position(line + 1, 0)),
+            new Range(new Position(line - 1, 20), new Position(line - 1, 26)),
+            []);
+
+    private static Diagnostic Error(string code, int line) =>
+        new(
+            new Range(new Position(line - 1, 0), new Position(line - 1, 4)),
+            1,
+            JsonDocument.Parse($"\"{code}\"").RootElement,
+            null,
+            "boom");
+
+    private static Location Location(string file, int line) =>
+        new(Uri(file), new Range(new Position(line - 1, 20), new Position(line - 1, 24)));
+
     /// <summary>
     /// The two-context note <c>fixture2/Multi</c> produces: net10.0 first in
     /// <see cref="Contexts.Order"/>, and <paramref name="answered"/> the index that answered,
     /// or null for an answer no context gave.
     /// </summary>
+    /// <summary>
+    /// The note a set-valued answer carries: every context asked, none of them singled out.
+    /// </summary>
+    private static ContextNote UnionNote()
+    {
+        var note = Note(0);
+        return note with { Answered = null };
+    }
+
     private static ContextNote Note(int? answered)
     {
         var csproj = Path.Combine(Root, "Multi", "Multi.csproj");

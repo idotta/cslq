@@ -158,20 +158,33 @@ as "this implements something".
 --max N             cap results (default 50)
 --context N         source lines either side of a hit (default 1; inert for outline, sym, hover)
 --timeout N         seconds to wait for the workspace to load (default 180)
---tfm T             answer in this target framework's context only
+--tfm T             answer in this target framework's context only (multi-targeted files)
 --json              machine-readable output
 --sentinel <sym>    also require this symbol to resolve before answering
 --no-daemon         start a private server instead of sharing the daemon
 ```
 
-`--tfm T` is for multi-targeted projects. A file in a `net10.0;net9.0` project is compiled
-twice with different preprocessor symbols, so a type inside `#if NET9_0` exists in one context
-and not the other. `hover`, `def` and `project` handle that themselves — they ask every context
-in a fixed order, answer from the first that answers, and print
-`answered in net9.0 of 2 contexts: net10.0, net9.0` (`tfm` and `contexts` under `--json`) — so
-you only need `--tfm` to ask a *specific* framework, which is the question "does net9.0 see
-this". `project` lists every context, one row each. `refs`, `impl`, `diag` and `outline` do not
-choose a context yet: on a multi-targeted document their answer is one unlabelled view.
+`--tfm T` is for multi-targeted projects, and **you do not need it to get a correct answer**.
+A file in a `net10.0;net9.0` project is compiled twice with different preprocessor symbols, so a
+type inside `#if NET9_0` exists in one context and not the other. Every command that asks
+something of a document handles that itself:
+
+- `hover` and `def` answer with one thing, so they ask the contexts in a fixed order, stop at
+  the first that answers, and say which: `answered in net9.0 of 2 contexts: net10.0, net9.0`.
+- `refs`, `impl`, `outline` and `diag` answer with a set, so they ask **every** context and
+  union it — a reference inside an `#if NET9_0` block exists only there — and say
+  `tried all 2 contexts: net10.0, net9.0`. `outline` marks declarations that are not in every
+  context, `public sealed class Only9  [net9.0]`, and `diag` marks diagnostics that are not
+  reported by every one, `error CS0029: ... [net9.0]`, which is how a framework-specific error
+  becomes visible at all.
+- `project` prints one row per context, `count` = contexts, so it answers "do I have to reason
+  about `#if` branches here" directly.
+
+Use `--tfm` to ask a *specific* framework — "does net9.0 see this", "does net8.0 build" — or to
+get one view instead of the union. A framework the document has no context for is an error
+naming the ones it has. Under `--json`: `contexts` on the envelope is how many contexts the
+document has, `tfm` on the envelope is the one that answered where a single one did, and
+`outline` and `diag` rows carry a per-row `tfm` that is null when every context agrees.
 
 `--sentinel` does not speed a run up. By default `cslq` waits for every project under the root
 to load, one probe per project the root's solution lists; a root holding no solution, or two of
