@@ -63,6 +63,11 @@ dotnet build fixture/Core/Core.csproj -c Debug --nologo -v q || exit 1
 # the generated URI names the generator, never the consumer -- so it is the only thing
 # that catches the label collapsing back to one. Both consumers are built for the same
 # reason Core is: an unbuilt analyzer contributes nothing, silently.
+#
+# It also holds Multi, the only multi-targeted project in either fixture: net10.0;net9.0,
+# with a type in each #if branch and a CS0029 that exists only in the net9.0 context.
+# The restore below covers it through the solution; nothing builds it, for the same reason
+# nothing builds fixture/App -- one of its two contexts does not compile, on purpose.
 log "dotnet restore (fixture2)"
 dotnet restore fixture2/Fixture2.slnx --nologo -v q || exit 1
 

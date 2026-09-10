@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The only multi-targeted project in either fixture. Two TFMs is the whole point: every
+    T-26..T-29 symptom needs one document that Roslyn compiles in more than one context.
+    NET9_0 and NET10_0 exactly, never the _OR_GREATER forms, so each conditional block
+    belongs to exactly one context.
+
+    It is deliberately not built by probes/run.sh: TfmError.cs holds a CS0029 that exists
+    only in the net9.0 context, which is T-28's "a TFM-only error is never reported" leg,
+    the same reason fixture/App is restored but never built.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net9.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fixture2.Multi</RootNamespace>
+  </PropertyGroup>
+
+</Project>

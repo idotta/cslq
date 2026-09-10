@@ -2,4 +2,5 @@
   <Project Path="Alpha/Alpha.csproj" />
   <Project Path="Beta/Beta.csproj" />
   <Project Path="Gen2/Gen2.csproj" />
+  <Project Path="Multi/Multi.csproj" />
 </Solution>
