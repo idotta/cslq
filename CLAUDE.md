@@ -55,15 +55,18 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `textDocument/documentSymbol` instead, where the namespace node's name is already dotted.
 - **Never gate readiness on the symbol being queried.** An absent symbol then looks identical to
   a workspace that has not loaded, and the caller waits out the whole timeout for a typo.
-- **A query fired before load returns empty, not an error.** Never `sleep`; wait for
-  `workspace/projectInitializationComplete` and then poll a sentinel that must resolve. Once
-  that notification has fired **in this process**, the wait is bounded to a further 20 s
-  (`LspClient.PostLoadGrace`) and then fails: on a cold load the server answers nothing until
-  the notification and then jumps straight to complete, so a candidate still unresolved after
-  it never will be — a project whose only type sits in an `#if false` branch is the shape,
-  ordinary `.csproj` and all, so no skip rule sees it. **Never bound it when the notification
-  has not fired**: on a daemon attach it fired before the process existed, and that is exactly
-  where the incomplete-answer window lives. `exhausted-candidate-fails-after-load` is the leg.
+- **A query fired before load returns empty, not an error.** Never `sleep`; poll a sentinel
+  that must resolve, from the first round. Once `workspace/projectInitializationComplete` has
+  fired **in this process**, the wait is bounded to a further 20 s (`LspClient.PostLoadGrace`)
+  and then fails — a project whose only type sits in an `#if false` branch is the shape it
+  exists for, ordinary `.csproj` and all, so no skip rule sees it. That notification ends
+  *this client's own* reload on every attach, cold and warm alike (see the daemon bullet), so
+  the bound is meaningful on both. It is not "everything has loaded": measured 2026-09-10,
+  projects kept resolving for 6-8 s after it on CommunityToolkit, which is the length the
+  grace has to cover and the reason it is 20 s rather than zero. **Never bound it when the
+  notification has not fired**: that state means the load this client asked for has not
+  finished, and the incomplete-answer window is inside it.
+  `exhausted-candidate-fails-after-load` is the leg.
 - **A `%XX` in the root path is MSBuild's problem, not the URI layer's.** A root like
   `.../pct%20x` never becomes ready, and the obvious suspect is wrong: `new Uri(path)` escapes
   the literal `%` to `%25`, so `PathUri.FromPath` / `ToPath` round-trip it exactly (pinned by
@@ -293,11 +296,33 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every
   workspace on the machine, keyed by user and server path rather than by root, and it outlives
   the client that started it. Two consequences bit already:
-  - **`workspace/projectInitializationComplete` never fires for a client that attaches to a
-    loaded daemon** — it fired before the process existed. `WaitReadyAsync` must poll the
-    sentinel from the start and treat the notification as diagnostic only. Blocking on it
-    first made every warm run burn its entire timeout, 300 s under `run.sh`, and looked
-    exactly like a slow cold load.
+  - **The daemon shares a process, not a loaded workspace: every attach re-runs the whole
+    solution load.** Measured 2026-09-10 on the fixture and on CommunityToolkit (26 projects),
+    with the server's log read the only way it can be — Roslyn sends it to the *client* as
+    `window/logMessage`, which `Endpoints.OnLogMessage` discards, so a temporary dump there is
+    the instrument; the daemon's own stderr says nothing but `Daemon accepted a new client
+    connection.`, and `--extensionLogDirectory` is forwarded and writes no file. Each attach
+    logs `AutoLoadProjectsInitializer` → `LanguageServerProjectSystem] Loading <solution>` →
+    **a fresh `BuildHost` process** → every `.csproj` reloaded →
+    `Completed (re)load of all projects in ...`. Fixture ~1.6 s per attach; CommunityToolkit
+    ~25-30 s per attach, which is the entire warm wall clock. The only lever cslq holds is not
+    sending `workspaceFolders`, and that is measured to leave the client with an **empty**
+    workspace rather than the daemon's loaded one — no cslq-side fix exists at the
+    `initialize` layer. Consequences, all measured rather than inferred:
+    - **`workspace/projectInitializationComplete` fires once per attach**, warm daemon
+      included: it marks the end of *this client's* reload, not the daemon's history. (This
+      bullet used to say it never fires on a warm attach. That was wrong, but the fix it
+      justified was not: `WaitReadyAsync` polls the sentinels from the start rather than
+      blocking on the notification, and that is right for a reason the bullet got to by
+      accident — the notification comes *after* the load it terminates, so blocking on it
+      first would still cost the whole reload.) It fires only for a client that sends
+      workspace folders, because that is what triggers the reload it terminates.
+    - **The notification does not mean every project is queryable.** On CommunityToolkit
+      sentinels resolved progressively *through* the reload — 8 of 12 projects before the
+      notification, spread over 20 s — and four kept resolving for a further 6-8 s *after*
+      it. So `workspace/symbol` answers partially during a load, in both directions: this is
+      the incomplete-answer window, and it straddles the notification.
+      `WaitReadyAsync`'s `PostLoadGrace` exists for the tail.
   - **One sentinel no longer proved the workspace was loaded — now there is one per
     project, and `--sentinel` adds to that set rather than replacing it.** Cold load used to close that window by accident, costing a minute; warm attach
     reaches it in seconds. Two symptoms came out of it. Until a project is loaded, Roslyn

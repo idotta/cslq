@@ -5,7 +5,7 @@ it records what the released tool did and is never edited. This file is the live
 being fixed, in which order, how each fix is proven, and what was decided along the way. Item
 ids (`T-nn`) are the reference's; look there for the evidence and the original repro lines.
 
-Last updated: 2026-09-09. Batch 1 is PR #21 (merged). Batch 2 is PR #22 (merged). Batch 3 is
+Last updated: 2026-09-10. Batch 1 is PR #21 (merged). Batch 2 is PR #22 (merged). Batch 3 is
 PR #23 (merged). Batch 4 is PR #24 (merged, 69f4b6a). Batch 5 is PR #25 (merged, e283eeb).
 
 ## Rules
@@ -31,7 +31,7 @@ PR #23 (merged). Batch 4 is PR #24 (merged, 69f4b6a). Batch 5 is PR #25 (merged,
 | 3. Daemon under captured stdout | T-55 | merged (PR #23) |
 | 4. Symbol targeting | T-06 T-07 T-11 T-16 | merged (PR #24) |
 | 5. Readiness on real repositories | T-82 T-84 T-39 T-40 T-36 T-41 | merged (PR #25) |
-| 6. Per-attach reload (investigation first) | T-83 T-56 T-61 T-87 T-88 T-85 | not started |
+| 6. Per-attach reload (investigation first) | T-83 T-56 T-61 T-87 T-88 T-85 | investigated; cause is upstream, no `src/` fix, docs corrected |
 | 7. Multi-targeting | T-26 T-27 T-28 T-29 | not started |
 | 8. Output, CLI and docs | T-65–T-81, section (k) wording | not started |
 
@@ -234,7 +234,7 @@ first; record them in DESIGN.md.
 
 ## Batch 6 — the per-attach reload (investigation first)
 
-- [ ] **T-83 / T-56 / T-61 / T-87 / T-88 — every client attach re-runs the workspace load.**
+- [x] **T-83 / T-56 / T-61 / T-87 / T-88 — every client attach re-runs the workspace load.**
       Status: measured by testers (CPU-seconds on one server pid, OrchardCore; the same shape
       at 26 projects). **Cause is in the server and is not known**; the report only infers
       what `initialize` triggers. Nothing in cslq is changed until the mechanism is read.
@@ -250,16 +250,30 @@ first; record them in DESIGN.md.
          right default.
       Record the measurements here. Until fixed, the README's warm-attach claim gets a scale
       qualifier.
-- [ ] **T-85 — `diag` reports false CS0234/CS0246/CS0103 while references are still binding.**
+      **Outcome (rounds 1 and 2 below):** the mechanism is read and named — the daemon shares
+      a process, not a loaded workspace, and each client's own `initialized` re-runs the whole
+      solution load under `--autoLoadProjects`. Option 1 of step 3 is measured dead: the only
+      lever cslq holds at `InitializeAsync` is omitting `workspaceFolders`, which yields an
+      empty workspace. Options 2 and 3 taken — the issue is drafted below (not filed) and the
+      scale qualifier is in README, SKILL.md and CLAUDE.md. No `src/` behaviour change.
+- [x] **T-85 — `diag` reports false CS0234/CS0246/CS0103 while references are still binding.**
       Status: measured by testers on OrchardCore, with `--sentinel`. Rides on T-83 (the pull
       runs during the per-attach reload) and T-82 (which forced `--sentinel`).
       Do not fix independently. Re-measure after batch 5 and the T-83 outcome; if it persists,
       withhold those three codes while any referenced project is unresolved, or gate `diag` on
       the full readiness set.
-- [ ] **T-61 — warm floor scales with project count (the poll itself).**
+      **Outcome: not reproduced.** Five `diag` runs on CommunityToolkit after batch 5,
+      including the `--sentinel` shape that produced it, report zero CS0234/CS0246/CS0103
+      (2026-09-10, below). Batch 5 made `--sentinel` additive, so readiness waits for every
+      project before `diag` opens anything. Closed as fixed by batch 5, with the limit
+      stated: OrchardCore was not re-run.
+- [x] **T-61 — warm floor scales with project count (the poll itself).**
       Status: measured; two mechanisms, and the second (T-83) dominates. Revisit only after
       T-83: cache readiness per (daemon, root) for a short window, or log one line per
       sentinel at `--log-level Information`.
+      **Outcome: closed without a fix.** The wall clock is the reload, so a cached readiness
+      would return during the next attach's reload while `workspace/symbol` is still partial
+      — the incomplete-answer-at-exit-0 bug batch 5 closed. Reasoning under step 4 below.
 
 ### Measurements 2026-09-09 — Batch 6 round 1 (investigation only, no `src/` change)
 
@@ -349,6 +363,161 @@ loaded solution is not visible to a client that did not ask for it.
 entire warm floor. The only lever cslq holds is *not sending* the folders, and that is measured
 to produce an empty workspace rather than a shared one — so there is no cslq-side fix at the
 `InitializeAsync` layer. The daemon shares a process, not a loaded workspace.
+
+### Measurements 2026-09-10 — Batch 6 round 2
+
+**Step 1 — the notification, re-verified on the fixture.** `--root fixture`, fresh
+`ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME`, three sequential attaches, temporary
+`window/logMessage` dump (route 3 above; reverted). It reproduces locally in seconds — the
+per-attach reload is not a large-repository effect:
+
+| attach | wall | `Completed (re)load of all projects in` | `projectInitializationComplete` |
+|---|---|---|---|
+| 1 (cold) | 4.6 s | 00:00:01.71 | fired, 03:48:21.465 |
+| 2 (warm) | 2.7 s | 00:00:01.56 | fired, 03:48:25.455 |
+| 3 (warm) | 2.6 s | 00:00:01.67 | fired, 03:48:28.418 |
+
+The actual per-attach lines, at `--log-level Information`:
+
+```
+03:48:23.771 [initialized] [AutoLoadProjectsInitializer] Found single solution file C:\dev\cs-lspls\fixture\Fixture.slnx to auto load
+03:48:23.794 [initialized] [LanguageServerProjectSystem] Loading C:\dev\cs-lspls\fixture\Fixture.slnx...
+03:48:25.182 [initialized] [LanguageServerProjectSystem] Successfully completed load of ...\fixture\Gen\Gen.csproj
+03:48:25.399 [initialized] [LanguageServerProjectSystem] Successfully completed load of ...\fixture\App\App.csproj
+03:48:25.426 [initialized] [LanguageServerProjectSystem] Successfully completed load of ...\fixture\Core\Core.csproj
+03:48:25.454 [initialized] [LanguageServerProjectSystem] Completed (re)load of all projects in 00:00:01.5622899
+03:48:25.455 NOTIFICATION workspace/projectInitializationComplete
+```
+
+Attaches 1 and 3 are identical in shape. At cslq's default `--log-level Warning` the
+`LanguageServerProjectSystem` lines are absent but the notification still arrives once per
+attach (3 of 3 attaches on a separate pipe). So round 1's finding holds on the smallest
+workspace in the repository.
+
+**The incomplete-answer window, measured.** A second temporary dump, logging each sentinel the
+moment it first resolves, run against CommunityToolkit:
+
+| attach | sentinels resolved before the notification | after it | last resolution after the notification |
+|---|---|---|---|
+| 1 | 5 of 12, over 8 s | 7 | +7.9 s |
+| 2 | 8 of 12, over 21 s | 4 | +6.4 s |
+
+This corrects the wire claim `WaitReadyAsync` carried (`answers nothing at all until
+projectInitializationComplete and then jumps straight to complete`). `workspace/symbol` answers
+**partially** throughout a load, and it is still incomplete for several seconds *after* the
+notification. The window straddles it in both directions, which is exactly what
+`PostLoadGrace` covers and why it is 20 s rather than 0.
+
+**Step 2 — what changed.** Prose only; `WaitReadyAsync`'s logic is unchanged and
+`exhausted-candidate-fails-after-load` stays green.
+
+- `LspClient.WaitReadyAsync` doc comment: the poll-from-the-start rationale (the notification
+  ends the load rather than preceding it, so blocking on it costs the load), the wire
+  behaviour paragraph (partial, straddling), and the `PostLoadGrace` paragraph (the
+  notification fires on every attach, so the bound applies to cold and warm alike; the tail
+  after it is what the grace is for).
+- CLAUDE.md: the daemon bullet is rewritten around "shares a process, not a loaded workspace",
+  with the instrumentation route and the numbers; the readiness bullet no longer claims a cold
+  load answers nothing until the notification.
+- README: the daemon latency table gains a paragraph naming it as the fixture's three
+  projects, with CommunityToolkit's 26 projects / 28-33 s per attach beside it; the design
+  table's "never fires for a client attaching to a loaded daemon" is replaced.
+- `skills/csharp-semantic-queries/SKILL.md`: the same scale qualifier, phrased for an agent
+  budgeting calls.
+
+**Why the logic was left alone.** The rule it rests on — never bound the wait when the
+notification has not fired — is still right, and is now right for a better reason. The
+notification cannot arrive early on a warm attach, because it terminates *this client's* own
+reload; so `loaded` is never set against a workspace that is still loading, and the feared
+failure mode (bounding to 20 s at second zero of a live load, then failing or answering short)
+cannot occur. The `loaded is null` branch is not dead either: a client that sends no workspace
+folders never sees the notification, and round 1's fifth row is what that costs.
+
+**Step 3 — T-85 re-measured, on CommunityToolkit.** Corpus restored, not built — the same shape
+T-85 blamed for the missing fallback metadata reference.
+`tests/CommunityToolkit.Common.UnitTests/Test_Converters.cs` has a direct `ProjectReference` on
+`src/CommunityToolkit.Common`. Warm daemon throughout:
+
+| call | wall | result |
+|---|---|---|
+| `diag <file>` pull 1 | 31.1 s | `no diagnostics` |
+| `diag <file>` pull 2 | 27.6 s | `no diagnostics` |
+| `diag <file> --sentinel Guard` | 20.7 s | `no diagnostics` |
+| `diag <dir>` (CommunityToolkit.Common.UnitTests) | 24.1 s | 139 lines, every one an `IDE****` suggestion |
+| `diag <dir> --errors-only` (HighPerformance.UnitTests) | 33.5 s | `no diagnostics` |
+
+Zero CS0234, CS0246 or CS0103 in any of them, including the `--sentinel` shape that produced
+them on OrchardCore. That is the expected consequence of batch 5: `--sentinel` is now additive,
+so readiness still waits for **every** project before `diag` opens anything, and the pull can no
+longer run against half-bound references. T-85 was reported against the pre-batch-5 behaviour,
+where one explicit sentinel replaced the whole readiness set.
+
+The honest limit: OrchardCore was not re-run — every call there costs 75-160 s and its numbers
+are already in the reference — so this is CommunityToolkit evidence plus a mechanism that is
+understood, not a direct retest of the reported corpus.
+
+**Step 4 — T-61, closed without a fix.** The proposal was to cache readiness per (daemon, root)
+for a short window. The measurements above make that unsafe: the wall clock *is* the reload, and
+a cached "ready" would return during the next attach's reload, when `workspace/symbol` is
+measurably partial (5 of 12 projects, 8 of 12 projects, above). That hands back exactly the
+incomplete-answer-at-exit-0 bug batch 5 closed — a cross-project `refs`, or a whole project's
+`sym` hits, simply missing at exit 0. The poll is not the cost; it is the only thing making the
+cost visible. Probing the sentinels concurrently is already what `WaitReadyAsync` does (one
+round for all projects at once). Closed as won't-fix here; it stops being interesting at all if
+the upstream issue below is fixed.
+
+### Draft upstream issue against `roslyn-language-server` (not filed)
+
+> **Title:** `--daemon`: every client attach re-runs the full solution load, so the daemon shares
+> a process but not a workspace
+>
+> **Version:** `roslyn-language-server` 5.12.0-1.26426.8
+> (`Microsoft.CodeAnalysis.LanguageServer` 5.12.0.0), .NET 10.0.11, Windows 11.
+>
+> **What happens.** A daemon started with `--daemon --pipe <name> --autoLoadProjects` re-runs the
+> entire MSBuild design-time load of the solution for *every* client that connects, not just the
+> first. On each attach the server logs, under that client's `initialized` handler:
+>
+> ```
+> [AutoLoadProjectsInitializer] Found single solution file <path>.slnx to auto load
+> [LanguageServerProjectSystem] Loading <path>.slnx...
+> [BuildHostProcessManager] .NET BuildHost started from ...\BuildHost-netcore\...
+> [BuildHost PID nnnnn] info: Registered MSBuild 10.0.301 instance at ...
+> [BuildHost PID nnnnn] info: Loading <every .csproj>
+> [LanguageServerProjectSystem] Successfully completed load of <every .csproj>
+> [LanguageServerProjectSystem] Completed (re)load of all projects in 00:00:24.66
+> ```
+>
+> A fresh `BuildHost` process is spawned per attach and MSBuild is re-registered in it. Nothing
+> loaded by an earlier client is reused.
+>
+> **Measured.** CommunityToolkit/dotnet (26 projects, restored, not built), one daemon, three
+> sequential clients, each polling `workspace/symbol` until it resolves: cold attach 32.7 s and
+> +76 CPU-seconds on the server process; warm attach 40.7 s / +114; warm attach 27.2 s / +70. On
+> a 233-project solution the same shape costs 100-160 s and 200-300 CPU-seconds per attach, and
+> three concurrent clients take ~350 s each against 76-92 s alone. A three-project solution is
+> ~1.6 s per attach, so the cost scales with project count rather than being fixed overhead.
+>
+> **Expected.** A daemon that has already loaded a workspace should serve a second client asking
+> for the same `workspaceFolders` out of the loaded state, at roughly the cost of the pipe round
+> trip.
+>
+> **The obvious workaround is not one.** Omitting `rootUri`/`workspaceFolders` from `initialize`
+> does suppress the reload — and leaves that client with an empty workspace: `workspace/symbol`
+> returns nothing indefinitely, on a daemon that had loaded that exact solution seconds earlier.
+> A client cannot opt into the already-loaded state, so the reload is the only way to get a
+> workspace at all, which is what makes the daemon a process cache rather than a workspace cache.
+>
+> **Two smaller things found alongside**, either of which would have made this much cheaper to
+> diagnose:
+>
+> - `--extensionLogDirectory <dir>` is accepted by the daemon (it appears on its command line)
+>   and no file is ever written there. The only way to read the load log is to be a connected
+>   client and keep `window/logMessage` — so the log is unavailable exactly when the server has
+>   no client — and the daemon's own stdout/stderr carries nothing but the startup banner and
+>   `Daemon accepted a new client connection.`, even at `--logLevel Trace`.
+> - `--logLevel` passed by a later client is silently ignored, since the first client configures
+>   the daemon, and there is no way to ask a running daemon what it was started with.
 
 ## Batch 7 — multi-targeting
 
