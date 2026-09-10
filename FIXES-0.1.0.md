@@ -715,7 +715,7 @@ docs pass covers everything at once.
   falling back on every inference failure is the documented escape hatch), one fixed —
   `ProjectSources.DefaultItemsDisabled` counts only an *unconditional* `false`, a conditioned
   value is unknown and leaves the project probed (two tests, 184 unit tests). Batch 6 next.
-- 2026-09-10 — Batch 6 done on `fix/batch-6-per-attach-reload` (two commits, no PR). Investigation
+- 2026-09-10 — Batch 6 done on `fix/batch-6-per-attach-reload` (four commits, no PR). Investigation
   first, then prose only: **no `src/` behaviour change**. **T-83/T-56/T-87/T-88**: the mechanism
   is read rather than inferred. The daemon shares a server *process*, not a loaded workspace —
   every client's own `initialized` re-runs the whole solution load under `--autoLoadProjects`
