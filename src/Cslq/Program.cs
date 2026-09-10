@@ -11,13 +11,13 @@ internal static partial class Program
 
         usage:
           cslq ready   [--sentinel <symbol>]
-          cslq refs    <symbol | file:line:col> [--max N] [--context N]
+          cslq refs    <symbol | file:line:col> [--max N] [--context N] [--tfm T]
           cslq def     <symbol | file:line:col> [--max N] [--context N] [--tfm T]
-          cslq impl    <symbol | file:line:col> [--max N] [--context N]
+          cslq impl    <symbol | file:line:col> [--max N] [--context N] [--tfm T]
           cslq hover   <symbol | file:line:col> [--max N] [--tfm T]
           cslq sym     <query> [--max N]
-          cslq outline <file | symbol> [--max N]
-          cslq diag    [path] [--errors-only] [--max N] [--context N]
+          cslq outline <file | symbol> [--max N] [--tfm T]
+          cslq diag    [path] [--errors-only] [--max N] [--context N] [--tfm T]
           cslq project <file> [--tfm T]
           cslq restore
 
