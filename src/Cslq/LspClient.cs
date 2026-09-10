@@ -13,7 +13,7 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly StringBuilder _stderr;
     private readonly HashSet<string> _open = new(PathUri.PathComparer);
     private readonly Dictionary<string, string[]> _lines = new(PathUri.PathComparer);
-    private readonly Dictionary<string, (string? File, string? Tfm)> _projects = new(PathUri.PathComparer);
+    private readonly Dictionary<string, IReadOnlyList<DocumentContext>> _contexts = new(PathUri.PathComparer);
     private readonly bool _daemon;
     private readonly CancellationToken _ct;
 
@@ -452,14 +452,26 @@ internal sealed class LspClient : IAsyncDisposable
         return result ?? [];
     }
 
-    public async Task<IReadOnlyList<Location>> ReferencesAsync(string uri, Position position, CancellationToken ct)
+    /// <summary>
+    /// Every reference, from every context asked, concatenated. Not the first context that
+    /// answers, unlike <see cref="DefinitionAsync"/>: a reference inside an
+    /// <c>#if NET9_0</c> block exists only in that context, so stopping early omits it
+    /// silently. The fold that collapses a hit two contexts both report is
+    /// <c>Output.WriteLocationsAsync</c>'s, on the rendered label plus range, and it is the
+    /// same fold that already collapsed a generated document's per-framework twins.
+    /// </summary>
+    public async Task<IReadOnlyList<Location>> ReferencesAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await SettleAsync(async () =>
-            await RequestAsync<Location[]?>(
-                "textDocument/references",
-                new ReferenceParams(new TextDocumentIdentifier(uri), position, new ReferenceContext(true)),
-                ct) ?? [], ct);
+        return await AskAllAsync(
+            uri,
+            contexts,
+            doc => SettleAsync(async () =>
+                await RequestAsync<Location[]?>(
+                    "textDocument/references",
+                    new ReferenceParams(doc, position, new ReferenceContext(true)),
+                    ct) ?? [], ct));
     }
 
     /// <summary>
@@ -468,14 +480,56 @@ internal sealed class LspClient : IAsyncDisposable
     /// Deliberately no two-shape reader — if that ever stops holding, a deserialization
     /// failure is a better outcome than silently rendering half a response.
     /// </summary>
-    public async Task<IReadOnlyList<Location>> DefinitionAsync(string uri, Position position, CancellationToken ct)
+    public async Task<Answer<IReadOnlyList<Location>>> DefinitionAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await SettleAsync(async () =>
-            await RequestAsync<Location[]?>(
-                "textDocument/definition",
-                new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
-                ct) ?? [], ct);
+        // The decompilation guard wraps each context's ask rather than the loop: a stale
+        // binding is a property of one context's answer, and an empty answer from the wrong
+        // context is what the loop is for.
+        return await AskEachAsync<IReadOnlyList<Location>>(
+            uri,
+            contexts,
+            doc => SettleAsync(async () =>
+                await RequestAsync<Location[]?>(
+                    "textDocument/definition", new TextDocumentPositionParams(doc, position), ct) ?? [], ct),
+            l => l.Count > 0);
+    }
+
+    /// <summary>
+    /// One request per context, in the order <see cref="Contexts.Order"/> fixed, stopping at
+    /// the first context that answers.
+    /// <para>
+    /// Both halves are load-bearing. Sending <c>_vs_projectContext</c> is what makes the
+    /// answer repeatable — without it Roslyn binds the document to whichever context sorted
+    /// first on this attach, which on <c>fixture2/Multi</c> made <c>hover</c> on a type inside
+    /// an <c>#if</c> answer 4 times in 8 (measured 2026-09-10). The retry is what makes it
+    /// <em>right</em>: a symbol only exists in one branch, so a fixed context alone would turn
+    /// a coin flip into a guaranteed miss for every symbol living in the other one.
+    /// </para>
+    /// <para>
+    /// A single-context document pays one ask, the identifier carrying the one context it has.
+    /// An empty answer from every context returns the <em>first</em> context's, so the caller
+    /// renders one determinate "nothing" rather than whichever context was tried last.
+    /// </para>
+    /// </summary>
+    private static async Task<Answer<T>> AskEachAsync<T>(
+        string uri,
+        IReadOnlyList<DocumentContext> contexts,
+        Func<TextDocumentIdentifier, Task<T>> ask,
+        Func<T, bool> answered)
+    {
+        if (contexts.Count == 0) return new Answer<T>(await ask(new TextDocumentIdentifier(uri)), null);
+
+        Answer<T>? empty = null;
+        foreach (var context in contexts)
+        {
+            var value = await ask(new TextDocumentIdentifier(uri) { ProjectContext = context.Wire });
+            if (answered(value)) return new Answer<T>(value, context);
+            empty ??= new Answer<T>(value, context);
+        }
+
+        return empty!;
     }
 
     /// <summary>
@@ -486,14 +540,65 @@ internal sealed class LspClient : IAsyncDisposable
     /// this degenerates to <c>definition</c> on an ordinary method. Empty means the position
     /// resolved to no symbol.
     /// </summary>
-    public async Task<IReadOnlyList<Location>> ImplementationsAsync(string uri, Position position, CancellationToken ct)
+    public async Task<IReadOnlyList<Location>> ImplementationsAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await SettleAsync(async () =>
-            await RequestAsync<Location[]?>(
-                "textDocument/implementation",
-                new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
-                ct) ?? [], ct);
+        return await AskAllAsync(
+            uri,
+            contexts,
+            doc => SettleAsync(async () =>
+                await RequestAsync<Location[]?>(
+                    "textDocument/implementation", new TextDocumentPositionParams(doc, position), ct) ?? [], ct));
+    }
+
+    /// <summary>
+    /// One request per context, every answer concatenated — the set-valued counterpart to
+    /// <see cref="AskEachAsync{T}"/>. A document with no context at all is asked once with no
+    /// context, which is what every request looked like before any of this existed.
+    /// </summary>
+    private static async Task<IReadOnlyList<T>> AskAllAsync<T>(
+        string uri,
+        IReadOnlyList<DocumentContext> contexts,
+        Func<TextDocumentIdentifier, Task<IReadOnlyList<T>>> ask)
+    {
+        if (contexts.Count == 0) return await ask(new TextDocumentIdentifier(uri));
+
+        var all = new List<T>();
+        foreach (var context in contexts)
+        {
+            all.AddRange(await ask(new TextDocumentIdentifier(uri) { ProjectContext = context.Wire }));
+        }
+
+        return all;
+    }
+
+    /// <summary>
+    /// The same fan-out, keeping each context's answer separate: <c>outline</c> and
+    /// <c>diag</c> both have to say which contexts a row came from, which a concatenation
+    /// throws away. The name is the context's label, or the empty string for a document with
+    /// no context, so a caller can render a mark without knowing about contexts at all.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Name, IReadOnlyList<T> Values)>> AskEveryAsync<T>(
+        string uri,
+        IReadOnlyList<DocumentContext> contexts,
+        IReadOnlyList<string> names,
+        Func<TextDocumentIdentifier, Task<IReadOnlyList<T>>> ask)
+    {
+        if (contexts.Count == 0)
+        {
+            return [(string.Empty, await ask(new TextDocumentIdentifier(uri)))];
+        }
+
+        var views = new List<(string, IReadOnlyList<T>)>(contexts.Count);
+        for (var i = 0; i < contexts.Count; i++)
+        {
+            views.Add((
+                names[i],
+                await ask(new TextDocumentIdentifier(uri) { ProjectContext = contexts[i].Wire })));
+        }
+
+        return views;
     }
 
     /// <summary>
@@ -579,23 +684,35 @@ internal sealed class LspClient : IAsyncDisposable
     /// document, so a metadata binding is not a wrong answer here.
     /// </para>
     /// </summary>
-    public async Task<Hover?> HoverAsync(string uri, Position position, CancellationToken ct)
+    public async Task<Answer<Hover?>> HoverAsync(
+        string uri, Position position, IReadOnlyList<DocumentContext> contexts, CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        return await RequestAsync<Hover?>(
-            "textDocument/hover",
-            new TextDocumentPositionParams(new TextDocumentIdentifier(uri), position),
-            ct);
+        return await AskEachAsync<Hover?>(
+            uri,
+            contexts,
+            doc => RequestAsync<Hover?>(
+                "textDocument/hover", new TextDocumentPositionParams(doc, position), ct),
+            h => h?.Contents?.Value is not null);
     }
 
-    public async Task<IReadOnlyList<DocumentSymbol>> DocumentSymbolsAsync(string uri, CancellationToken ct)
+    /// <summary>
+    /// Each context's view of the document's declarations, kept apart for
+    /// <see cref="Outline.Merge"/> to union. Every caller wants the union — the renderer to
+    /// print a mark, the dotted-target chain so that a declaration in either branch resolves.
+    /// </summary>
+    public async Task<IReadOnlyList<OutlineView>> DocumentSymbolsAsync(
+        string uri, IReadOnlyList<DocumentContext> contexts, IReadOnlyList<string> names,
+        CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var result = await RequestAsync<DocumentSymbol[]?>(
-            "textDocument/documentSymbol",
-            new DocumentSymbolParams(new TextDocumentIdentifier(uri)),
-            ct);
-        return result ?? [];
+        var views = await AskEveryAsync<DocumentSymbol>(
+            uri,
+            contexts,
+            names,
+            async doc => await RequestAsync<DocumentSymbol[]?>(
+                "textDocument/documentSymbol", new DocumentSymbolParams(doc), ct) ?? []);
+        return [.. views.Select(v => new OutlineView(v.Name, v.Values))];
     }
 
     /// <summary>
@@ -613,14 +730,23 @@ internal sealed class LspClient : IAsyncDisposable
     /// daemon has never opened, which is the one state where answering before binding shows up.
     /// Note the old loop could not have caught that case anyway: two equally-wrong pulls agree.
     /// </summary>
-    public async Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string uri, CancellationToken ct)
+    /// <remarks>
+    /// One pull <em>per context</em>, though. A diagnostic can exist in one framework and not
+    /// another — the whole of T-28 — so a single pull reports one context's view of the file
+    /// and silently drops the rest. <c>fixture2/Multi/TfmError.cs</c> holds a CS0029 that only
+    /// <c>net9.0</c> has, and an unqualified pull reported it in 1 run of 4.
+    /// </remarks>
+    public async Task<IReadOnlyList<(string Name, IReadOnlyList<Diagnostic> Items)>> DiagnosticsAsync(
+        string uri, IReadOnlyList<DocumentContext> contexts, IReadOnlyList<string> names,
+        CancellationToken ct)
     {
         await OpenAsync(uri, ct);
-        var report = await RequestAsync<DocumentDiagnosticReport?>(
-            "textDocument/diagnostic",
-            new DocumentDiagnosticParams(new TextDocumentIdentifier(uri)),
-            ct);
-        return report?.Items ?? [];
+        return await AskEveryAsync<Diagnostic>(
+            uri,
+            contexts,
+            names,
+            async doc => (await RequestAsync<DocumentDiagnosticReport?>(
+                "textDocument/diagnostic", new DocumentDiagnosticParams(doc), ct))?.Items ?? []);
     }
 
     /// <summary>
@@ -688,34 +814,34 @@ internal sealed class LspClient : IAsyncDisposable
     /// consuming it — so one generator applied to several projects yields several distinct
     /// documents whose labels are otherwise identical.
     /// <para>
-    /// <c>textDocument/_vs_getProjectContexts</c> is a VS protocol extension rather than LSP,
-    /// and the server neither advertises it nor requires a matching client capability
-    /// (verified against 5.12.0-1.26426.8, 2026-09-06). <c>_vs_id</c> is
-    /// <c>&lt;projectId guid&gt;|&lt;absolute .csproj&gt; ($&lt;tfm&gt;)</c>: the guid is
-    /// regenerated per load and the path is not, so only the path is read. A multi-targeted
-    /// document has one context per TFM, all naming one <c>.csproj</c>, and
-    /// <c>_vs_defaultIndex</c> picks among them.
-    /// </para>
-    /// <para>
-    /// Failure is not fatal: an unanswerable label falls back to the generator-only form,
-    /// which is what every label looked like before this existed. Cached because a generated
-    /// document usually contributes several hits to one answer.
+    /// One name, not a list: which of a multi-targeted project's contexts supplied it makes no
+    /// difference to the project it names, so this takes the first in
+    /// <see cref="Contexts.Order"/>'s order. Everything that asks a <em>question</em> of a
+    /// context goes through <see cref="ContextsAsync"/> and chooses deliberately.
     /// </para>
     /// </summary>
     public async Task<string?> ProjectOfAsync(string uri, CancellationToken ct) =>
-        (await ProjectContextAsync(uri, ct)).File;
+        (await ContextsAsync(uri, ct)) is [var first, ..] ? first.File : null;
 
     /// <summary>
-    /// The same lookup with the target framework kept. The <c>($tfm)</c> suffix rides on the
-    /// <c>_vs_id</c> and <see cref="ProjectOfAsync"/> throws it away; <c>cslq project</c> is
-    /// the one caller that wants it, because "which project compiles this file" is only half
-    /// answered without the framework a multi-targeted project compiles it for.
+    /// Every project context the document is compiled in, in <see cref="Contexts.Order"/>'s
+    /// order. Empty when no project compiles it, and empty rather than fatal when the server
+    /// will not answer the request at all.
+    /// <para>
+    /// <c>textDocument/_vs_getProjectContexts</c> is a VS protocol extension rather than LSP,
+    /// and the server neither advertises it nor requires a matching client capability
+    /// (verified against 5.12.0-1.26426.8, 2026-09-06). <c>_vs_id</c> is
+    /// <c>&lt;projectId guid&gt;|&lt;absolute .csproj&gt; ($&lt;tfm&gt;)</c>. Only the path
+    /// half is read — the guid is regenerated on every attach — but the id travels back whole
+    /// in a <c>_vs_projectContext</c>, so the fetch and the use have to happen in one process.
+    /// That is what this cache is: per document, per attach, never across runs.
+    /// </para>
     /// </summary>
-    public async Task<(string? File, string? Tfm)> ProjectContextAsync(string uri, CancellationToken ct)
+    public async Task<IReadOnlyList<DocumentContext>> ContextsAsync(string uri, CancellationToken ct)
     {
-        if (_projects.TryGetValue(uri, out var cached)) return cached;
+        if (_contexts.TryGetValue(uri, out var cached)) return cached;
 
-        (string? File, string? Tfm) project = (null, null);
+        IReadOnlyList<DocumentContext> contexts = [];
         try
         {
             var list = await _rpc.InvokeWithParameterObjectAsync<ProjectContextList?>(
@@ -723,50 +849,24 @@ internal sealed class LspClient : IAsyncDisposable
                 new ProjectContextParams(new TextDocumentIdentifier(uri)),
                 ct);
 
-            var contexts = list?.Contexts ?? [];
-            var index = list is not null && list.DefaultIndex >= 0 && list.DefaultIndex < contexts.Length
-                ? list.DefaultIndex
-                : 0;
-            if (contexts.Length > 0) project = ProjectFile(contexts[index].Id);
+            contexts = Contexts.Read(list?.Contexts ?? []);
         }
         catch (RemoteRpcException)
         {
             // RemoteRpcException, not RemoteInvocationException: a server that drops the
             // extension answers RemoteMethodNotFoundException, which is a sibling of the
             // latter, not a subclass -- catching the narrower type would turn a coarser label
-            // into a crash. The generator-only label is a correct if coarser answer.
+            // into a crash. A generator-only label is a correct if coarser answer, and a
+            // positional request with no context is what every one of them was before this.
             //
             // The one call that deliberately bypasses RequestAsync, for that reason: this is
             // an optional VS extension the server need not implement, so a failure here is a
             // label to soften rather than a command to fail. Every other request wants the
-            // wrapper's CslqException, which this catch would swallow into a silent (null,
-            // null) project.
+            // wrapper's CslqException, which this catch would swallow into a silent empty.
         }
 
-        _projects[uri] = project;
-        return project;
-    }
-
-    /// <summary>
-    /// The path half of a <c>_vs_id</c>, with the <c>($tfm)</c> suffix the id carries for a
-    /// multi-targeted project removed. Anything else shaped unexpectedly yields null rather
-    /// than a guess: a wrong project in the label is worse than no project.
-    /// </summary>
-    internal static (string? File, string? Tfm) ProjectFile(string id)
-    {
-        var bar = id.IndexOf('|');
-        if (bar < 0) return (null, null);
-
-        var path = id[(bar + 1)..].Trim();
-        string? tfm = null;
-        var suffix = path.LastIndexOf(" ($", StringComparison.Ordinal);
-        if (suffix > 0 && path.EndsWith(')'))
-        {
-            tfm = path[(suffix + 3)..^1];
-            path = path[..suffix];
-        }
-
-        return path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ? (path, tfm) : (null, null);
+        _contexts[uri] = contexts;
+        return contexts;
     }
 
     /// <summary>
@@ -804,7 +904,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// else, so a bare <c>_rpc.Invoke</c> turns a server-side rejection or a daemon that died
     /// mid-request into a stack trace and exit 127. <c>initialize</c> keeps its own wrapping
     /// in <see cref="StartCoreAsync"/> — it has a different message and its own disposal — and
-    /// <see cref="ProjectContextAsync"/> is the one deliberate bypass; see the catch there.
+    /// <see cref="ContextsAsync"/> is the one deliberate bypass; see the catch there.
     /// </summary>
     private async Task<T?> RequestAsync<T>(string method, object? @params, CancellationToken ct)
     {

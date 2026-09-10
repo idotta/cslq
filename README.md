@@ -161,14 +161,14 @@ incidentally.
 
 ```
 cslq ready                                    # block until the workspace has loaded
-cslq refs <symbol | file:line:col> [--max N]  # every reference, with context
-cslq def <symbol | file:line:col>             # where it is declared
-cslq impl <symbol | file:line:col>            # what implements or overrides it
-cslq hover <symbol | file:line:col>           # what it is: type, signature, docs
+cslq refs <symbol | file:line:col> [--tfm T]  # every reference, with context
+cslq def <symbol | file:line:col> [--tfm T]   # where it is declared
+cslq impl <symbol | file:line:col> [--tfm T]  # what implements or overrides it
+cslq hover <symbol | file:line:col> [--tfm T] # what it is: type, signature, docs
 cslq sym <query> [--max N]                    # search the workspace by name
-cslq outline <file | symbol> [--max N]        # the declarations in one document
-cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
-cslq project <file>                           # which .csproj compiles it, for which TFM
+cslq outline <file | symbol> [--tfm T]        # the declarations in one document
+cslq diag [path] [--errors-only] [--tfm T]    # compiler and analyzer diagnostics
+cslq project <file> [--tfm T]                 # every .csproj + TFM that compiles it
 cslq restore                                  # fetch the pinned language server, then exit
 ```
 
@@ -304,7 +304,29 @@ registration means.
 
 Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (default 50),
 `--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
-(default 180), `--log-level L`, `--errors-only` (`diag` only), `--json`.
+(default 180), `--log-level L`, `--errors-only` (`diag` only), `--tfm T`, `--json`.
+
+`--tfm T` answers in one target framework's context. A file in a `net10.0;net9.0` project is
+compiled twice, so a type inside `#if NET9_0` exists in one context and not the other, and every
+command that asks something *of a document* would otherwise answer for whichever context Roslyn
+happened to bind it to — which was not stable between runs.
+
+Each of them now handles that itself, and the rule follows the shape of the answer.
+`hover` and `def` return one thing, so they ask the contexts in a fixed order and stop at the
+first that answers, reporting which: `answered in net9.0 of 2 contexts: net10.0, net9.0`.
+`refs`, `impl`, `outline` and `diag` return a *set*, so they ask every context and union the
+results — a reference inside an `#if NET9_0` block exists only in that context, and stopping
+early would drop it — and say `merged from 2 contexts: net10.0, net9.0`. `outline` marks the
+declarations that are not in every context (`public sealed class Only9  [net9.0]`) and `diag`
+marks the diagnostics that are not reported by every one, which is how a `net9.0`-only error
+becomes visible at all. `project` lists every context, one row each.
+
+So `--tfm` is not needed to get a correct answer; it is for asking a *specific* framework —
+"does net9.0 see this", "does net8.0 build" — and for the case where you want one view rather
+than the union. A framework the document has no context for is an error naming the ones it has.
+Under `--json`, `contexts` on the envelope is how many the document has, `tfm` is the context
+that answered where one did — absent rather than null where none did, which is every union —
+and `outline` and `diag` rows carry their own `tfm`, null when every context agrees.
 
 `--json` wraps every command in the same `{ count, truncated, results }` envelope, `ready`
 included — one result carrying `ready`, `projects` (how many projects were actually probed) and

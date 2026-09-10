@@ -84,33 +84,6 @@ public class CliSurfaceTests
     }
 
     /// <summary>
-    /// The path half of a <c>_vs_id</c>, with the framework the id carries for a multi-targeted
-    /// project kept rather than thrown away — <c>cslq project</c> is what wants it. The guid
-    /// half is regenerated on every workspace load and is never read.
-    /// </summary>
-    [Theory]
-    [InlineData(
-        "3fa8|C:\\repo\\App\\App.csproj ($net10.0)", "C:\\repo\\App\\App.csproj", "net10.0")]
-    [InlineData("3fa8|/repo/App/App.csproj", "/repo/App/App.csproj", null)]
-    public void A_project_context_id_yields_the_csproj_and_the_framework(
-        string id, string file, string? tfm)
-    {
-        Assert.Equal((file, tfm), LspClient.ProjectFile(id));
-    }
-
-    /// <summary>
-    /// Anything shaped unexpectedly yields nothing rather than a guess: a wrong project in a
-    /// label is worse than no project.
-    /// </summary>
-    [Theory]
-    [InlineData("no-bar-at-all")]
-    [InlineData("3fa8|C:\\repo\\App\\App.vbproj")]
-    public void An_unexpected_project_context_id_yields_nothing(string id)
-    {
-        Assert.Equal((null, null), LspClient.ProjectFile(id));
-    }
-
-    /// <summary>
     /// Restore runs in the manifest directory, which is why it takes no path argument.
     /// </summary>
     [Fact]

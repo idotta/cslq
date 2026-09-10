@@ -27,6 +27,15 @@ near-useless to a model.
 - `--json` for the probe harness to assert against. Every row carries `generated` and
   `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
   prefix back off `path`.
+- **An envelope key that could only ever be null is omitted, not emitted as null.** A field a
+  caller has to interpret is worse than a field that is not there: `null` reads as "the answer
+  is unknown" when the truth is "the question does not apply to this command". So `tfm` sits on
+  an envelope only where a single context produced the answer — `hover` and `def` — and is
+  absent from a union's, where `contexts` and the footer say what was merged. This is the same
+  rule T-77 asks for about `diag`'s always-null `source`, decided here first so that batch 8
+  inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
+  not an absence — it means that row is in every context asked, which is exactly the thing its
+  marked neighbours are not — and row keys stay stable across the rows of one answer.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.
@@ -143,6 +152,120 @@ and `def` at `Console.WriteLine` went 12.5 s to 2.5 s. A workspace that declares
 `Console` pays the budget on a framework `def`; that is the accepted cost of keeping the guard.
 The stale case cannot be reproduced by a probe — that is what the measurement says — so only the
 pure halves of the discriminator are pinned, by `PathUriTests`.
+
+**A multi-targeted document has several project contexts, and every one of them is a different
+answer.** `net10.0;net9.0` means Roslyn compiles the file twice, with different preprocessor
+symbols, so a type inside `#if NET9_0` exists in one context and not the other. Positional and
+document requests are answered in **one** context, and the client is what picks it.
+
+The contexts come from `textDocument/_vs_getProjectContexts`, one per `(.csproj, TFM)` pair, and
+`cslq` orders them itself — `.csproj` path, then TFM, both ordinal. **Never the order the
+server sent and never `_vs_defaultIndex`.** Measured 2026-09-10 on `fixture2/Multi` against
+5.12.0-1.26426.8: `_vs_defaultIndex` was `0` in 6 of 6 runs while the array order around it
+varied per attach, and the unqualified answer followed `contexts[0]` in 6 of 6 — which is the
+whole of T-26 (`project` naming a different TFM each run) and T-27 (`hover`/`def` on a
+conditional type answering 4 times in 8). The index carries no information; the load order it
+reflects is not ours to control; an order of our own is the only thing that makes an answer
+repeatable.
+
+The chosen context rides on the request as `_vs_projectContext` inside the
+`TextDocumentIdentifier`, carrying the `_vs_id` **verbatim** — Roslyn matches on that alone, and
+the projectId guid inside it is regenerated on every attach, so the fetch and the use have to
+happen in one process. With it, 36 of 36 forced requests answered from the context asked for,
+including 24 whose `contexts[0]` was the other TFM, and 12 of 12 forced at the *wrong* context
+answered empty. Both directions are the measurement: the field decides the answer.
+
+**Determinism alone would be a regression, and this is the part worth remembering.** A symbol
+inside `#if NET9_0` does not exist in the `net10.0` context, so a fixed first context turns a
+coin flip into a *guaranteed* miss for every symbol living in the other branch — `hover Only9`
+would go from 4 misses in 8 to 8 in 8. So a context-bound request asks the contexts **in
+order, stopping at the first that answers**, and reports the one that did. Every context
+answering empty returns the first context's answer, so "nothing" is one determinate answer
+rather than whichever context was tried last.
+
+`--tfm <name>` restricts the set to the matching contexts — plural, because a file linked into
+two projects can be compiled for one framework twice — and a framework the document has no
+context for is an error naming the ones it has. It is what answers "does net9.0 build" without
+reading a `net10.0` view, and the escape hatch if a later server stops honouring
+`_vs_projectContext`.
+
+`project` prints **one row per context**, in that same order, with `count` equal to the number
+of contexts: it exists to tell an agent whether it has to reason about `#if` branches at all,
+and one row with `count: 1` said the file had a single home. An answer from a document with
+more than one context carries the context it came from — a trailing
+`answered in net9.0 of 2 contexts: net10.0, net9.0` in text, `tfm` and `contexts` on the
+`--json` envelope — and an empty one says how many were tried. A single-context document says
+nothing, which is every document in an ordinary repository: a note on every answer would train
+a caller to skip it.
+
+**Nothing but a pinned deterministic answer can catch a server that drops
+`_vs_projectContext`.** `_vs_getProjectContexts` either answers or fails, and the failure is
+handled; an unrecognised *member of a request payload* is silently ignored, and the symptom is
+the intermittency of T-27 coming back — an answer that is right most of the time. So
+`tfm-excludes-the-other-branch` in `cases.jsonl` asserts that `hover Only10 --tfm net9.0` finds
+**nothing**: it can only pass if the server honoured the context it was handed. Keep it, and
+keep it as an absence.
+
+**An answer that is a *set* asks every context and unions them, and that is a different rule
+from `hover` and `def`.** A single-answer command can stop at the first context that answers,
+because there is one right answer and the retry finds it. `refs`, `impl`, `outline` and `diag`
+answer with a set, and a set that stops early is *wrong*: a reference inside an `#if NET9_0`
+block exists only in that context, and omitting it is silent. So these four ask every context in
+the set — all of them, or the `--tfm` subset — and union what comes back:
+
+- **`refs` and `impl`** concatenate, and the existing fold does the rest: rows are folded on
+  their rendered label plus range, before `--max`, so a hit both contexts report is one row.
+  That is the same fold that already collapsed a generated document's per-framework twins, and
+  it is why the union does not reintroduce the duplication T-30 was about.
+- **`outline`** unions by declaration, keyed on name, kind and identifier position — every
+  context parses the same text, so those agree. A declaration's *extent* does not: on
+  `fixture2/Multi/Conditional.cs` the namespace ends at line 6 in `net10.0` and line 13 in
+  `net9.0`, each context seeing only its own branch, so a merged node takes the **widest**
+  range. Keeping the first context's made a child sit outside its own parent, and
+  `Targets.Chain` walks down by full-range containment, so `def Fixture2.Multi.Only9` went from
+  failing 2 runs in 6 to failing 4 in 4. Declarations that are not in every context asked carry
+  them — `public sealed class Only9  [net9.0]` — and the ones that are carry nothing, so an
+  unconditional file renders exactly as it did before.
+- **`diag`** pulls every context, folds rows on what a reader sees (position, severity, code and
+  message) and labels a row only some contexts report. This is T-28: `net9.0`-only CS0029 in
+  `TfmError.cs` was reported by an unqualified pull in 1 run of 4 and silently absent in the
+  other 3. The fold key includes the message because two contexts disagreeing about the *text*
+  at one position are two findings — serilog answers `Substring can be simplified` in one
+  context and `Slice can be simplified` in another — while an identical row from both is one
+  finding, which is what keeps `diag` free of the per-framework duplication testers confirmed it
+  never had.
+
+The cost is one extra pull per context per document, and it was measured before the rule was
+adopted rather than after. On `fixture2` (6 documents, 3 of them two-context) a whole-tree
+`diag` walk went from 2694/2740/2956 ms to 2827/2885/3030 ms warm, about +5%; on `fixture` (4
+single-context documents) 2690/2925 ms to 2534/2592/2732 ms, which is no change at all. A
+single-context document pays nothing but the one `_vs_getProjectContexts` request every
+context-bound command makes, and a document with N contexts pays N pulls because N pulls is
+what the answer is made of.
+
+**The dotted-target chain reads the union too, and ignores `--tfm` doing it.** `SelectAsync`
+resolves `Fixture2.Multi.Only9` by reading the declaration chain off the document's syntax tree;
+one context's tree cannot see the other branch's declaration at all, so the target failed with
+`no symbol matched` in 2 runs of 6 while the bare `Only9` was already deterministic. It now
+merges every context's tree — every context, not the `--tfm` subset, because this is "where in
+the file is this declared" and `--tfm` has no business constraining a lookup. The option still
+constrains the answer.
+
+A set answer's note names the contexts it **merged**, since every context asked contributed to
+it: `merged from 2 contexts: net10.0, net9.0`, or `merged from net9.0 of 2 contexts: …` under
+`--tfm`. `tried all 2 contexts: …` is kept for the *empty* answer, where nothing was found and
+it is the only true thing to say — a correct answer followed by "tried" reads as a failure the
+caller then has to rule out, which is a cost paid on every successful call. `hover` and `def`
+keep `answered in <tfm> of N contexts: …`, because for them one context really did answer.
+
+`--json` carries `contexts` on the envelope for all four, and **no `tfm`** — see the envelope
+rule above; the per-row `tfm` is where the fact lives: on an `outline` node, the contexts that
+declare it; on a `diag` row, the contexts that report it; null on both when every context asked
+has it.
+
+`diag` takes a note only when it was given a single file. A note names one document's contexts
+and a walk spans documents with different context sets; the per-row labels are what carry the
+fact there.
 
 ## Targeting a symbol by name
 

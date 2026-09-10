@@ -11,14 +11,14 @@ internal static partial class Program
 
         usage:
           cslq ready   [--sentinel <symbol>]
-          cslq refs    <symbol | file:line:col> [--max N] [--context N]
-          cslq def     <symbol | file:line:col> [--max N] [--context N]
-          cslq impl    <symbol | file:line:col> [--max N] [--context N]
-          cslq hover   <symbol | file:line:col> [--max N]
+          cslq refs    <symbol | file:line:col> [--max N] [--context N] [--tfm T]
+          cslq def     <symbol | file:line:col> [--max N] [--context N] [--tfm T]
+          cslq impl    <symbol | file:line:col> [--max N] [--context N] [--tfm T]
+          cslq hover   <symbol | file:line:col> [--max N] [--tfm T]
           cslq sym     <query> [--max N]
-          cslq outline <file | symbol> [--max N]
-          cslq diag    [path] [--errors-only] [--max N] [--context N]
-          cslq project <file>
+          cslq outline <file | symbol> [--max N] [--tfm T]
+          cslq diag    [path] [--errors-only] [--max N] [--context N] [--tfm T]
+          cslq project <file> [--tfm T]
           cslq restore
 
         options:
@@ -28,6 +28,7 @@ internal static partial class Program
           --context N       source lines either side of a hit (default: 1; unused by outline, sym, hover)
           --timeout N       seconds to wait for workspace load (default: 180)
           --log-level L     server log level (default: Warning)
+          --tfm T           answer in this target framework's context only
           --errors-only     diag: drop warnings and below
           --json            machine-readable output
           --no-daemon       start a dedicated server instead of the shared daemon
@@ -234,9 +235,11 @@ internal static partial class Program
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
-        var locations = await client.ReferencesAsync(uri, position, ct);
+        var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+        var locations = await client.ReferencesAsync(uri, position, asked, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct),
+            Union(all, asked));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -249,10 +252,12 @@ internal static partial class Program
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
-        var locations = await client.DefinitionAsync(uri, position, ct);
+        var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+        var answer = await client.DefinitionAsync(uri, position, asked, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
-        return locations.Count == 0 ? 1 : 0;
+            opts.Root, answer.Value, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct),
+            new ContextNote(all, asked, answer.Context));
+        return answer.Value.Count == 0 ? 1 : 0;
     }
 
     /// <summary>
@@ -271,9 +276,11 @@ internal static partial class Program
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
-        var locations = await client.ImplementationsAsync(uri, position, ct);
+        var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+        var locations = await client.ImplementationsAsync(uri, position, asked, ct);
         await Output.WriteLocationsAsync(
-            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
+            opts.Root, locations, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct),
+            Union(all, asked));
         return locations.Count == 0 ? 1 : 0;
     }
 
@@ -291,18 +298,53 @@ internal static partial class Program
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var (uri, position) = await LocateAsync(client, opts.Root, target, opts.Max, ct);
-        var hover = await client.HoverAsync(uri, position, ct);
+        var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+        var answer = await client.HoverAsync(uri, position, asked, ct);
         await Output.WriteHoverAsync(
-            opts.Root, uri, position, hover, opts.Max, opts.Json, Documents.Of(client, ct));
-        return hover?.Contents?.Value is null ? 1 : 0;
+            opts.Root, uri, position, answer.Value, opts.Max, opts.Json, Documents.Of(client, ct),
+            new ContextNote(all, asked, answer.Context));
+        return answer.Value?.Contents?.Value is null ? 1 : 0;
     }
 
     /// <summary>
-    /// Which project compiles a file, and for which target framework. A file, never a symbol:
-    /// the question is about a document, and <c>textDocument/_vs_getProjectContexts</c> answers
-    /// it for an ordinary file as readily as for the generated ones it was wired up for. A file
-    /// no project compiles is not an error — <c>no project</c> is the answer, and the reason
-    /// <c>sym</c> cannot see the types in it.
+    /// The note for an answer that is a <em>set</em>: every context asked contributed to it,
+    /// so no single one "answered" and the note says what was tried instead. Null
+    /// <c>Answered</c> is what tells <c>Output</c> which of the two sentences to print.
+    /// </summary>
+    private static ContextNote Union(
+        IReadOnlyList<DocumentContext> all, IReadOnlyList<DocumentContext> asked) =>
+        new(all, asked, Answered: null);
+
+    /// <summary>
+    /// What each asked context renders as, positionally: the label <c>Contexts.Names</c>
+    /// would print, disambiguated by project only where the document really is compiled by
+    /// more than one.
+    /// </summary>
+    private static IReadOnlyList<string> Names(
+        IReadOnlyList<DocumentContext> all, IReadOnlyList<DocumentContext> asked) =>
+        [.. asked.Select(c => Contexts.Label(all, c))];
+
+    /// <summary>
+    /// The contexts a context-bound command asks in: every context the document has, and the
+    /// subset <c>--tfm</c> allows. One request per document per command, cached on the client,
+    /// and the same request the generated-document label path already makes.
+    /// </summary>
+    private static async Task<(IReadOnlyList<DocumentContext> All, IReadOnlyList<DocumentContext> Asked)>
+        ContextsAsync(LspClient client, Options opts, string uri, CancellationToken ct)
+    {
+        var all = await client.ContextsAsync(uri, ct);
+        return (all, Contexts.Select(all, opts.Tfm, PathUri.Display(opts.Root, uri)));
+    }
+
+    /// <summary>
+    /// Which project compiles a file, and for which target framework — <b>every</b> context,
+    /// one row each, because a multi-targeted document has several and printing one of them
+    /// said the file had a single home. A file, never a symbol: the question is about a
+    /// document, and <c>textDocument/_vs_getProjectContexts</c> answers it for an ordinary file
+    /// as readily as for the generated ones it was wired up for. A file no project compiles is
+    /// not an error — <c>no project</c> is the answer, and the reason <c>sym</c> cannot see the
+    /// types in it. This is the command an agent runs to find out whether it has to reason
+    /// about <c>#if</c> branches at all, so a truthful count is the whole of its value.
     /// </summary>
     private static async Task<int> ProjectAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
@@ -319,9 +361,9 @@ internal static partial class Program
 
         var uri = PathUri.FromPath(full);
         await client.OpenAsync(uri, ct);
-        var (project, tfm) = await client.ProjectContextAsync(uri, ct);
-        Output.WriteProject(opts.Root, full, project, tfm, opts.Json);
-        return project is null ? 1 : 0;
+        var (_, asked) = await ContextsAsync(client, opts, uri, ct);
+        Output.WriteProject(opts.Root, full, asked, opts.Max, opts.Json);
+        return asked.Count == 0 ? 1 : 0;
     }
 
     /// <summary>
@@ -348,6 +390,12 @@ internal static partial class Program
     /// empty file is a query that was answered. A target that fails to resolve still exits 1,
     /// by throwing out of the resolver.
     /// </summary>
+    /// <summary>
+    /// Every declaration in one document, unioned over the contexts that compile it. A file
+    /// whose whole body sits inside one <c>#if</c> answered <c>no symbols</c> at exit 0 in the
+    /// other context — T-29, and a wrong answer rather than a partial one, since the class is
+    /// right there in the file.
+    /// </summary>
     private static async Task<int> OutlineAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
@@ -367,9 +415,11 @@ internal static partial class Program
             if (line > 0) await CheckLineAsync(client, opts.Root, uri, line, ct);
         }
 
-        var symbols = await client.DocumentSymbolsAsync(uri, ct);
+        var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+        var views = await client.DocumentSymbolsAsync(uri, asked, Names(all, asked), ct);
         await Output.WriteOutlineAsync(
-            opts.Root, uri, symbols, opts.Max, opts.Json, Documents.Of(client, ct));
+            opts.Root, uri, Outline.Merge(views), views.Count, opts.Max, opts.Json,
+            Documents.Of(client, ct), Union(all, asked));
         return 0;
     }
 
@@ -520,10 +570,17 @@ internal static partial class Program
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
-        var findings = new List<(string Uri, Diagnostic Diagnostic)>();
+        var findings = new List<Report>();
+        // The note names one document's contexts, so only a single-file diag can carry one; a
+        // walk spans documents with different context sets and says it per row instead.
+        ContextNote? note = null;
         foreach (var uri in files.Select(PathUri.FromPath))
         {
-            findings.AddRange((await client.DiagnosticsAsync(uri, ct)).Select(d => (uri, d)));
+            var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+            if (files.Count == 1) note = Union(all, asked);
+
+            var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
+            findings.AddRange(Reports(uri, views));
         }
 
         if (opts.ErrorsOnly)
@@ -532,8 +589,41 @@ internal static partial class Program
         }
 
         await Output.WriteDiagnosticsAsync(
-            opts.Root, findings, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct));
+            opts.Root, findings, opts.Max, opts.Context, opts.Json, Documents.Of(client, ct), note);
         return 0;
+    }
+
+    /// <summary>
+    /// One document's diagnostics from every context it is compiled in, folded: a row every
+    /// context reports is one row, and a row only some of them report keeps the list of which.
+    /// The fold key is what a reader sees — position, severity, code and message — because two
+    /// contexts reporting the same finding are one finding, and the per-framework duplication
+    /// that would otherwise appear is exactly what testers confirmed <c>diag</c> did not have.
+    /// </summary>
+    internal static IEnumerable<Report> Reports(
+        string uri, IReadOnlyList<(string Name, IReadOnlyList<Diagnostic> Items)> views)
+    {
+        var order = new List<(int, int, int?, string?, string)>();
+        var folded = new Dictionary<(int, int, int?, string?, string), (Diagnostic First, List<string> In)>();
+
+        foreach (var (name, items) in views)
+        {
+            foreach (var item in items)
+            {
+                var key = (item.Range.Start.Line, item.Range.Start.Character, item.Severity,
+                    Output.Code(item.Code), item.Message);
+                if (!folded.TryGetValue(key, out var entry))
+                {
+                    entry = (item, []);
+                    folded[key] = entry;
+                    order.Add(key);
+                }
+
+                entry.In.Add(name);
+            }
+        }
+
+        return order.Select(k => new Report(uri, folded[k].First, folded[k].In, views.Count));
     }
 
     /// <summary>
@@ -638,7 +728,16 @@ internal static partial class Program
             var uri = symbol.Location.Uri;
             if (!trees.TryGetValue(uri, out var tree))
             {
-                tree = await client.DocumentSymbolsAsync(uri, ct);
+                // The union of every context, and deliberately not the `--tfm` subset: this is
+                // "where in the file is this declared", and a chain read from one context's
+                // tree could not see a declaration in the other branch at all. That is why
+                // `def Fixture2.Multi.Only9` answered `no symbol matched` in 2 of 6 runs
+                // while the bare `def Only9` was already deterministic. `--tfm` still
+                // constrains the answer; it has no business constraining the lookup.
+                var contexts = await client.ContextsAsync(uri, ct);
+                var views = await client.DocumentSymbolsAsync(
+                    uri, contexts, [.. contexts.Select(c => c.Name)], ct);
+                tree = Outline.Tree(Outline.Merge(views));
                 trees[uri] = tree;
             }
 
@@ -1104,7 +1203,8 @@ internal static partial class Program
         string LogLevel,
         bool ErrorsOnly,
         bool Json,
-        bool Daemon)
+        bool Daemon,
+        string? Tfm)
     {
         /// <summary>
         /// Whether the caller asked for more than warnings. The level is otherwise handed
@@ -1134,6 +1234,7 @@ internal static partial class Program
             var errorsOnly = false;
             var json = false;
             var daemon = true;
+            string? tfm = null;
 
             for (var i = 1; i < argv.Length; i++)
             {
@@ -1148,6 +1249,7 @@ internal static partial class Program
                     // empty. Only a negative one is rejected.
                     case "--timeout": timeout = TimeSpan.FromSeconds(Int(argv, ref i, 0)); break;
                     case "--log-level": logLevel = Next(argv, ref i); break;
+                    case "--tfm": tfm = Next(argv, ref i); break;
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
                     case "--no-daemon": daemon = false; break;
@@ -1175,7 +1277,7 @@ internal static partial class Program
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
-                daemon);
+                daemon, tfm);
         }
 
         /// <summary>

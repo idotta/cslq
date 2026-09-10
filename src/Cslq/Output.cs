@@ -31,6 +31,14 @@ internal sealed record Documents(
 internal sealed record SymbolRow(SymbolInformation Symbol, int Kind);
 
 /// <summary>
+/// One diagnostic as the contexts collectively reported it: the finding itself, the contexts
+/// that reported it, and how many were asked. The last is what lets a renderer tell "every
+/// context has this" from "only net9.0 has this" without knowing what a context is.
+/// </summary>
+internal sealed record Report(
+    string Uri, Diagnostic Diagnostic, IReadOnlyList<string> In, int Contexts);
+
+/// <summary>
 /// Raw LSP hands back URIs and zero-based line/character ranges, which is close to
 /// useless to a model. Everything an agent sees goes through here instead: repo-relative
 /// path, one-based line, the matched source line and a line of context either side.
@@ -60,7 +68,8 @@ internal static class Output
         int max,
         int context,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var labelled = new List<Hit>(locations.Count);
         foreach (var location in locations)
@@ -109,7 +118,7 @@ internal static class Output
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = hits.Count, truncated = hits.Count > shown.Count, results = payload },
+                Envelope(hits.Count, hits.Count > shown.Count, payload, note),
                 JsonOut));
             return;
         }
@@ -117,6 +126,7 @@ internal static class Output
         if (shown.Count == 0)
         {
             Console.WriteLine("no results");
+            WriteContextNote(note, empty: true);
             return;
         }
 
@@ -143,6 +153,66 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {hits.Count - shown.Count} more (use --max {hits.Count} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
+    }
+
+    /// <summary>
+    /// The <c>{ count, truncated, results }</c> envelope, plus the keys a context-bound answer
+    /// adds: <c>contexts</c> is how many the document has, and <c>tfm</c> is the one that
+    /// answered — <b>present only when there is one</b>. A union has no answering context, and
+    /// emitting <c>tfm: null</c> there would hand a caller a field to interpret when the answer
+    /// is that the question does not apply; that is T-77's complaint about <c>source</c>, and
+    /// the rule is the same. Both keys are absent for the commands that do not choose a
+    /// context at all.
+    /// </summary>
+    private static object Envelope(int count, bool truncated, object results, ContextNote? note) =>
+        (note, note?.Answered) switch
+        {
+            (null, _) => new { count, truncated, results },
+            (not null, null) => new { count, truncated, contexts = note.All.Count, results },
+            var (_, answered) => new
+            {
+                count,
+                truncated,
+                tfm = answered!.Tfm,
+                contexts = note!.All.Count,
+                results,
+            },
+        };
+
+    /// <summary>
+    /// The line that says which project context answered, last and after a blank line like the
+    /// truncation footer. Only for a document with more than one context: a single-context
+    /// answer is the ordinary case and a note on every one of them would train a caller to
+    /// skip it. The <c>N of M</c> shape covers the three cases — answered in one, tried them
+    /// all and found nothing, tried the <c>--tfm</c> subset and found nothing — and names
+    /// every context either way, because the useful next move is asking a different one.
+    /// <para>
+    /// A null <see cref="ContextNote.Answered"/> means the answer is a <em>union</em> of every
+    /// context asked — <c>refs</c>, <c>impl</c>, <c>outline</c> and <c>diag</c> — where no
+    /// single context answered. It says <c>merged from</c>, not <c>tried</c>: an answer is
+    /// sitting right above the line, and "tried" beside a correct answer reads as a failure a
+    /// caller then has to rule out. <c>tried</c> is kept for the empty answer, where it is
+    /// exactly right and the only thing there is to say.
+    /// </para>
+    /// </summary>
+    private static void WriteContextNote(ContextNote? note, bool empty)
+    {
+        if (note is null || note.All.Count < 2) return;
+
+        var all = Contexts.Names(note.All);
+        var subset = note.Asked.Count == note.All.Count
+            ? null
+            : $"{Contexts.Names(note.Asked)} of ";
+
+        Console.WriteLine();
+        Console.WriteLine(true switch
+        {
+            _ when empty => $"tried {subset ?? "all "}{note.All.Count} contexts: {all}",
+            _ when note.Answered is null => $"merged from {subset}{note.All.Count} contexts: {all}",
+            _ => $"answered in {Contexts.Label(note.All, note.Answered)} of {note.All.Count} contexts: {all}",
+        });
     }
 
     /// <summary>
@@ -151,17 +221,21 @@ internal static class Output
     /// </summary>
     public static async Task WriteDiagnosticsAsync(
         string root,
-        IReadOnlyList<(string Uri, Diagnostic Diagnostic)> findings,
+        IReadOnlyList<Report> findings,
         int max,
         int context,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var labelled = new List<Finding>(findings.Count);
         foreach (var finding in findings)
         {
             labelled.Add(new Finding(
-                finding.Uri, await PathUri.DisplayAsync(root, finding.Uri, documents), finding.Diagnostic));
+                finding.Uri,
+                await PathUri.DisplayAsync(root, finding.Uri, documents),
+                finding.Diagnostic,
+                Only(finding)));
         }
 
         var hits = labelled
@@ -191,12 +265,13 @@ internal static class Output
                     message = hit.Diagnostic.Message,
                     generated = PathUri.IsGenerated(hit.Uri),
                     metadata = PathUri.IsDecompiled(hit.Uri),
+                    tfm = hit.Only,
                     text = At(await documents.Lines(hit.Uri), range.Start.Line)?.TrimEnd(),
                 });
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = hits.Count, truncated = hits.Count > shown.Count, results = payload },
+                Envelope(hits.Count, hits.Count > shown.Count, payload, note),
                 JsonOut));
             return;
         }
@@ -204,6 +279,7 @@ internal static class Output
         if (shown.Count == 0)
         {
             Console.WriteLine("no diagnostics");
+            WriteContextNote(note, empty: true);
             return;
         }
 
@@ -216,7 +292,9 @@ internal static class Output
             var start = hit.Diagnostic.Range.Start;
             var code = Code(hit.Diagnostic.Code);
             var label = code is null ? Severity(hit.Diagnostic.Severity) : $"{Severity(hit.Diagnostic.Severity)} {code}";
-            Console.WriteLine($"{hit.Display}:{start.Line + 1}:{start.Character + 1} {label}: {hit.Diagnostic.Message}");
+            var only = hit.Only is null ? string.Empty : $" [{hit.Only}]";
+            Console.WriteLine(
+                $"{hit.Display}:{start.Line + 1}:{start.Character + 1} {label}: {hit.Diagnostic.Message}{only}");
 
             var lines = await documents.Lines(hit.Uri);
             var width = (start.Line + 1 + context).ToString().Length;
@@ -232,7 +310,20 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {hits.Count - shown.Count} more (use --max {hits.Count} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
     }
+
+    /// <summary>
+    /// The contexts a finding is <em>only</em> in, or null when every context asked reports it
+    /// — which is every finding in a single-context document, so an ordinary <c>diag</c> row
+    /// is unchanged. A row carrying a framework is the answer to T-28: a CS0029 that exists in
+    /// <c>net9.0</c> and nowhere else used never to be reported at all.
+    /// </summary>
+    private static string? Only(Report report) =>
+        report.Contexts < 2 || report.In.Count >= report.Contexts
+            ? null
+            : string.Join(", ", report.In);
 
     /// <summary>
     /// A search result set is a list of places to go, not a place to read, so this is the
@@ -392,10 +483,12 @@ internal static class Output
     public static async Task WriteOutlineAsync(
         string root,
         string uri,
-        IReadOnlyList<DocumentSymbol> symbols,
+        IReadOnlyList<OutlineNode> symbols,
+        int contexts,
         int max,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var display = await PathUri.DisplayAsync(root, uri, documents);
         var total = Count(symbols);
@@ -413,7 +506,10 @@ internal static class Output
                     path = display,
                     generated = PathUri.IsGenerated(uri),
                     metadata = PathUri.IsDecompiled(uri),
-                    results = Nodes(symbols, lines, ref budget),
+                    // No envelope-level tfm here, unlike the other context-bound commands:
+                    // an outline is a union, and every row carries its own.
+                    contexts = note?.All.Count,
+                    results = Nodes(symbols, contexts, lines, ref budget),
                 },
                 JsonOut));
             return;
@@ -423,16 +519,21 @@ internal static class Output
         if (total == 0)
         {
             Console.WriteLine("no symbols");
+            WriteContextNote(note, empty: true);
             return;
         }
 
         var rows = Flatten(symbols).Take(kept).ToList();
-        var width = rows.Max(r => r.Symbol.SelectionRange.Start.Line + 1).ToString().Length;
+        var width = rows.Max(r => r.Node.Symbol.SelectionRange.Start.Line + 1).ToString().Length;
         foreach (var row in rows)
         {
-            var line = row.Symbol.SelectionRange.Start.Line;
-            var text = At(lines, line)?.Trim() ?? row.Symbol.Name;
-            Console.WriteLine($"  {(line + 1).ToString().PadLeft(width)} | {new string(' ', row.Depth * 2)}{text}");
+            var line = row.Node.Symbol.SelectionRange.Start.Line;
+            var text = At(lines, line)?.Trim() ?? row.Node.Symbol.Name;
+            // The mark goes after the source line, so a declaration every context compiles
+            // renders exactly as it did before contexts existed.
+            var mark = Outline.Mark(row.Node, contexts) is { } tfms ? $"  [{tfms}]" : string.Empty;
+            Console.WriteLine(
+                $"  {(line + 1).ToString().PadLeft(width)} | {new string(' ', row.Depth * 2)}{text}{mark}");
         }
 
         if (total > kept)
@@ -440,6 +541,8 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {total - kept} more (use --max {total} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
     }
 
     /// <summary>
@@ -459,7 +562,8 @@ internal static class Output
         Hover? hover,
         int max,
         bool json,
-        Documents documents)
+        Documents documents,
+        ContextNote? note = null)
     {
         var value = hover?.Contents?.Value;
         var (signature, documentation) = HoverText(value);
@@ -490,7 +594,7 @@ internal static class Output
                 ];
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = results.Count, truncated = kept.Count < lines.Length, results },
+                Envelope(results.Count, kept.Count < lines.Length, results, note),
                 JsonOut));
             return;
         }
@@ -498,6 +602,7 @@ internal static class Output
         if (value is null)
         {
             Console.WriteLine("no results");
+            WriteContextNote(note, empty: true);
             return;
         }
 
@@ -510,6 +615,8 @@ internal static class Output
             Console.WriteLine();
             Console.WriteLine($"... {lines.Length - kept.Count} more (use --max {lines.Length} to see all)");
         }
+
+        WriteContextNote(note, empty: false);
     }
 
     /// <summary>
@@ -631,59 +738,82 @@ internal static class Output
     /// <c>metadata</c> for the same reason every other row does: a caller never has to parse
     /// a label to know what kind of place it names.
     /// </summary>
-    public static void WriteProject(string root, string path, string? project, string? tfm, bool json)
+    /// <summary>
+    /// One row per project context, in <see cref="Contexts.Order"/>'s order, because a
+    /// multi-targeted document is compiled several times and <c>count: 1</c> claimed
+    /// otherwise. <c>--max</c> applies for the same reason the envelope carries
+    /// <c>truncated</c>; a linked file in a 16-context solution is the shape that needs it.
+    /// </summary>
+    public static void WriteProject(
+        string root, string path, IReadOnlyList<DocumentContext> contexts, int max, bool json)
     {
-        var display = project is null ? null : PathUri.Display(root, PathUri.FromPath(project));
+        var display = PathUri.Display(root, PathUri.FromPath(path));
+        var rows = contexts
+            .Select(c => (Project: PathUri.Display(root, PathUri.FromPath(c.File)), c.Tfm))
+            .ToList();
+        var shown = rows.Take(max).ToList();
 
         if (json)
         {
-            List<object> results = display is null
-                ? []
-                :
-                [
-                    new
-                    {
-                        path = PathUri.Display(root, PathUri.FromPath(path)),
-                        project = display,
-                        tfm,
-                        generated = false,
-                        metadata = false,
-                    },
-                ];
+            var results = shown
+                .Select(r => new
+                {
+                    path = display,
+                    project = r.Project,
+                    tfm = r.Tfm,
+                    generated = false,
+                    metadata = false,
+                })
+                .ToList();
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = results.Count, truncated = false, results },
+                new { count = rows.Count, truncated = rows.Count > shown.Count, results },
                 JsonOut));
             return;
         }
 
-        Console.WriteLine(display is null
-            ? "no project"
-            : tfm is null ? display : $"{display}  {tfm}");
+        if (shown.Count == 0)
+        {
+            Console.WriteLine("no project");
+            return;
+        }
+
+        foreach (var row in shown)
+        {
+            Console.WriteLine(row.Tfm is null ? row.Project : $"{row.Project}  {row.Tfm}");
+        }
+
+        if (rows.Count > shown.Count)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"... {rows.Count - shown.Count} more (use --max {rows.Count} to see all)");
+        }
     }
 
-    private static int Count(IReadOnlyList<DocumentSymbol> symbols) =>
-        symbols.Sum(s => 1 + Count(s.Children ?? []));
+    private static int Count(IReadOnlyList<OutlineNode> symbols) =>
+        symbols.Sum(s => 1 + Count(s.Children));
 
-    private static IEnumerable<(DocumentSymbol Symbol, int Depth)> Flatten(
-        IReadOnlyList<DocumentSymbol> symbols, int depth = 0)
+    private static IEnumerable<(OutlineNode Node, int Depth)> Flatten(
+        IReadOnlyList<OutlineNode> symbols, int depth = 0)
     {
         foreach (var symbol in symbols)
         {
             yield return (symbol, depth);
-            foreach (var child in Flatten(symbol.Children ?? [], depth + 1)) yield return child;
+            foreach (var child in Flatten(symbol.Children, depth + 1)) yield return child;
         }
     }
 
     // Pruned against the same pre-order budget the text form uses, so --max means the same
     // thing in both and a JSON case and a text case stay cases about the same output.
-    private static List<object> Nodes(IReadOnlyList<DocumentSymbol> symbols, string[] lines, ref int budget)
+    private static List<object> Nodes(
+        IReadOnlyList<OutlineNode> symbols, int contexts, string[] lines, ref int budget)
     {
         var nodes = new List<object>();
-        foreach (var symbol in symbols)
+        foreach (var node in symbols)
         {
             if (budget <= 0) break;
             budget--;
 
+            var symbol = node.Symbol;
             var start = symbol.SelectionRange.Start;
             var end = symbol.SelectionRange.End;
             nodes.Add(new
@@ -695,8 +825,9 @@ internal static class Output
                 column = start.Character + 1,
                 endLine = end.Line + 1,
                 endColumn = end.Character + 1,
+                tfm = Outline.Mark(node, contexts),
                 text = At(lines, start.Line)?.TrimEnd(),
-                children = Nodes(symbol.Children ?? [], lines, ref budget),
+                children = Nodes(node.Children, contexts, lines, ref budget),
             });
         }
 
@@ -748,7 +879,7 @@ internal static class Output
     };
 
     // string-or-int per the spec, and Roslyn's own analyzers are free to use either.
-    private static string? Code(JsonElement code) => code.ValueKind switch
+    internal static string? Code(JsonElement code) => code.ValueKind switch
     {
         JsonValueKind.String => code.GetString(),
         JsonValueKind.Number => code.ToString(),
@@ -773,7 +904,7 @@ internal static class Output
 
     private sealed record Hit(string Uri, string Display, Range Range);
 
-    private sealed record Finding(string Uri, string Display, Diagnostic Diagnostic);
+    private sealed record Finding(string Uri, string Display, Diagnostic Diagnostic, string? Only);
 
     private sealed record Match(string Display, SymbolRow Row);
 }

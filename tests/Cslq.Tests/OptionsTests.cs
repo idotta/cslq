@@ -30,6 +30,25 @@ public class OptionsTests
         Assert.False(Program.Options.Parse(["ready", "--no-daemon"]).Daemon);
     }
 
+    /// <summary>
+    /// <c>--tfm</c> is off unless asked for, and the value is taken as written: matching it
+    /// against the document's contexts happens where the contexts are known, not here.
+    /// </summary>
+    [Fact]
+    public void A_target_framework_is_absent_unless_asked_for()
+    {
+        Assert.Null(Program.Options.Parse(["hover", "Only9"]).Tfm);
+        Assert.Equal("net9.0", Program.Options.Parse(["hover", "Only9", "--tfm", "net9.0"]).Tfm);
+    }
+
+    [Fact]
+    public void A_target_framework_needs_a_value()
+    {
+        var ex = Assert.Throws<CslqException>(() => Program.Options.Parse(["hover", "X", "--tfm"]));
+
+        Assert.Equal("option '--tfm' needs a value", ex.Message);
+    }
+
     [Fact]
     public void An_unknown_command_is_rejected_before_anything_starts()
     {
