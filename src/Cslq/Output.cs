@@ -158,23 +158,28 @@ internal static class Output
     }
 
     /// <summary>
-    /// The <c>{ count, truncated, results }</c> envelope, plus the two keys a context-bound
-    /// answer adds: <c>tfm</c> is the context that answered and <c>contexts</c> how many the
-    /// document has, so a caller can see at a glance whether the answer was one view of
-    /// several and re-ask with <c>--tfm</c>. Both are absent for the commands that do not
-    /// choose a context, rather than present and meaningless.
+    /// The <c>{ count, truncated, results }</c> envelope, plus the keys a context-bound answer
+    /// adds: <c>contexts</c> is how many the document has, and <c>tfm</c> is the one that
+    /// answered — <b>present only when there is one</b>. A union has no answering context, and
+    /// emitting <c>tfm: null</c> there would hand a caller a field to interpret when the answer
+    /// is that the question does not apply; that is T-77's complaint about <c>source</c>, and
+    /// the rule is the same. Both keys are absent for the commands that do not choose a
+    /// context at all.
     /// </summary>
     private static object Envelope(int count, bool truncated, object results, ContextNote? note) =>
-        note is null
-            ? new { count, truncated, results }
-            : new
+        (note, note?.Answered) switch
+        {
+            (null, _) => new { count, truncated, results },
+            (not null, null) => new { count, truncated, contexts = note.All.Count, results },
+            var (_, answered) => new
             {
                 count,
                 truncated,
-                tfm = note.Answered?.Tfm,
-                contexts = note.All.Count,
+                tfm = answered!.Tfm,
+                contexts = note!.All.Count,
                 results,
-            };
+            },
+        };
 
     /// <summary>
     /// The line that says which project context answered, last and after a blank line like the
@@ -186,9 +191,10 @@ internal static class Output
     /// <para>
     /// A null <see cref="ContextNote.Answered"/> means the answer is a <em>union</em> of every
     /// context asked — <c>refs</c>, <c>impl</c>, <c>outline</c> and <c>diag</c> — where no
-    /// single context answered and "tried" is the only true verb. It reads the same whether
-    /// the union came back empty or not, which is the point: every context was asked either
-    /// way.
+    /// single context answered. It says <c>merged from</c>, not <c>tried</c>: an answer is
+    /// sitting right above the line, and "tried" beside a correct answer reads as a failure a
+    /// caller then has to rule out. <c>tried</c> is kept for the empty answer, where it is
+    /// exactly right and the only thing there is to say.
     /// </para>
     /// </summary>
     private static void WriteContextNote(ContextNote? note, bool empty)
@@ -196,14 +202,17 @@ internal static class Output
         if (note is null || note.All.Count < 2) return;
 
         var all = Contexts.Names(note.All);
-        var tried = note.Asked.Count == note.All.Count
-            ? $"all {note.All.Count}"
-            : $"{Contexts.Names(note.Asked)} of {note.All.Count}";
+        var subset = note.Asked.Count == note.All.Count
+            ? null
+            : $"{Contexts.Names(note.Asked)} of ";
 
         Console.WriteLine();
-        Console.WriteLine(empty || note.Answered is null
-            ? $"tried {tried} contexts: {all}"
-            : $"answered in {Contexts.Label(note.All, note.Answered)} of {note.All.Count} contexts: {all}");
+        Console.WriteLine(true switch
+        {
+            _ when empty => $"tried {subset ?? "all "}{note.All.Count} contexts: {all}",
+            _ when note.Answered is null => $"merged from {subset}{note.All.Count} contexts: {all}",
+            _ => $"answered in {Contexts.Label(note.All, note.Answered)} of {note.All.Count} contexts: {all}",
+        });
     }
 
     /// <summary>

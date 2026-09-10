@@ -611,7 +611,7 @@ public class OutputTests
                 "Multi/Conditional.cs",
                 "   4 | Only10  [net10.0]",
                 "  11 | Only9  [net9.0]",
-                "tried all 2 contexts: net10.0, net9.0",
+                "merged from 2 contexts: net10.0, net9.0",
             ],
             text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
@@ -680,7 +680,7 @@ public class OutputTests
             [
                 "Multi/TfmError.cs:3:1 error IDE0002: boom",
                 "Multi/TfmError.cs:10:1 error CS0029: boom [net9.0]",
-                "tried all 2 contexts: net10.0, net9.0",
+                "merged from 2 contexts: net10.0, net9.0",
             ],
             text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
@@ -698,7 +698,9 @@ public class OutputTests
             UnionNote()))).RootElement;
 
         Assert.Equal(2, json.GetProperty("contexts").GetInt32());
-        Assert.Equal(JsonValueKind.Null, json.GetProperty("tfm").ValueKind);
+        // Not tfm: null. A union has no answering context, and a null field an agent has to
+        // interpret is T-77's complaint about `source`; the envelope omits the key instead.
+        Assert.False(json.TryGetProperty("tfm", out _));
         var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
         Assert.Equal("net9.0", only.GetProperty("tfm").GetString());
     }
@@ -720,18 +722,55 @@ public class OutputTests
     }
 
     /// <summary>
-    /// A set answer names what it asked rather than what answered: every context contributed,
-    /// so no single one is the answer. <c>refs</c>, <c>impl</c>, <c>outline</c> and
-    /// <c>diag</c> all read this way, empty or not.
+    /// A set answer names every context it merged rather than one that answered — and says
+    /// <c>merged from</c> rather than <c>tried</c>, because a correct answer is sitting right
+    /// above the line and "tried" beside one reads as a failure to rule out.
     /// </summary>
     [Fact]
-    public async Task A_union_answer_says_what_was_tried_rather_than_what_answered()
+    public async Task A_union_answer_says_it_merged_the_contexts()
     {
         var text = await CaptureAsync(() => Output.WriteLocationsAsync(
             Root, [Location("Multi/Both.cs", 8)], 50, 0, json: false, Plain, UnionNote()));
 
-        Assert.Contains("tried all 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
+        Assert.Contains("merged from 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
         Assert.DoesNotContain("answered in", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("tried", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>tried</c> is kept for the empty union, where nothing was found and it is the only
+    /// true thing to say — and it still names the subset when <c>--tfm</c> narrowed the ask.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_union_still_says_it_tried()
+    {
+        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+            Root, [], 50, 0, json: false, Plain, UnionNote()));
+
+        Assert.Contains("tried all 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A union narrowed to one context still merged <em>that</em> context, and says so with
+    /// the same <c>X of N</c> shape the other notes use.
+    /// </summary>
+    [Fact]
+    public async Task A_union_under_tfm_names_the_subset_it_merged()
+    {
+        var csproj = Path.Combine(Root, "Multi", "Multi.csproj");
+        DocumentContext[] all = [Context(csproj, "net10.0"), Context(csproj, "net9.0")];
+
+        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+            Root,
+            [Location("Multi/Conditional.cs", 11)],
+            50,
+            0,
+            json: false,
+            Plain,
+            new ContextNote(all, [all[1]], Answered: null)));
+
+        Assert.Contains(
+            "merged from net9.0 of 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
     }
 
     private static DocumentSymbol Node(string name, int line) =>

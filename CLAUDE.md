@@ -184,6 +184,13 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     severity, code **and message**, the message included because serilog answers
     `Substring can be simplified` in one context and `Slice can be simplified` in another at
     one position, and those are two findings rather than one.
+  A set answer's footer says `merged from N contexts: ...` and only an *empty* one says
+  `tried all N contexts: ...`: "tried" printed above a correct answer reads as a failure the
+  caller has to rule out, and that cost is paid on every successful call. Its `--json` envelope
+  carries `contexts` and **no `tfm`** — an envelope key that could only ever be null is omitted
+  rather than emitted as null, which is the rule T-77 asks for about `source` and is written in
+  DESIGN.md beside the other envelope rules. Row-level nulls stay: a row's null `tfm` means
+  "in every context asked", which is a value rather than a missing one.
   The cost was measured before the rule was adopted, not after: a whole-tree `diag` walk on
   `fixture2` (6 documents, 3 two-context) went 2694-2956 ms to 2827-3030 ms warm, and on
   `fixture` (4 single-context documents) 2690-2925 ms to 2534-2732 ms, i.e. nothing. A

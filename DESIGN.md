@@ -27,6 +27,15 @@ near-useless to a model.
 - `--json` for the probe harness to assert against. Every row carries `generated` and
   `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
   prefix back off `path`.
+- **An envelope key that could only ever be null is omitted, not emitted as null.** A field a
+  caller has to interpret is worse than a field that is not there: `null` reads as "the answer
+  is unknown" when the truth is "the question does not apply to this command". So `tfm` sits on
+  an envelope only where a single context produced the answer — `hover` and `def` — and is
+  absent from a union's, where `contexts` and the footer say what was merged. This is the same
+  rule T-77 asks for about `diag`'s always-null `source`, decided here first so that batch 8
+  inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
+  not an absence — it means that row is in every context asked, which is exactly the thing its
+  marked neighbours are not — and row keys stay stable across the rows of one answer.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.
@@ -242,14 +251,17 @@ merges every context's tree — every context, not the `--tfm` subset, because t
 the file is this declared" and `--tfm` has no business constraining a lookup. The option still
 constrains the answer.
 
-A set answer's note says what was **tried** rather than what answered, because every context
-asked contributed to it: `tried all 2 contexts: net10.0, net9.0`, or
-`tried net9.0 of 2 contexts: …` under `--tfm`, empty or not. `--json` carries `contexts` on the
-envelope for all four, `tfm: null` on the envelope for `refs`, `impl` and `diag` — no single
-context answered — and the per-row `tfm` is where the fact lives: on an `outline` node, the
-contexts that declare it; on a `diag` row, the contexts that report it; null on both when every
-context does. `outline` deliberately has no envelope-level `tfm` at all, since an outline is a
-union and each row carries its own.
+A set answer's note names the contexts it **merged**, since every context asked contributed to
+it: `merged from 2 contexts: net10.0, net9.0`, or `merged from net9.0 of 2 contexts: …` under
+`--tfm`. `tried all 2 contexts: …` is kept for the *empty* answer, where nothing was found and
+it is the only true thing to say — a correct answer followed by "tried" reads as a failure the
+caller then has to rule out, which is a cost paid on every successful call. `hover` and `def`
+keep `answered in <tfm> of N contexts: …`, because for them one context really did answer.
+
+`--json` carries `contexts` on the envelope for all four, and **no `tfm`** — see the envelope
+rule above; the per-row `tfm` is where the fact lives: on an `outline` node, the contexts that
+declare it; on a `diag` row, the contexts that report it; null on both when every context asked
+has it.
 
 `diag` takes a note only when it was given a single file. A note names one document's contexts
 and a walk spans documents with different context sets; the per-row labels are what carry the

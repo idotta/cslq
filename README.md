@@ -316,7 +316,7 @@ Each of them now handles that itself, and the rule follows the shape of the answ
 first that answers, reporting which: `answered in net9.0 of 2 contexts: net10.0, net9.0`.
 `refs`, `impl`, `outline` and `diag` return a *set*, so they ask every context and union the
 results — a reference inside an `#if NET9_0` block exists only in that context, and stopping
-early would drop it — and say `tried all 2 contexts: net10.0, net9.0`. `outline` marks the
+early would drop it — and say `merged from 2 contexts: net10.0, net9.0`. `outline` marks the
 declarations that are not in every context (`public sealed class Only9  [net9.0]`) and `diag`
 marks the diagnostics that are not reported by every one, which is how a `net9.0`-only error
 becomes visible at all. `project` lists every context, one row each.
@@ -325,7 +325,8 @@ So `--tfm` is not needed to get a correct answer; it is for asking a *specific* 
 "does net9.0 see this", "does net8.0 build" — and for the case where you want one view rather
 than the union. A framework the document has no context for is an error naming the ones it has.
 Under `--json`, `contexts` on the envelope is how many the document has, `tfm` is the context
-that answered where one did, and `outline` and `diag` rows carry their own `tfm`.
+that answered where one did — absent rather than null where none did, which is every union —
+and `outline` and `diag` rows carry their own `tfm`, null when every context agrees.
 
 `--json` wraps every command in the same `{ count, truncated, results }` envelope, `ready`
 included — one result carrying `ready`, `projects` (how many projects were actually probed) and

@@ -173,7 +173,8 @@ something of a document handles that itself:
   the first that answers, and say which: `answered in net9.0 of 2 contexts: net10.0, net9.0`.
 - `refs`, `impl`, `outline` and `diag` answer with a set, so they ask **every** context and
   union it — a reference inside an `#if NET9_0` block exists only there — and say
-  `tried all 2 contexts: net10.0, net9.0`. `outline` marks declarations that are not in every
+  `merged from 2 contexts: net10.0, net9.0` (and `tried all 2 contexts: …` when the union came
+  back empty). `outline` marks declarations that are not in every
   context, `public sealed class Only9  [net9.0]`, and `diag` marks diagnostics that are not
   reported by every one, `error CS0029: ... [net9.0]`, which is how a framework-specific error
   becomes visible at all.
@@ -183,8 +184,9 @@ something of a document handles that itself:
 Use `--tfm` to ask a *specific* framework — "does net9.0 see this", "does net8.0 build" — or to
 get one view instead of the union. A framework the document has no context for is an error
 naming the ones it has. Under `--json`: `contexts` on the envelope is how many contexts the
-document has, `tfm` on the envelope is the one that answered where a single one did, and
-`outline` and `diag` rows carry a per-row `tfm` that is null when every context agrees.
+document has; `tfm` on the envelope is the one that answered, and is **absent** rather than
+null where no single context did — which is every union. `outline` and `diag` rows carry a
+per-row `tfm` that is null when every context asked has that row.
 
 `--sentinel` does not speed a run up. By default `cslq` waits for every project under the root
 to load, one probe per project the root's solution lists; a root holding no solution, or two of
