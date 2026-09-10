@@ -699,8 +699,11 @@ docs pass covers everything at once.
   root throw `Program.TwoSolutions` before the server starts, naming both; the scan fallback in
   `ProjectDirectories` is gone (the scan survives only as the boundary source); leg
   `two-solutions-root-fails-fast`. **T-39**: `WaitReadyAsync` bounds the wait to 20 s
-  (`PostLoadGrace`) after `projectInitializationComplete` *fired in this process*; never on a
-  daemon attach; leg `exhausted-candidate-fails-after-load` (temp two-project tree, `#if
+  (`PostLoadGrace`) after `projectInitializationComplete` *fired in this process*
+  — written here as "never on a daemon attach", which batch 6 measured wrong: the notification
+  ends *this client's own* reload and fires on every attach, so the bound applies warm as well
+  as cold (2026-09-10, batch 6 round 2). The logic is unchanged and still correct; only the
+  reason was. Leg `exhausted-candidate-fails-after-load` (temp two-project tree, `#if
   false` type, `--no-daemon`) fails in 24 s against a 150 s timeout. **T-41: the hypothesis
   was wrong and nothing in cslq changes.** `new Uri(path)` escapes a literal `%` to `%25`, so
   `PathUri` round-trips `pct%20x` exactly (pinned by `PathUriTests`); the failure is MSBuild
@@ -712,3 +715,40 @@ docs pass covers everything at once.
   falling back on every inference failure is the documented escape hatch), one fixed —
   `ProjectSources.DefaultItemsDisabled` counts only an *unconditional* `false`, a conditioned
   value is unknown and leaves the project probed (two tests, 184 unit tests). Batch 6 next.
+- 2026-09-10 — Batch 6 done on `fix/batch-6-per-attach-reload` (two commits, no PR). Investigation
+  first, then prose only: **no `src/` behaviour change**. **T-83/T-56/T-87/T-88**: the mechanism
+  is read rather than inferred. The daemon shares a server *process*, not a loaded workspace —
+  every client's own `initialized` re-runs the whole solution load under `--autoLoadProjects`
+  (`AutoLoadProjectsInitializer` → `LanguageServerProjectSystem] Loading <solution>` → a fresh
+  `BuildHost` process → every `.csproj` → `Completed (re)load of all projects in ...`).
+  CommunityToolkit 25-30 s per attach, cold and warm alike (32.7 / 40.7 / 27.2 s wall, +76 /
+  +114 / +70 server CPU-seconds on one pid); the fixture reproduces it at ~1.6 s per attach, so
+  it is not a large-repository effect. Reading it needed instrumentation, because the server's
+  own stderr says nothing but `Daemon accepted a new client connection.` even at `Trace` and
+  `--extensionLogDirectory` is accepted and never written: the load log arrives at the *client*
+  as `window/logMessage`, which `Endpoints.OnLogMessage` discards. **The cslq-side fix does not
+  exist**: the only lever at `InitializeAsync` is omitting `workspaceFolders`, and that is
+  measured to suppress the reload *and* leave the client with an empty workspace —
+  `workspace/symbol` returned nothing for a full 600 s on a daemon that had loaded that exact
+  solution seconds earlier. So the upstream issue is drafted in the batch 6 section and
+  **not filed**, and the scale qualifier is the deliverable. Two claims were measured wrong and
+  corrected in four files (`LspClient.WaitReadyAsync`'s doc comment, CLAUDE.md, README,
+  `skills/csharp-semantic-queries/SKILL.md`): `projectInitializationComplete` fires **once per
+  attach**, warm daemon included, because it ends that client's reload rather than the daemon's
+  history; and `workspace/symbol` answers **partially** throughout a load rather than nothing —
+  8 of 12 projects resolved before the notification over 21 s, and four more kept resolving for
+  6-8 s after it, so the incomplete-answer window straddles it. `WaitReadyAsync`'s logic was
+  left alone deliberately: the notification cannot arrive early on a warm attach, so
+  `PostLoadGrace` is never armed against a still-loading workspace, and the tail after it is
+  what the grace is for. **T-85: not reproduced, on either corpus.** Five `diag` runs on
+  CommunityToolkit and nine on OrchardCore — the reported corpus, restored and not built
+  (`bin/Debug` holds zero `OrchardCore.*.dll`), using the reference's own repro lines including
+  the two files it named individually — report zero CS0234/CS0246/CS0103 and zero `error CS` of
+  any code; the `Controllers --max 5` walk returns a real `IDE0047` with context, so "no
+  diagnostics" is not a silent no-op. Closed as fixed by batch 5, whose additive `--sentinel`
+  makes readiness wait for every project before `diag` opens anything. **T-61: closed
+  won't-fix.** The wall clock *is* the reload, so caching readiness per (daemon, root) would
+  return during the next attach's reload while `workspace/symbol` is measurably partial, handing
+  back the incomplete-answer-at-exit-0 bug batch 5 closed; the poll is not the cost, it is what
+  makes the cost visible, and probing concurrently is already what `WaitReadyAsync` does.
+  Gate 103/103, 184 unit tests, format clean.
