@@ -397,6 +397,15 @@ fixture, same Release binary, 2026-09-07:
 | `cslq outline` | 6.2–6.4 s | 2.3–2.5 s |
 | `cslq diag <file>` | 9.2–10.9 s | 2.9–6.1 s |
 
+**This table is the fixture: three projects.** The daemon shares a server process, not a
+loaded workspace — every attach re-runs the whole solution load, so the warm column scales with
+the root's project count rather than staying flat. Measured 2026-09-10 on CommunityToolkit
+(26 projects, restored not built): a warm `cslq ready` costs 28-33 s, of which 25-30 s is the
+reload, and repeat attaches cost the same as the first. Above a few dozen projects the daemon
+buys only process start and MEF composition, a couple of seconds, and `--no-daemon` costs about
+the same per call while avoiding the queueing several concurrent clients hit. The cause is in
+the server, not in `cslq`; see `FIXES-0.1.0.md`, batch 6.
+
 About 2.5x on `refs`, with little variance across repeats once the daemon has seen the document
 — the high end of each warm range is the first invocation, which still pays the `didOpen` and
 the first bind of that document. The warm floor is `dotnet tool run` plus apphost startup plus
@@ -536,7 +545,7 @@ weekly bump.
 
 | Failure mode | How |
 |---|---|
-| Async project load returning empty instead of erroring | `WaitReadyAsync` polls one sentinel symbol per project until every project that has one resolves it, then fails loudly on timeout. A project the scan could infer no sentinel for — one that is only top-level statements, or only Razor or resources — is not waited on, because there is nothing to ask the server for; it is named on the failure path instead, so its absence from readiness is visible rather than silent. Never `sleep`, and never block on `workspace/projectInitializationComplete` — it never fires for a client attaching to a loaded daemon. |
+| Async project load returning empty instead of erroring | `WaitReadyAsync` polls one sentinel symbol per project until every project that has one resolves it, then fails loudly on timeout. A project the scan could infer no sentinel for — one that is only top-level statements, or only Razor or resources — is not waited on, because there is nothing to ask the server for; it is named on the failure path instead, so its absence from readiness is visible rather than silent. Never `sleep`, and never block on `workspace/projectInitializationComplete` — it arrives at the end of the solution load the client's own `initialized` triggered, which the daemon re-runs on every attach, so blocking on it first buys nothing and costs the whole load. |
 | A sentinel that is itself the thing being queried | Sentinels are inferred from type declarations in each project, so "symbol absent" and "workspace not loaded" stay distinguishable. No grace poll on the target: readiness covering every project is what makes an empty answer mean absent. |
 | UTF-16 position encoding | The server does not advertise `positionEncoding`, which per LSP 3.17 means utf-16 — the same unit as a .NET string index. `cslq` asserts this at `initialize` and refuses to run if a future build negotiates utf-8. A fixture line carrying an astral-plane character (a surrogate pair, so utf-16 and rune counts differ) pins the reported column at 39 in three cases; an accented letter would pass even on a broken implementation. |
 | A first diagnostic pull under-reporting on an unbound document | `textDocument/diagnostic` does not answer from the misc-files state and then correct itself — it **blocks until the document is bound**, so `diag` pulls once and the settle loop that used to wrap it is gone. Measured 2026-09-06: a cross-project error opened as the first document in a never-used server returns the right code on pull #1 (~4.2 s), and a second pull (~0.7 s) never once differed across six whole-fixture runs, cold and warm. (A document in **no** project is a different case: it reports nothing at all, whatever the error class. See `DESIGN.md`.) The fixture's error is deliberately *cross-project* — binding it needs Core's reference resolved — and `cold-server-diag-reports-cross-project-error` opens it as the first document of a dedicated server, which is the only state where answering early would show. |

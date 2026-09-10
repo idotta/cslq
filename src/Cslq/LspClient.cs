@@ -327,12 +327,12 @@ internal sealed class LspClient : IAsyncDisposable
 
     /// <summary>
     /// A query fired before the workspace loads returns an empty result, not an error, so
-    /// readiness has to be established rather than assumed. Polls from the start: a client
-    /// attaching to an already-loaded daemon never sees
-    /// <c>projectInitializationComplete</c> — it fired before this process existed — so
-    /// waiting on the notification first burned the entire timeout on a workspace that was
-    /// ready before we connected. The notification is kept only as diagnostic detail on the
-    /// failure path.
+    /// readiness has to be established rather than assumed. Polls from the first round rather
+    /// than blocking on <c>projectInitializationComplete</c>: that notification arrives at the
+    /// <em>end</em> of the solution load this client's own <c>initialized</c> triggered, and
+    /// the daemon re-runs that load per attach (measured 2026-09-10 — see CLAUDE.md), so
+    /// waiting on it before asking anything would cost the whole load even where the answer
+    /// was already there.
     /// <para>
     /// One sentinel per project, and every project that has one has to resolve it — see the
     /// last paragraph for the ones that have none. A single sentinel only
@@ -340,10 +340,11 @@ internal sealed class LspClient : IAsyncDisposable
     /// incomplete answer this client has produced: a cross-project <c>refs</c> or <c>impl</c>
     /// missing the half that had not loaded, and a <c>sym</c> search missing a whole project's
     /// hits — all of them exit 0, because a short answer is not an error. Measured on the wire
-    /// 2026-09-05: against a <em>cold</em> server <c>workspace/symbol</c> answers nothing at
-    /// all until <c>projectInitializationComplete</c> and then jumps straight to complete, so
-    /// the partial window belongs to a client attaching to a daemon that is loading a root it
-    /// has not loaded before — exactly the case where the notification cannot help.
+    /// 2026-09-10 on CommunityToolkit: <c>workspace/symbol</c> answers <em>partially</em>
+    /// throughout a load — eight of twelve projects resolved their sentinel before
+    /// <c>projectInitializationComplete</c>, spread over twenty seconds, and four more kept
+    /// resolving for six to eight seconds after it. So the partial window is every load, and
+    /// it straddles the notification in both directions.
     /// </para>
     /// <para>
     /// A hit only counts for the project that asked for it: its location has to sit under that
@@ -362,15 +363,16 @@ internal sealed class LspClient : IAsyncDisposable
     /// The wait is bounded to <see cref="PostLoadGrace"/> past
     /// <c>projectInitializationComplete</c>, but only when that notification arrived <em>in
     /// this process</em> — which is what <c>ProjectInitialized.IsCompleted</c> means, since
-    /// nothing but our own notification handler ever completes that task. The two cases
-    /// differ because of the wire behaviour above: on a cold load the server answers nothing
-    /// until the notification and then jumps straight to complete, so a candidate still
-    /// unresolved after it is never going to resolve — a project whose only type the regex
-    /// read out of an <c>#if false</c> branch is the shape that does this, and it should fail
-    /// in seconds rather than hold the whole <c>--timeout</c>. On a daemon attach the
-    /// notification fired before this process existed and there is nothing to bound from;
-    /// that is also the case where the incomplete-answer window lives, so the full timeout is
-    /// exactly what is wanted there. A <c>--timeout</c> shorter than the grace still wins.
+    /// nothing but our own notification handler ever completes that task. It fires on every
+    /// attach, warm daemon included, because it ends the load this client asked for, so the
+    /// bound applies to cold and warm alike. Past it, a candidate still unresolved is very
+    /// likely never going to resolve — a project whose only type the regex read out of an
+    /// <c>#if false</c> branch is the shape that does this, and it should fail in seconds
+    /// rather than hold the whole <c>--timeout</c>. The grace is not zero because the tail
+    /// above is real: projects were still resolving six to eight seconds after the
+    /// notification on a 26-project solution. Before the notification there is nothing to
+    /// bound from and nothing that should be bounded — that is the load itself, and the full
+    /// timeout is what is wanted. A <c>--timeout</c> shorter than the grace still wins.
     /// </para>
     /// </summary>
     public async Task WaitReadyAsync(

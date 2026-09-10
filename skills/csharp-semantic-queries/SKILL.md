@@ -170,9 +170,13 @@ root, on top of that set — every project still has to load, so the guarantee h
 alone only where that inference finds nothing at all, which is the layout it is the escape
 hatch for.
 
-`cslq` shares one background server (the daemon) across invocations, so a warm query costs a
-couple of seconds instead of a full solution load. You do not need to manage it. If a run
-prints `cslq: daemon unreachable`, the answer is still correct — it was just slow.
+`cslq` shares one background server (the daemon) across invocations. You do not need to manage
+it. If a run prints `cslq: daemon unreachable`, the answer is still correct — it was just slow.
+What the daemon shares is the server *process*, not a loaded workspace: every invocation
+re-runs the solution load, so the per-call cost scales with the size of `--root` and does not
+fall away after the first call. A few projects is a couple of seconds; 26 projects is 28-33 s
+per call, measured 2026-09-10. Budget for that on a large repository, and prefer one broad
+query to several narrow ones.
 
 ## When a query comes back empty
 
