@@ -262,11 +262,12 @@ first; record them in DESIGN.md.
       Do not fix independently. Re-measure after batch 5 and the T-83 outcome; if it persists,
       withhold those three codes while any referenced project is unresolved, or gate `diag` on
       the full readiness set.
-      **Outcome: not reproduced.** Five `diag` runs on CommunityToolkit after batch 5,
-      including the `--sentinel` shape that produced it, report zero CS0234/CS0246/CS0103
-      (2026-09-10, below). Batch 5 made `--sentinel` additive, so readiness waits for every
-      project before `diag` opens anything. Closed as fixed by batch 5, with the limit
-      stated: OrchardCore was not re-run.
+      **Outcome: not reproduced, on both corpora.** Five `diag` runs on CommunityToolkit and
+      nine on OrchardCore — the reported corpus, restored and not built, using the reference's
+      own repro lines including the two files it named individually — report zero
+      CS0234/CS0246/CS0103 and zero `error CS` of any code (2026-09-10, below). Batch 5 made
+      `--sentinel` additive, so readiness waits for every project before `diag` opens
+      anything. Closed as fixed by batch 5.
 - [x] **T-61 — warm floor scales with project count (the poll itself).**
       Status: measured; two mechanisms, and the second (T-83) dominates. Revisit only after
       T-83: cache readiness per (daemon, root) for a short window, or log one line per
@@ -452,9 +453,33 @@ so readiness still waits for **every** project before `diag` opens anything, and
 longer run against half-bound references. T-85 was reported against the pre-batch-5 behaviour,
 where one explicit sentinel replaced the whole readiness set.
 
-The honest limit: OrchardCore was not re-run — every call there costs 75-160 s and its numbers
-are already in the reference — so this is CommunityToolkit evidence plus a mechanism that is
-understood, not a direct retest of the reported corpus.
+**OrchardCore, the reported corpus, re-run 2026-09-10.** Restored, not built — `bin/Debug`
+exists and holds zero `OrchardCore.*.dll`, so the fallback metadata reference T-85 named is
+genuinely absent. Fresh daemon pipe, `S=OrchardCore.ContentManagement.ContentItem`, the
+reference's own repro lines:
+
+| call | wall | result |
+|---|---|---|
+| `ready --sentinel $S` (cold attach) | 85.3 s | `ready` |
+| `diag .../DefaultContentManager.cs --sentinel $S` pull 1 | 42.6 s | `no diagnostics` |
+| `diag .../DefaultContentManager.cs --sentinel $S` pull 2 | 57.6 s | `no diagnostics` |
+| `diag .../DefaultContentManager.cs` (no `--sentinel`) | 40.2 s | `no diagnostics` |
+| `diag src/OrchardCore/OrchardCore.ContentManagement --sentinel $S` | 52.5 s | `no diagnostics` |
+| `diag src/OrchardCore.Modules/OrchardCore.Contents --errors-only --sentinel $S` | 90.7 s | `no diagnostics` |
+| `diag src/OrchardCore.Modules/OrchardCore.Contents/Controllers --max 5 --sentinel $S` | 114.5 s | one `hint IDE0047`, correct |
+| `diag .../ContentManagement/Cache/ContentDefinitionCacheContextProvider.cs` | 92.6 s | `no diagnostics` |
+| `diag src/OrchardCore.Modules/OrchardCore.Contents/AdminMenu.cs` | 110.4 s | `no diagnostics` |
+
+Zero `error CS` of any code across all nine, and zero CS0234/CS0246/CS0103. The last two rows
+are the two files the reference named individually — `ContentDefinitionCacheContextProvider.cs`
+(3 x CS0246 then) and `AdminMenu.cs` (6 errors then). The walk is doing real work: the
+`Controllers --max 5` row returns a genuine `IDE0047` with its context lines, so a silent
+no-op is not what "no diagnostics" means here. T-85 is fixed by batch 5 on the corpus that
+reported it.
+
+Per-call cost fell too, though that was not what was being measured: 40-115 s against the
+reference's 75-160 s, now with the full per-project readiness set instead of one explicit
+sentinel.
 
 **Step 4 — T-61, closed without a fix.** The proposal was to cache readiness per (daemon, root)
 for a short window. The measurements above make that unsafe: the wall clock *is* the reload, and
