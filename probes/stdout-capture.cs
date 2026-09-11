@@ -37,7 +37,7 @@ const int BoundSeconds = 25;
 var cslq = args[0];
 var pipe = $"cslq-capture-{Environment.ProcessId}";
 
-var (exit, elapsed, output) = await RunAsync(pipe, session: true);
+var (exit, elapsed, output, watched) = await RunAsync(pipe, session: true);
 var alive = Alive(pipe, out var how);
 
 var notes = new StringBuilder();
@@ -45,7 +45,9 @@ notes.Append(string.Create(
     CultureInfo.InvariantCulture,
     $"captured stdout: exit {exit} after {elapsed:F1}s, daemon on {pipe}: {how}"));
 notes.Append("; ").Append(Socket(pipe));
-if (Servers() is { Length: > 0 } servers) notes.Append("; ").Append(servers);
+notes.Append("; during the call: ").Append(watched);
+if (Servers(pipe) is { Length: > 0 } servers) notes.Append("; ").Append(servers);
+if (Listening() is { Length: > 0 } listening) notes.Append("; ").Append(listening);
 
 // The control, run only when the liveness half has already failed: it costs a second cold
 // load, and what it separates is worth that when the answer is in doubt. --no-session is the
@@ -54,12 +56,13 @@ if (Servers() is { Length: > 0 } servers) notes.Append("; ").Append(servers);
 if (!alive)
 {
     var control = $"{pipe}-nosession";
-    var (cx, cs, _) = await RunAsync(control, session: false, "--no-session");
+    var (cx, cs, _, cwatched) = await RunAsync(control, session: false, "--no-session");
     notes.Append(string.Create(
         CultureInfo.InvariantCulture,
         $"; --no-session control: exit {cx} after {cs:F1}s, daemon on {control}: "));
     Alive(control, out var chow);
-    notes.Append(chow).Append("; ").Append(Socket(control));
+    notes.Append(chow).Append("; ").Append(Socket(control))
+        .Append("; during the call: ").Append(cwatched);
 }
 
 Console.WriteLine(notes.ToString());
@@ -72,7 +75,7 @@ Console.Error.WriteLine(string.Create(
     + $"(wanted 0 under {BoundSeconds}s with the daemon alive): {output}"));
 return 1;
 
-async Task<(int Exit, double Seconds, string Output)> RunAsync(
+async Task<(int Exit, double Seconds, string Output, string Watched)> RunAsync(
     string daemon, bool session, params string[] extra)
 {
     var psi = new ProcessStartInfo(cslq)
@@ -109,12 +112,52 @@ async Task<(int Exit, double Seconds, string Output)> RunAsync(
     }
 
     var started = Stopwatch.StartNew();
+    // Watching the socket path while the call runs is what separates a daemon that never
+    // bound it from one that bound it and died with the call: after the fact the two look
+    // alike, and a connect afterwards cannot tell them apart either.
+    using var watching = new CancellationTokenSource();
+    var watch = WatchAsync(daemon, started, watching.Token);
     using var proc = Process.Start(psi)!;
     var stdout = proc.StandardOutput.ReadToEndAsync();
     var stderr = proc.StandardError.ReadToEndAsync();
     await proc.WaitForExitAsync();
     started.Stop();
-    return (proc.ExitCode, started.Elapsed.TotalSeconds, (await stdout + await stderr).Trim().ReplaceLineEndings(" "));
+    await watching.CancelAsync();
+    return (
+        proc.ExitCode,
+        started.Elapsed.TotalSeconds,
+        (await stdout + await stderr).Trim().ReplaceLineEndings(" "),
+        await watch);
+}
+
+static async Task<string> WatchAsync(string daemon, Stopwatch clock, CancellationToken ct)
+{
+    if (OperatingSystem.IsWindows()) return "n/a";
+
+    var path = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + daemon);
+    double first = -1, last = -1;
+    while (!ct.IsCancellationRequested)
+    {
+        if (File.Exists(path))
+        {
+            var at = clock.Elapsed.TotalSeconds;
+            if (first < 0) first = at;
+            last = at;
+        }
+
+        try
+        {
+            await Task.Delay(25, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+
+    return first < 0
+        ? "socket never appeared"
+        : string.Create(CultureInfo.InvariantCulture, $"socket present from +{first:F1}s to +{last:F1}s");
 }
 
 // Connecting is the liveness test rather than looking for the name: .NET normalises
@@ -166,13 +209,70 @@ static string Socket(string daemon)
 }
 
 // A process listing filtered to the language server, which separates a daemon that died from
-// one that was never started. ps rather than /proc so macos answers too.
-static string Servers()
+// one that was never started. ps rather than /proc so macos answers -- but the gate runs a
+// daemon of its own for every other leg, so a bare listing proves only that some daemon is
+// alive. On Linux /proc/<pid>/environ carries the pipe name and says which daemon is which;
+// macos has no equivalent that does not need a second implementation, so it says so instead.
+static string Servers(string daemon)
 {
     if (OperatingSystem.IsWindows()) return "";
+    if (Run("ps", "ax -o pid=,command=") is not { } text) return "ps failed";
+
+    var hits = text.Split('\n')
+        .Select(l => l.Trim())
+        .Where(l => l.Length > 0)
+        .Where(l => l.Contains("roslyn", StringComparison.OrdinalIgnoreCase)
+            || l.Contains("LanguageServer", StringComparison.Ordinal))
+        .Select(l => l[..Math.Min(l.Length, 140)] + Owner(l, daemon))
+        .Take(4)
+        .ToArray();
+    return hits.Length == 0 ? "no server process" : $"server processes: {string.Join(" | ", hits)}";
+
+    static string Owner(string line, string daemon)
+    {
+        if (!OperatingSystem.IsLinux()) return " [pipe unknown: macos]";
+        var pid = line.Split(' ', StringSplitOptions.RemoveEmptyEntries) is [var head, ..] ? head : "";
+        try
+        {
+            var env = File.ReadAllText($"/proc/{pid}/environ").Split('\0');
+            var name = env.FirstOrDefault(
+                v => v.StartsWith("ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=", StringComparison.Ordinal));
+            if (name is null) return " [no pipe name in its environment]";
+            return name.EndsWith('=' + daemon, StringComparison.Ordinal) ? " [OURS]" : $" [{name}]";
+        }
+        catch (Exception ex)
+        {
+            return $" [environ unreadable: {ex.GetType().Name}]";
+        }
+    }
+}
+
+// What the kernel says is listening, which is the one answer that does not depend on the
+// probe guessing the path. A CoreFxPipe socket on a path Path.GetTempPath() does not build
+// means the connect above was asking in the wrong place; nothing listening at all means it
+// was asking the right question and the answer is no.
+static string Listening()
+{
+    if (OperatingSystem.IsWindows()) return "";
+    var (cmd, cmdArgs) = OperatingSystem.IsLinux() ? ("ss", "-xl") : ("lsof", "-U");
+    if (Run(cmd, cmdArgs) is not { } text) return $"{cmd} failed";
+
+    var hits = text.Split('\n')
+        .Where(l => l.Contains("CoreFxPipe", StringComparison.Ordinal))
+        .Select(l => string.Join(' ', l.Split(' ', StringSplitOptions.RemoveEmptyEntries)))
+        .Select(l => l[..Math.Min(l.Length, 140)])
+        .Take(5)
+        .ToArray();
+    return hits.Length == 0
+        ? $"{cmd} {cmdArgs}: no CoreFxPipe socket listening"
+        : $"{cmd} {cmdArgs}: {string.Join(" | ", hits)}";
+}
+
+static string? Run(string file, string arguments)
+{
     try
     {
-        var psi = new ProcessStartInfo("ps", "ax -o pid=,command=")
+        var psi = new ProcessStartInfo(file, arguments)
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -181,16 +281,10 @@ static string Servers()
         using var proc = Process.Start(psi)!;
         var text = proc.StandardOutput.ReadToEnd();
         proc.WaitForExit();
-        var hits = text.Split('\n')
-            .Where(l => l.Contains("roslyn", StringComparison.OrdinalIgnoreCase)
-                || l.Contains("LanguageServer", StringComparison.Ordinal))
-            .Select(l => l.Trim()[..Math.Min(l.Trim().Length, 140)])
-            .Take(3)
-            .ToArray();
-        return hits.Length == 0 ? "no server process" : $"server processes: {string.Join(" | ", hits)}";
+        return text;
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return $"ps failed: {ex.GetType().Name}";
+        return null;
     }
 }
