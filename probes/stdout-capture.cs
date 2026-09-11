@@ -35,6 +35,17 @@ var psi = new ProcessStartInfo(args[0])
 foreach (var a in new[] { "ready", "--root", "fixture", "--timeout", "300" }) psi.ArgumentList.Add(a);
 psi.Environment["ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME"] = pipe;
 psi.Environment["ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE"] = Keepalive.ToString();
+// A cslq session of its own, so this run really does launch the daemon on the pipe probed
+// below rather than being answered by a session the suite already holds. It also puts the
+// leg back where the bug lives: the session is a third process in the chain now, spawned by
+// a cslq whose stdout is the redirected pipe above, and it is the one that would go on
+// holding that pipe for its whole life if either link stopped clearing the inherit flag.
+// Inherited when the caller named one -- probes/run.sh does, so its EXIT trap can find the
+// session this leaves behind -- and invented otherwise, so the file runs on its own too.
+psi.Environment["CSLQ_SESSION_PIPE_NAME"] =
+    Environment.GetEnvironmentVariable("CSLQ_SESSION_PIPE_NAME") is { Length: > 0 } named
+        ? named
+        : $"cslq-capture-session-{Environment.ProcessId}";
 
 var started = Stopwatch.StartNew();
 using var proc = Process.Start(psi)!;

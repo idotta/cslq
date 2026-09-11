@@ -21,10 +21,10 @@ npx skills add idotta/cslq -g     # the skill, into every agent on the machine
 ```
 
 The second command is [`npx skills`](https://github.com/vercel-labs/skills), which installs
-`skills/csharp-semantic-queries/SKILL.md` from the repository into each agent's skills
-directory — `~/.claude/skills/csharp-semantic-queries/` for Claude Code. Drop `-g` to install
-into the current repository instead. Without `npx`, copy that one file there yourself: it is
-plain markdown with YAML frontmatter and needs nothing else on disk.
+`skills/cslq/` from the repository into each agent's skills directory —
+`~/.claude/skills/cslq/` for Claude Code. Drop `-g` to install into the current repository
+instead. Without `npx`, copy that directory there yourself: two plain markdown files, `SKILL.md`
+with the YAML frontmatter and `REFERENCE.md` beside it, and nothing else on disk.
 
 Or hand both steps to the agent:
 
@@ -74,6 +74,7 @@ cslq outline <file | symbol> [--max N]        # the declarations in one document
 cslq diag [path] [--errors-only]              # compiler and analyzer diagnostics
 cslq project <file>                           # which .csproj compiles it, for which TFM
 cslq restore                                  # fetch the pinned language server, then exit
+cslq session <status | stop>                  # the background session for these options
 ```
 
 ```
@@ -91,6 +92,18 @@ Core/Greeter.cs:5:26
 
 Paths are relative to `--root`; lines and columns are one-based. Add `--json` for a
 `{ count, truncated, results }` envelope.
+
+## The session
+
+A background `cslq` holds the loaded workspace open between calls, so only the first call pays
+the solution load. Measured on a 4-project fixture, Release, 2026-09-11: that first call
+4.9-7.6 s — **more** than a one-shot, since it pays the load plus a process start — and every
+call after it 138-188 ms, against 2.2-2.4 s per call with `--no-session`. So spend the first
+call on `cslq ready` and then ask narrow questions freely.
+
+It ends after 900 s idle (`CSLQ_SESSION_KEEPALIVE`), on `cslq session stop`, or with the
+terminal. `cslq session status` names its pipe, root, pid and log. It is not the Roslyn daemon,
+which is a separate shared process `--no-daemon` opts out of.
 
 The [README on GitHub](https://github.com/idotta/cslq/blob/main/README.md) has the rest:
 the agent skill, measured latency and the shared daemon, every failure mode `cslq` handles,

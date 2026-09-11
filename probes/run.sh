@@ -8,7 +8,9 @@
 # `expect`, ' stands for " and | separates substrings that must all appear in the
 # combined stdout+stderr of the command. That separator means an expectation can never
 # quote a rendered `cslq outline` row, whose gutter is also | -- pasting one in silently
-# becomes two weaker substring matches. Assert bare declarations instead.
+# becomes two weaker substring matches. Assert bare declarations instead. A line starting
+# with # is a comment: the four fields leave nowhere to say why a row opts out of the
+# session, which is the one thing about a row that a reader cannot infer from it.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -23,9 +25,57 @@ root_abs=$( { pwd -W 2>/dev/null || pwd; } )
 # the countdown only starts once the last case disconnects.
 export ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="cslq-probe-$$"
 export ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE=60
+# And cslq sessions of its own, for the same reasons: a session the developer left running
+# holds a workspace this suite did not build, and one this suite starts must not outlive it.
+# The EXIT trap kills them by the pid each one logs; the short keepalive is the backstop.
+#
+# A name per attach rather than one for the suite. CSLQ_SESSION_PIPE_NAME overrides the
+# derived name outright, so a single exported value would put every root on one pipe -- the
+# first session to start would then decline every other root's requests and two thirds of the
+# cases would run through the fallback instead of through the session that is now the
+# default. `pipe_for` below derives one name per (root, daemon) pair under this prefix, which
+# is also what lets the trap find every session this run started.
+#
+# Nothing may run cslq without setting it: without it the derivation is the real one, and the
+# suite would leave a session behind on the pipe a developer's own calls use.
+SESSION_PREFIX="cslq-probe-session-$$"
+export CSLQ_SESSION_KEEPALIVE=60
+
+# The temp directory Session.LogPath writes into: %TEMP% on Windows and $TMPDIR (else /tmp)
+# elsewhere. %TEMP% is a Windows path, which bash cannot use until cygpath has turned it round.
+session_dir() {
+  if command -v cygpath >/dev/null 2>&1 && [ -n "${TEMP:-}" ]; then
+    cygpath -u "$TEMP"
+  else
+    printf '%s' "${TMPDIR:-/tmp}"
+  fi
+}
+
+session_log_path() { printf '%s/cslq-session-%s.log' "$(session_dir)" "$1"; }
+
+# The session name for an argument list: one attach per root and per whether the Roslyn daemon
+# is used, which is exactly the key Session.PipeName derives from. Anything else in the args --
+# --max, --json, a symbol -- is answered by the same session.
+pipe_for() {
+  pf_root=cwd
+  pf_daemon=d
+  pf_prev=""
+  for pf_tok in $1; do
+    [ "$pf_prev" = "--root" ] && pf_root=$pf_tok
+    [ "$pf_tok" = "--no-daemon" ] && pf_daemon=n
+    pf_prev=$pf_tok
+  done
+  printf '%s-%s-%s' "$SESSION_PREFIX" "$pf_daemon" \
+    "$(printf '%s' "$pf_root" | tr -c 'A-Za-z0-9' '_')"
+}
 
 
 log() { printf '\n==> %s\n' "$*"; }
+
+# `date +%s%N` is GNU-only -- BSD date on macos-latest prints a literal N -- and $EPOCHREALTIME
+# needs bash 5, which /bin/bash on macOS is not. perl is on all three platforms and is already
+# what this script uses for the in-place edit below.
+now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time * 1000'; }
 
 log "dotnet tool restore"
 dotnet tool restore || exit 1
@@ -92,7 +142,8 @@ CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 # too early returns empty results, not an error, so a naive probe reports a false pass.
 log "cslq ready"
 start=$(date +%s)
-"$CSLQ" ready --root fixture --timeout 300 || exit 1
+CSLQ_SESSION_PIPE_NAME=$(pipe_for "--root fixture") \
+  "$CSLQ" ready --root fixture --timeout 300 || exit 1
 printf 'cold ready: %ss\n' "$(( $(date +%s) - start ))"
 
 log "cases"
@@ -101,6 +152,11 @@ fail=0
 
 while IFS= read -r line || [ -n "$line" ]; do
   [ -z "${line// /}" ] && continue
+  # A `#` line is a comment. The four fields leave nowhere to say why a row carries
+  # --no-session, and "the case is opted out of the default" is exactly the thing a reader
+  # needs told: every one of them is a case whose subject is behaviour a warm session no
+  # longer has, and without a sentence saying so the flag reads as a workaround.
+  case "$line" in \#*) continue ;; esac
 
   name=$(printf '%s' "$line" | sed -n 's@.*"name":"\([^"]*\)".*@\1@p')
   args=$(printf '%s' "$line" | sed -n 's@.*"args":"\([^"]*\)".*@\1@p')
@@ -114,7 +170,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 
   # shellcheck disable=SC2086 -- args is a deliberately word-split argument list.
-  out=$("$CSLQ" $args 2>&1)
+  out=$(CSLQ_SESSION_PIPE_NAME=$(pipe_for "$args") "$CSLQ" $args 2>&1)
   got_exit=$?
 
   ok=1
@@ -157,7 +213,7 @@ done < probes/cases.jsonl
 log "framework def"
 fw_start=$(date +%s)
 fw_log=$(mktemp)
-"$CSLQ" def App/Program.cs:9:17 --root fixture > "$fw_log" 2>&1
+CSLQ_SESSION_PIPE_NAME=$(pipe_for "--root fixture")   "$CSLQ" def App/Program.cs:9:17 --root fixture > "$fw_log" 2>&1
 rc=$?
 fw_elapsed=$(( $(date +%s) - fw_start ))
 out=$(cat "$fw_log")
@@ -209,7 +265,27 @@ gj_tmp=""
 # it moved would make every later `dotnet tool run` on this machine re-resolve the pin.
 cache_saved=""
 cache_entry=""
+# Every session this suite started, ended by the pid each one logs on its first line. Found by
+# globbing rather than by name because there is one per attach now: the prefix is what makes
+# them ours, and a session a developer left running is on a name this never matches. taskkill
+# on Windows, where that pid is a Windows one and MSYS `kill` speaks its own pid space; plain
+# kill everywhere else.
+kill_sessions() {
+  for session_log in "$(session_dir)/cslq-session-$SESSION_PREFIX-"*.log; do
+    [ -f "$session_log" ] || continue
+    session_pid=$(sed -n 's/^cslq session [^ ]* pid \([0-9]*\) .*/\1/p' "$session_log" | tail -1)
+    [ -n "$session_pid" ] || continue
+    if command -v taskkill >/dev/null 2>&1; then
+      taskkill //F //PID "$session_pid" >/dev/null 2>&1
+    else
+      kill "$session_pid" 2>/dev/null
+    fi
+  done
+  return 0
+}
+
 cleanup() {
+  kill_sessions
   cp "$greeter_saved" "$greeter"
   rm -f "$greeter_saved"
   [ -n "$install_tmp" ] && rm -rf "$install_tmp"
@@ -232,7 +308,7 @@ trap cleanup EXIT
 await_generated() {
   deadline=$(( $(date +%s) + 90 ))
   while :; do
-    out=$("$CSLQ" def Fixture.Core.Generated.BuildInfo.Stamp --root fixture --sentinel Cheer 2>&1)
+    out=$(CSLQ_SESSION_PIPE_NAME=$(pipe_for "--root fixture")       "$CSLQ" def Fixture.Core.Generated.BuildInfo.Stamp --root fixture --sentinel Cheer 2>&1)
     rc=$?
     if [ "$1" = present ] && [ "$rc" = 0 ]; then
       case "$out" in *"BuildInfo.g.cs"*) return 0 ;; esac
@@ -294,7 +370,11 @@ if ! grep -q held "$fb_log" 2>/dev/null; then
   sed 's/^/      | /' "$fb_log"
   fail=$((fail + 1))
 else
-  out=$(ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="$fb_pipe" "$CSLQ" ready --root fixture --timeout 300 2>&1)
+  # A session of its own. The session key is the root, not the daemon pipe name, so the
+  # fixture session the cases left running would answer this out of a daemon that was never
+  # contended for -- and the fallback line, which the session prints on its own stderr and
+  # sends back over the pipe, would never be produced at all.
+  out=$(ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME="$fb_pipe"     CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-fallback"     "$CSLQ" ready --root fixture --timeout 300 2>&1)
   rc=$?
   case "$out" in
     *"daemon unreachable"*) ok=$([ "$rc" = 0 ] && echo 1 || echo 0) ;;
@@ -314,6 +394,258 @@ kill "$fb_holder" 2>/dev/null
 wait "$fb_holder" 2>/dev/null
 rm -f "$fb_log"
 
+# The session, which is now what every call gets: the attach is paid once and every later
+# call is a round trip to a process that already holds the workspace. A cases.jsonl row cannot
+# see a duration, so this is a scripted leg like framework-def-is-labelled-and-does-not-stall.
+#
+# The first call is what starts the session and pays the load; it is redirected to a file
+# rather than captured, because a capturing $(...) hands cslq an inheritable pipe that the
+# session it spawns would then hold for its whole life -- the PR #23 bug, one level up.
+# 1000 ms is loose on purpose: the query itself is single-digit milliseconds and the rest is
+# process start, so a regression here means the session was not reused at all.
+#
+# A session name of its own, exported for every leg from here down to the workspace
+# invalidation one: the cases above have already left a session on the fixture pipe, so the
+# first call here would be warm and the cold-then-warm contrast this leg is about would be gone.
+log "session"
+export CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-legs"
+sn_first_log=$(mktemp)
+sn_log=$(mktemp)
+"$CSLQ" hover Greet --root fixture > "$sn_first_log" 2>&1
+sn_first=$?
+sn_start=$(now_ms)
+"$CSLQ" hover Greet --root fixture > "$sn_log" 2>&1
+rc=$?
+sn_ms=$(( $(now_ms) - sn_start ))
+out=$(cat "$sn_log")
+
+ok=1
+[ "$sn_first" = 0 ] || ok=0
+[ "$rc" = 0 ] || ok=0
+[ "$sn_ms" -lt 1000 ] || ok=0
+case "$out" in
+  *"string Greeter.Greet(string name)"*) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%sms)\n' "session-second-call-is-fast" "$sn_ms"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %sms, wanted 0 under 1000ms and the hover signature)\n' \
+    "session-second-call-is-fast" "$rc" "$sn_ms"
+  # All three, because the interesting failure is a session that started and then went away:
+  # the second call then answers correctly, slowly, having started another one, and only the
+  # session's own log says why the first is gone.
+  printf '      first call (exit %s):\n' "$sn_first"
+  sed 's/^/      | /' "$sn_first_log"
+  printf '      second call:\n'
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  printf '      session log:\n'
+  sed 's/^/      | /' "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null
+  fail=$((fail + 1))
+fi
+rm -f "$sn_log" "$sn_first_log"
+
+# A session must survive a client that hangs up. The liveness probe used to prove a session
+# was up by connecting and dropping the connection, and WaitForPipeAsync did that up to twenty
+# times a second -- one of those drops races the session's accept, which then gets
+# `IOException: the pipe is being closed`, and rethrowing it took the whole session down: the
+# caller fell back, the next call found nothing listening and paid the load again. 4.5 s and
+# three processes for one query, on one run in several, which is why this leg exists at all.
+#
+# The pid count is the real assertion. A session that died and was silently replaced answers
+# the query afterwards perfectly well -- slowly, having reloaded the workspace -- so latency
+# alone reads as noise. Exactly one `cslq session <version> pid` line in the log means the
+# process that answered is the process the leg before this one started.
+log "session hangups"
+hu_log=$(mktemp)
+hu_out=$(mktemp)
+dotnet run probes/hangup.cs -- "$CSLQ_SESSION_PIPE_NAME" 50 > "$hu_log" 2>&1
+hu_rc=$?
+hu_start=$(now_ms)
+"$CSLQ" hover Greet --root fixture > "$hu_out" 2>&1
+rc=$?
+hu_ms=$(( $(now_ms) - hu_start ))
+out=$(cat "$hu_out")
+hu_pids=$(grep -c '^cslq session .* pid ' "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null)
+rm -f "$hu_out"
+
+ok=1
+[ "$hu_rc" = 0 ] || ok=0
+[ "$rc" = 0 ] || ok=0
+[ "$hu_ms" -lt 1000 ] || ok=0
+[ "$hu_pids" = 1 ] || ok=0
+case "$out" in
+  *"string Greeter.Greet(string name)"*) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%sms)\n' "session-survives-hangups" "$hu_ms"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %sms, %s session pid lines, wanted 0 under 1000ms and one)\n' \
+    "session-survives-hangups" "$rc" "$hu_ms" "$hu_pids"
+  printf '      hangups (exit %s):\n' "$hu_rc"
+  sed 's/^/      | /' "$hu_log"
+  printf '      query:\n'
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  printf '      session log:\n'
+  sed 's/^/      | /' "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null
+  fail=$((fail + 1))
+fi
+rm -f "$hu_log"
+
+# What the session costs correctness, and the reason the staleness record exists. A one-shot
+# process re-sent every document's text off disk on every run because its open set started
+# empty; a session holds `didOpen` across an edit, and Roslyn owns an open document's text
+# rather than re-reading the file -- so without the stat-and-re-send the session answers
+# forever from the text it first read: wrong lines, wrong context rows, a renamed symbol
+# still found, all at exit 0.
+#
+# Both directions are asserted. A leg that only checks the edit is visible passes just as
+# well if the session threw the whole world away and reloaded it, and a leg that only checks
+# the old name is gone passes on a session that broke. Every query goes through the *same*
+# session the leg above started -- same pipe, same root -- and into a file rather than a
+# $(...) capture, for the inherited-handle reason that leg documents.
+#
+# Greeter.cs is restored by the EXIT trap, like the generator staleness legs above: an
+# interrupt between the rename and the restore must not leave the fixture renamed.
+log "session document staleness"
+sd_log=$(mktemp)
+
+# Polled rather than asked once, because absence and presence are both eventually consistent
+# here: the workspace index is the daemon's and a fresh attach is nobody's to hurry. Without
+# the re-send the wanted state never arrives at all, so the deadline is the failure.
+await_session_hover() {
+  deadline=$(( $(date +%s) + 60 ))
+  while :; do
+    "$CSLQ" hover "$1" --root fixture > "$sd_log" 2>&1
+    rc=$?
+    out=$(cat "$sd_log")
+    if [ "$2" = present ] && [ "$rc" = 0 ]; then
+      case "$out" in *"$3"*) return 0 ;; esac
+    fi
+    if [ "$2" = absent ] && [ "$rc" = 1 ]; then
+      case "$out" in *"no symbol matched"*) return 0 ;; esac
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      printf '%s\n' "$out" | sed 's/^/      | /'
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+sd_leg() {
+  sd_start=$(now_ms)
+  if await_session_hover "$2" "$3" "${4:-}"; then
+    printf 'PASS  %s (%sms)\n' "$1" "$(( $(now_ms) - sd_start ))"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (hover %s never became %s)\n' "$1" "$2" "$3"
+    fail=$((fail + 1))
+  fi
+}
+
+sd_leg session-staleness-baseline Greet present "string Greeter.Greet(string name)"
+# perl for the reason the rename above uses it: BSD sed has neither -i without a suffix nor \b.
+perl -pi -e 's/\bGreet\b/Greeted/g' "$greeter"
+sd_leg session-sees-the-edit Greeted present "string Greeter.Greeted(string name)"
+sd_leg session-loses-the-old-name Greet absent
+cp "$greeter_saved" "$greeter"
+sd_leg session-sees-the-restore Greet present "string Greeter.Greet(string name)"
+sd_leg session-loses-the-edited-name Greeted absent
+rm -f "$sd_log"
+
+# The other half of a living session: the workspace shape itself can change under it. Roslyn's
+# file watcher keeps ordinary .cs edits inside a loaded project current; nothing keeps the
+# project graph current, so a touched solution has to dispose the attach and take another one.
+# Correctness only -- it pays a reload by design, so no latency bound -- plus the session's own
+# log line, without which this leg would pass just as well on a session that noticed nothing.
+log "session workspace invalidation"
+si_log=$(mktemp)
+touch fixture/Fixture.slnx
+"$CSLQ" hover Greet --root fixture > "$si_log" 2>&1
+rc=$?
+out=$(cat "$si_log")
+rm -f "$si_log"
+
+ok=1
+[ "$rc" = 0 ] || ok=0
+case "$out" in
+  *"string Greeter.Greet(string name)"*) ;;
+  *) ok=0 ;;
+esac
+grep -q "the project graph changed" "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null || ok=0
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "session-reattaches-when-the-solution-changes"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s, wanted 0, the answer and a re-attach in the session log)\n' \
+    "session-reattaches-when-the-solution-changes" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  printf '      session log:\n'
+  sed 's/^/      | /' "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null
+  fail=$((fail + 1))
+fi
+
+unset CSLQ_SESSION_PIPE_NAME
+
+# A session that cannot be started must cost the caller an answer, never the query. The
+# trigger is the startup mutex, held the same way the daemon one is above, and a pipe name
+# of its own so the session started by the leg before it is not simply found and used.
+#
+# Both halves matter, for the reason the daemon fallback's do: exit 0 says the query was
+# still answered, and the line says cslq noticed rather than silently taking the slow path.
+log "session fallback"
+sf_pipe="cslq-probe-session-fb-$$"
+sf_log=$(mktemp)
+dotnet run probes/hold-mutex.cs -- "$sf_pipe" 90 start > "$sf_log" 2>&1 &
+sf_holder=$!
+
+sf_deadline=$(( $(date +%s) + 60 ))
+while ! grep -q held "$sf_log" 2>/dev/null; do
+  if ! kill -0 "$sf_holder" 2>/dev/null || [ "$(date +%s)" -ge "$sf_deadline" ]; then
+    break
+  fi
+  sleep 1
+done
+
+if ! grep -q held "$sf_log" 2>/dev/null; then
+  printf 'FAIL  %s (could not hold the session startup mutex)\n' "session-unavailable-falls-back"
+  sed 's/^/      | /' "$sf_log"
+  fail=$((fail + 1))
+else
+  sf_out=$(mktemp)
+  CSLQ_SESSION_PIPE_NAME="$sf_pipe" "$CSLQ" hover Greet --root fixture --timeout 300 \
+    > "$sf_out" 2>&1
+  rc=$?
+  out=$(cat "$sf_out")
+  rm -f "$sf_out"
+  ok=$([ "$rc" = 0 ] && echo 1 || echo 0)
+  case "$out" in
+    *"session unavailable; this run loaded the workspace itself"*) ;;
+    *) ok=0 ;;
+  esac
+  case "$out" in
+    *"string Greeter.Greet(string name)"*) ;;
+    *) ok=0 ;;
+  esac
+  if [ "$ok" = 1 ]; then
+    printf 'PASS  %s\n' "session-unavailable-falls-back"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (exit %s, wanted 0, the answer and the fallback warning)\n' \
+      "session-unavailable-falls-back" "$rc"
+    printf '%s\n' "$out" | sed 's/^/      | /'
+    fail=$((fail + 1))
+  fi
+fi
+
+kill "$sf_holder" 2>/dev/null
+wait "$sf_holder" 2>/dev/null
+rm -f "$sf_log"
+
 # diag pulls each document once, so the first pull has to be the correct one. Every
 # cases.jsonl leg above runs against this suite's shared daemon, which by now has
 # App/TypeError.cs open -- a warm document answers correctly whatever the pull count, so
@@ -329,7 +661,12 @@ cold_log=$(mktemp)
 # --no-daemon, not a private pipe name: it gives a dedicated server that has never seen the
 # document, which is the state under test, and it exits with the client rather than leaving a
 # second daemon holding a warm fixture behind this leg.
-"$CSLQ" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon > "$cold_log" 2>&1
+#
+# --no-session for the same reason, and it is the subject of the leg rather than a workaround:
+# a session holds its server for its life, so the no-daemon session the no-daemon-refs case
+# left running has a server that loaded the fixture minutes ago. There is no such thing as a
+# never-used server inside a session, so this one leg runs without one.
+"$CSLQ" diag App/TypeError.cs --root fixture --errors-only --timeout 300 --no-daemon --no-session > "$cold_log" 2>&1
 rc=$?
 out=$(cat "$cold_log")
 rm -f "$cold_log"
@@ -376,7 +713,11 @@ installed="$install_tmp/bin/cslq"
 [ -x "$installed" ] || installed="$installed.exe"
 if [ "$ok" = 1 ] && [ -x "$installed" ]; then
   # Redirected to a log rather than captured, so the output survives for printing on failure.
-  ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 ) \
+  # --no-session: the subject is an installed binary finding the manifest packed beside it,
+  # and a session is answered by whichever binary started it -- the one under src/Cslq/bin,
+  # which finds the manifest by walking up into this checkout. A session started by the
+  # installed binary instead would hold the throwaway --tool-path open past the EXIT trap.
+  ( cd "$install_tmp" && "$installed" ready --root "$fixture_abs" --timeout 300 --no-session ) \
     > "$install_tmp/ready.log" 2>&1
   rc=$?
   out=$(cat "$install_tmp/ready.log")
@@ -409,7 +750,7 @@ fi
 if pwd -W >/dev/null 2>&1; then
   log "captured stdout"
   sc_log=$(mktemp)
-  dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
+  CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-capture"     dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
   rc=$?
   out=$(cat "$sc_log")
   rm -f "$sc_log"
@@ -441,6 +782,10 @@ printf '<Project Sdk="Microsoft.NET.Sdk" />' > "$ns_tmp/App/App.csproj"
 # MSYS hands a native .NET process a Windows path only if it is given one.
 ns_abs=$( cd "$ns_tmp" && { pwd -W 2>/dev/null || pwd; } )
 
+# No CSLQ_SESSION_PIPE_NAME and no --no-session, deliberately: a root with no solution, or
+# with two, never gets a session at all -- cslq answers both from a directory listing before
+# it would spawn one, which is what keeps the elapsed bound below meaningful. If that guard
+# regresses, this leg is where a spawn shows up, as seconds rather than as a message.
 ns_start=$(date +%s)
 out=$("$CSLQ" ready --root "$ns_abs" --timeout 300 2>&1)
 rc=$?
@@ -537,10 +882,15 @@ public class Ghost { }
 dotnet restore "$ec_tmp/Two.slnx" --nologo -v q > /dev/null 2>&1
 ec_abs=$( cd "$ec_tmp" && { pwd -W 2>/dev/null || pwd; } )
 
+ec_pipe="$SESSION_PREFIX-exhausted"
 ec_start=$(date +%s)
-out=$("$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
+out=$(CSLQ_SESSION_PIPE_NAME="$ec_pipe" "$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
 rc=$?
 ec_elapsed=$(( $(date +%s) - ec_start ))
+# Through the session like every other call, so the bound covers the session load too -- and
+# stopped by name before the tree goes, or it would hold a dedicated server for a root that no
+# longer exists until the keepalive. `session stop` is the user-facing lever for exactly this.
+CSLQ_SESSION_PIPE_NAME="$ec_pipe" "$CSLQ" session stop --root "$ec_abs" --no-daemon > /dev/null 2>&1
 rm -rf "$ec_tmp"
 ec_tmp=""
 
@@ -593,10 +943,12 @@ public class LibType { }
 ' > "$gj_tmp/Lib/LibType.cs"
 gj_abs=$( cd "$gj_tmp" && { pwd -W 2>/dev/null || pwd; } )
 
+gj_pipe="$SESSION_PREFIX-globaljson"
 gj_start=$(date +%s)
-out=$("$CSLQ" ready --root "$gj_abs" --no-daemon --timeout 150 2>&1)
+out=$(CSLQ_SESSION_PIPE_NAME="$gj_pipe" "$CSLQ" ready --root "$gj_abs" --no-daemon --timeout 150 2>&1)
 rc=$?
 gj_elapsed=$(( $(date +%s) - gj_start ))
+CSLQ_SESSION_PIPE_NAME="$gj_pipe" "$CSLQ" session stop --root "$gj_abs" --no-daemon > /dev/null 2>&1
 rm -rf "$gj_tmp"
 gj_tmp=""
 
@@ -628,8 +980,14 @@ dotnet_real=$(command -v dotnet)
 dotnet_real=$(readlink -f "$dotnet_real" 2>/dev/null || printf '%s' "$dotnet_real")
 dotnet_root=$( cd "$(dirname "$dotnet_real")" && { pwd -W 2>/dev/null || pwd; } )
 
-out=$(DOTNET_ROOT="$dotnet_root" PATH="" "$CSLQ" ready --root fixture --timeout 300 2>&1)
+# A session of its own, and the failure has to travel out of it: the session is spawned from
+# Environment.ProcessPath and inherits the emptied PATH, so it is the session that cannot
+# launch the server and the message comes back over the pipe. The fixture session the cases
+# left running would answer this successfully, which is why the name is not pipe_for's.
+op_pipe="$SESSION_PREFIX-nopath"
+out=$(DOTNET_ROOT="$dotnet_root" PATH="" CSLQ_SESSION_PIPE_NAME="$op_pipe" "$CSLQ" ready --root fixture --timeout 300 2>&1)
 rc=$?
+CSLQ_SESSION_PIPE_NAME="$op_pipe" "$CSLQ" session stop --root fixture > /dev/null 2>&1
 ok=$([ "$rc" = 1 ] && echo 1 || echo 0)
 case "$out" in
   *"cslq: could not start the language server"*) ;;

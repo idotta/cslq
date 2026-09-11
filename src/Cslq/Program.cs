@@ -20,6 +20,7 @@ internal static partial class Program
           cslq diag    [path] [--errors-only] [--max N] [--context N] [--tfm T]
           cslq project <file> [--tfm T]
           cslq restore
+          cslq session <status | stop>
 
         options:
           --root <dir>      workspace root (default: current directory)
@@ -35,6 +36,8 @@ internal static partial class Program
           --errors-only     diag: drop warnings and below
           --json            machine-readable output
           --no-daemon       start a dedicated server instead of the shared daemon
+          --no-session      load the workspace in this process instead of through the
+                            background session that holds it open between calls
           --version         print the cslq version
           -h, --help        this message
 
@@ -56,7 +59,7 @@ internal static partial class Program
         """;
 
     internal static readonly string[] Commands =
-        ["ready", "refs", "def", "impl", "hover", "sym", "outline", "diag", "project", "restore"];
+        ["ready", "refs", "def", "impl", "hover", "sym", "outline", "diag", "project", "restore", "session"];
 
     // `outline` is here because it accepts a position too — see OutlineTargetAsync. `sym`
     // takes a free-text query and `diag` and `project` a path, none of which is
@@ -88,7 +91,11 @@ internal static partial class Program
         ["sym"] = "a query",
         ["outline"] = "a file or symbol",
         ["project"] = "a file",
+        ["session"] = "status or stop",
     };
+
+    /// <summary>What <c>cslq session</c> accepts, and the only free-text positional it takes.</summary>
+    private static readonly string[] SessionVerbs = ["status", "stop"];
 
     // Everything that resolves a document and can therefore be answered in one project
     // context. `sym` goes through `workspace/symbol`, which is context-independent, and
@@ -96,8 +103,45 @@ internal static partial class Program
     internal static readonly string[] TakesTfm =
         ["refs", "def", "impl", "hover", "outline", "diag", "project"];
 
+    /// <summary>
+    /// Redirected output goes through <see cref="Console.OutputEncoding"/>, which on Windows
+    /// is the console's code page — 850 on this machine — and a code page cannot carry an
+    /// emoji, an ellipsis or an accent: they best-fit to <c>??</c> and <c>.</c> and the answer
+    /// is wrong at exit 0. It looked like this never happened, and the reason was an accident:
+    /// the language server <c>cslq</c> launches attaches to the same console and sets its
+    /// output code page to UTF-8, and <see cref="Console.Out"/> is built lazily <em>after</em>
+    /// that. A call answered by a session launches nothing, so the code page is still the
+    /// console's own — which is how the flip to sessions-by-default turned
+    /// <c>non-ascii-refs-symbol</c> and <c>a-long-line-is-elided-around-the-hit-column</c> red.
+    /// <para>
+    /// Writers of our own rather than <c>Console.OutputEncoding = ...</c>, which is the thing
+    /// CLAUDE.md says not to add and still right: its setter calls <c>SetConsoleOutputCP</c>,
+    /// which every process sharing the console sees. A real console handle is written with
+    /// <c>WriteConsoleW</c> and ignores the encoding entirely, so only the redirected case is
+    /// touched — which is every agent, every pipeline and the whole probe suite.
+    /// </para>
+    /// </summary>
+    private static void WriteUtf8WhenRedirected()
+    {
+        var utf8 = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+        if (Console.IsOutputRedirected)
+        {
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true });
+        }
+
+        if (Console.IsErrorRedirected)
+        {
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
+        }
+    }
+
     private static async Task<int> Main(string[] argv)
     {
+        // First, and before anything can print: Console.Out is built on first use and keeps
+        // whatever encoding it was built with.
+        WriteUtf8WhenRedirected();
+
         try
         {
             return await RunAsync(argv);
@@ -188,23 +232,46 @@ internal static partial class Program
             case Immediate.Version: Console.WriteLine(Build.Version); return 0;
         }
 
-        var opts = Options.Parse(argv);
-
         using var cts = new CancellationTokenSource();
+
+        // The session process, which is a cslq we spawned rather than one anybody typed. It
+        // never returns to the rest of this method: it holds a client open and answers other
+        // invocations over a pipe until it idles out. Above the interrupt handler on purpose —
+        // it installs its own, which ignores the event rather than cancelling.
+        if (Session.ServeRequest(argv) is { } serve) return await Session.ServeAsync(serve, cts.Token);
+
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+        var opts = Options.Parse(argv);
 
         // Above both the workspace scan and the server launch, which is the whole point of
         // the command: a Dockerfile or a CI job pre-warming the ~300 MB pin has no solution
         // to point at, and project discovery would fail it for the absence.
+        // It is also the one command a session must never answer: there is no workspace in it.
         if (opts.Command == "restore") return await RestoreAsync(opts, cts.Token);
+
+        // The lever for a session someone suspects is stale. It is about the session rather
+        // than answered by one, so it is here beside `restore` and never goes over the pipe.
+        if (opts.Command == "session") return await SessionCommandAsync(opts, cts.Token);
+
+        // A session answers from a workspace it already holds, so the whole of the rest of
+        // this method — discovery, the attach, the load — is what it exists to skip. Null is
+        // every failure it can have, and the answer is then this run doing the work itself.
+        //
+        // A root with no solution, or with two, can never load one: `InferSentinels` below
+        // says so from a directory listing, in well under a second. Spawning a background
+        // process first would put a process start and a pipe handshake in front of an answer
+        // that is already instant, and leave a session behind holding a root it cannot serve.
+        if (opts.Session && Solutions(opts.Root).Count == 1)
+        {
+            if (await Session.TryRunAsync(argv, opts, cts.Token) is { } exit) return exit;
+            Console.Error.WriteLine(Session.FallbackNotice);
+        }
 
         // Before discovery rather than after it, so a solution listing nothing but non-C#
         // projects says what it holds and then fails for holding no C# one, rather than
         // reporting the absence with no hint that the projects sitting there were seen.
-        if (NonCsharpProjects(opts.Root) is { Count: > 0 } other)
-        {
-            Console.Error.WriteLine("cslq: " + NonCsharpNotice(other));
-        }
+        WarnNonCsharp(opts.Root);
 
         // Before the server starts, like the argument checks in Options.Parse: this is a
         // filesystem scan, and a root with no project in it should say so instantly rather
@@ -252,7 +319,7 @@ internal static partial class Program
         return Immediate.None;
     }
 
-    private static async Task<int> DispatchAsync(
+    internal static async Task<int> DispatchAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
         switch (opts.Command)
@@ -304,6 +371,26 @@ internal static partial class Program
         var manifestRoot = ServerArgs.ToolManifestRoot();
         var pruned = await LspClient.RestoreAsync(manifestRoot, ct);
         Output.WriteRestored(manifestRoot, pruned, opts.Json);
+        return 0;
+    }
+
+    /// <summary>
+    /// The lever for a session someone suspects: <c>status</c> names the pipe, the root it
+    /// serves, its pid and its log, and <c>stop</c> ends it. Both are about the session the
+    /// <em>current</em> options would reach, so <c>--root</c> and <c>--no-daemon</c> pick
+    /// which one exactly as they do for a query. Nothing here starts one.
+    /// </summary>
+    private static async Task<int> SessionCommandAsync(Options opts, CancellationToken ct)
+    {
+        if (opts.Target == "stop")
+        {
+            var stopped = await Session.StopAsync(opts, ct);
+            Output.WriteSessionStopped(stopped, Session.PipeName(opts), opts.Json);
+            return 0;
+        }
+
+        var status = await Session.StatusAsync(opts, ct);
+        Output.WriteSessionStatus(status, opts.Json);
         return 0;
     }
 
@@ -664,8 +751,25 @@ internal static partial class Program
         {
             try
             {
+                // Opened before the contexts are read rather than inside DiagnosticsAsync
+                // below, because the read is where an undecodable file throws and the skip
+                // under it would otherwise swallow the one file this walk exists to name: a
+                // file no project compiles is also a file with no project context.
+                await client.OpenAsync(uri, ct);
+
                 var (all, asked) = await ContextsAsync(client, opts, uri, ct);
                 if (files.Count == 1) note = Union(all, asked);
+
+                // No project context means no project compiles this document, and an
+                // unqualified pull against one is answered out of Roslyn's misc-files
+                // workspace instead — analyzer rows about a file no compilation contains. A
+                // one-shot run never saw them because it exits before the document binds; a
+                // session holds it open, so the same command started answering differently on
+                // the fifth call than on the first. The rule is the context and not the
+                // directory on purpose: a file linked in with <Compile Include="../.." /> has
+                // a real context, so its real errors are still reported, which is the case
+                // directory scoping would have dropped.
+                if (all.Count == 0 && !client.ProjectContextsUnsupported) continue;
 
                 var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
                 findings.AddRange(Reports(uri, views));
@@ -1023,16 +1127,25 @@ internal static partial class Program
     /// only when inference finds nothing at all, which is the layout it is the escape hatch
     /// for.
     /// </summary>
-    internal static IReadOnlyList<Sentinel> Sentinels(Options opts)
+    internal static IReadOnlyList<Sentinel> Sentinels(Options opts) => Sentinels(opts, null);
+
+    /// <summary>
+    /// <paramref name="inferred"/> is the set a session inferred on its first request and
+    /// holds for its life: the inference is a scan of every source file under the root, and
+    /// re-running it per request would put a large part of the one-shot cost back. Null
+    /// infers it here, which is every other caller.
+    /// </summary>
+    internal static IReadOnlyList<Sentinel> Sentinels(
+        Options opts, IReadOnlyList<Sentinel>? inferred)
     {
-        if (opts.Sentinel is not { } explicitSentinel) return InferSentinels(opts.Root);
+        if (opts.Sentinel is not { } explicitSentinel) return inferred ?? InferSentinels(opts.Root);
 
         var probe = new Sentinel(
             Path.GetFullPath(opts.Root), [explicitSentinel], [], Explicit: true);
 
         try
         {
-            return [.. InferSentinels(opts.Root), probe];
+            return [.. inferred ?? InferSentinels(opts.Root), probe];
         }
         catch (CslqException)
         {
@@ -1244,6 +1357,24 @@ internal static partial class Program
         .ToList();
 
     /// <summary>
+    /// A signature of the root's solutions, for a session to notice the project graph
+    /// changing under an attach it is holding. Path, write time and length of each, so a
+    /// solution renamed — same bytes, same timestamp, different name — reads as a change too,
+    /// and so does a second solution appearing beside the first. One <c>stat</c> on each
+    /// request, which is nothing next to a query and is the backstop for the case the
+    /// <see cref="FileSystemWatcher"/> missed or could not watch at all.
+    /// </summary>
+    internal static string SolutionSignature(string root) => string.Join(
+        '\n',
+        Solutions(root)
+            .Order(PathUri.PathComparer)
+            .Select(s =>
+            {
+                var stamp = Staleness.OfPath(s);
+                return $"{s}|{stamp?.WriteTimeUtc:O}|{stamp?.Length}";
+            }));
+
+    /// <summary>
     /// The root's own solutions. Top-level only: a solution in a subdirectory describes that
     /// subtree rather than this root, and Roslyn would not open it for this root either.
     /// Capped at two, which is all the caller distinguishes: one is read, and two or more is
@@ -1314,6 +1445,19 @@ internal static partial class Program
             .Select(p => Path.GetFullPath(
                 Path.Combine(directory, p!.Replace('\\', Path.DirectorySeparatorChar))))
             .Where(File.Exists);
+    }
+
+    /// <summary>
+    /// The notice, printed by both the in-process path and a session request. Not behind
+    /// <c>--log-level</c>, unlike the not-probed line: a missing VB reference is an answer
+    /// that looks complete at exit 0.
+    /// </summary>
+    internal static void WarnNonCsharp(string root)
+    {
+        if (NonCsharpProjects(root) is { Count: > 0 } other)
+        {
+            Console.Error.WriteLine("cslq: " + NonCsharpNotice(other));
+        }
     }
 
     /// <summary>
@@ -1432,6 +1576,7 @@ internal static partial class Program
         bool ErrorsOnly,
         bool Json,
         bool Daemon,
+        bool Session,
         string? Tfm)
     {
         /// <summary>
@@ -1467,6 +1612,7 @@ internal static partial class Program
             var errorsOnly = false;
             var json = false;
             var daemon = true;
+            var session = true;
             string? tfm = null;
 
             // Options are extracted wherever they appear and the positionals are what is left,
@@ -1491,6 +1637,7 @@ internal static partial class Program
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
                     case "--no-daemon": daemon = false; break;
+                    case "--no-session": session = false; break;
                     default:
                         if (argv[i].StartsWith('-')) throw new UsageException($"unknown option '{argv[i]}'");
                         positional.Add(argv[i]);
@@ -1524,6 +1671,13 @@ internal static partial class Program
                 throw new UsageException($"{command} needs {needs}");
             }
 
+            // A closed set, unlike every other positional here, so a typo is answered now
+            // rather than by `status` being the thing that happens to match first.
+            if (command == "session" && !SessionVerbs.Contains(argument))
+            {
+                throw new UsageException($"unknown session verb '{argument}'; expected status or stop");
+            }
+
             // `workspace/symbol` is context-independent and `ready` and `restore` resolve no
             // document at all, so there is no project context for `--tfm` to choose: accepted
             // there it filtered nothing, and the caller read an unfiltered answer as filtered.
@@ -1544,7 +1698,7 @@ internal static partial class Program
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
-                daemon, tfm);
+                daemon, session, tfm);
         }
 
         /// <summary>

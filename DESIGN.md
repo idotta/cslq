@@ -49,6 +49,25 @@ near-useless to a model.
   the one-time restore notice are advisories that ride there at exit 0 beside a perfectly good
   answer on stdout. What the rule fixes is where a command's **own** message goes, and the
   exit code is the whole of the answer to that.
+- **A session buffers a whole response and writes it when the command finishes.** A request
+  answered by a session runs with its stdout and stderr captured into strings, which travel back
+  over the pipe and are written by the client process in one go. Nothing about the *content*
+  changes — same streams, same prefixes, same exit code — but the timing does: a long
+  `cslq diag` walk no longer streams its rows as it goes, and its per-file `cslq: skipped —`
+  lines all arrive at the end rather than interleaved with the files they name. That is the
+  price of the transport and it is worth paying, because the alternative — streaming two
+  channels down one pipe — is a framing problem on every call for an ordering benefit on one
+  command. `--no-session` streams as it always did.
+- **`diag` reports only on documents a project compiles, and the test is the project *context*,
+  not the directory.** A document whose `_vs_getProjectContexts` answer is empty is compiled by
+  nothing, and an unqualified pull against one is answered out of Roslyn's misc-files workspace:
+  analyzer rows about a file no compilation contains. Those rows are noise by construction — no
+  compiler error can be real for a file no compiler sees. `diag` skips such a document
+  entirely. The directory is deliberately *not* the test, and the reason is the linked file: a
+  document pulled in with `<Compile Include="../Elsewhere/File.cs" />` sits outside every
+  project directory and has a perfectly real context, so a directory rule would drop its real
+  errors while a context rule keeps them. `diag`'s file **enumeration** stays unscoped for the
+  same reason — see Readiness below.
 - **`--json` is honoured on every path, including the ones that exit non-zero, and `error` is
   the discriminator.** An empty answer keeps the ordinary `{ count, truncated, results }`
   envelope with `count: 0`: a caller parsing JSON never meets a missing body. A failure prints
@@ -660,12 +679,20 @@ cost a process start on every invocation for a state almost no invocation is in.
 2026-09-10 on a root pinning an absent SDK: 23 s with the cause named, against the 181.7 s and
 no cause testers measured.
 
-`diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
-Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to
-`workspace/symbol` and reports **no diagnostics at all** — only `outline` answers for it, off
-the syntax tree — so scoping would suppress nothing. A file linked in from outside its project
-directory (`<Compile Include="../Elsewhere/File.cs" />`) is fully indexed and does report, and
-scoping would drop those diagnostics silently. Under-reporting is worse than over-walking.
+`diag`'s file enumeration is **not** scoped to project directories, and that is deliberate. A
+file linked in from outside its project directory (`<Compile Include="../Elsewhere/File.cs" />`)
+is fully indexed and does report, and scoping the walk would drop those diagnostics silently.
+Under-reporting is worse than over-walking.
+
+What the walk is scoped by instead is the **project context**, per document. The 2026-09-05
+measurement said a `.cs` file no project compiles reports no diagnostics at all, and that was an
+artefact of a process that exited before the document bound: a session holds the document open,
+Roslyn binds it into the misc-files workspace, and the pull then returns analyzer rows about a
+file no compilation contains — so a whole-fixture `diag` drifted upward on later calls against
+the same tree. Such a document is skipped on its empty `_vs_getProjectContexts` answer, which
+keeps the linked file (a real context, outside every project directory) and drops only the file
+nothing compiles. `workspace/symbol` still does not index it and `outline` still answers for it
+off the syntax tree; only the diagnostics half of the old claim was wrong.
 
 `diag` pulls each document **once**. It used to re-pull until two consecutive reports agreed, on
 the premise that a freshly opened document binds against the misc-files state and under-reports
