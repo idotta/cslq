@@ -499,32 +499,32 @@ internal static class Session
     }
 
     /// <summary>
-    /// Polls for the session's pipe, and gives up the moment the process we started exits —
-    /// a session that cannot run at all (no <c>dotnet</c> on PATH, a binary that does not
-    /// understand <c>--serve</c>) would otherwise cost the caller the whole poll window
-    /// before the in-process path reports the real reason.
+    /// Whether a session is accepting on the pipe, asked by exchanging a ping rather than by
+    /// connecting and hanging up: a half-open connection is what races the server's accept.
+    /// A ping is answered off the request gate, so a session in the middle of a cold load or a
+    /// long <c>diag</c> still says yes instead of reading as absent.
+    /// <para>
+    /// Only <c>cslq session status</c> asks this now — the request path polled it and then
+    /// opened a second connection for the query, which on Unix put that query into the window
+    /// the probe's own disposal had just made. It is retried over the same bounded window a
+    /// request is, and for the same reason: on that transport a single refused or unanswered
+    /// connect is "in a moment", and status reporting a live session as absent is exactly the
+    /// wrong answer to give about one.
+    /// </para>
     /// </summary>
-    private static async Task<bool> WaitForPipeAsync(string pipe, Process session, CancellationToken ct)
+    private static async Task<bool> ListeningAsync(
+        string pipe, int connectMs, TimeSpan window, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-        while (DateTime.UtcNow < deadline)
+        var deadline = DateTime.UtcNow + window;
+        while (true)
         {
-            if (await ListeningAsync(pipe, FastConnectMs, ct)) return true;
-            if (session.HasExited) return false;
-            await Task.Delay(50, ct);
+            if (await PingedAsync(pipe, connectMs, ct)) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(RetryDelayMs, ct);
         }
-
-        return false;
     }
 
-    /// <summary>
-    /// Whether a session is accepting on the pipe, asked by exchanging a ping rather than by
-    /// connecting and hanging up: a half-open connection is what races the server's accept,
-    /// and this is polled hard enough to hit that race. A ping is answered off the request
-    /// gate, so a session in the middle of a cold load or a long <c>diag</c> still says yes
-    /// instead of reading as absent.
-    /// </summary>
-    private static async Task<bool> ListeningAsync(string pipe, int connectMs, CancellationToken ct)
+    private static async Task<bool> PingedAsync(string pipe, int connectMs, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut, PipeStreamOptions);
@@ -565,7 +565,8 @@ internal static class Session
     {
         var pipe = PipeName(opts);
         var log = LogPath(pipe);
-        return new Status(pipe, opts.Root, log, await ListeningAsync(pipe, PatientConnectMs, ct), Pid(log));
+        var running = await ListeningAsync(pipe, PatientConnectMs, RetryWindow, ct);
+        return new Status(pipe, opts.Root, log, running, Pid(log));
     }
 
     /// <summary>
