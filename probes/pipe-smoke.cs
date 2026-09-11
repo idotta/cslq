@@ -19,9 +19,17 @@
 // reference-counted kernel object, all three are expected to pass and say nothing.
 //
 // A file-based app rather than a project, like probes/hold-mutex.cs and probes/hangup.cs.
+// A file-based app is AOT-shaped by default, which turns reflection-based System.Text.Json off
+// and leaves JsonRpc unable to deserialise even the empty result of a `ping`. The remedy is a
+// source-generated TypeInfoResolver (Wire below), not the reflection switch: cslq is meant to be
+// AOT-able, and turning reflection back on is the direction away from that.
+#:package StreamJsonRpc@2.25.29
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using StreamJsonRpc;
 
 const int ConnectMs = 2000;
 
@@ -207,11 +215,10 @@ async Task ServeOneAsync(NamedPipeServerStream accepted, bool dispose, Cancellat
 }
 
 // Part 2. The same question asked of a real session, across a process boundary. Everything here
-// is answered by Session.ServeOneAsync before it touches a workspace -- an empty argv is the
-// liveness ping and a lone --session-stop is the stop lever, both answered off the request gate
-// -- so this costs a process start and nothing else, and it works on a root that has never been
-// restored. It is also the path `cslq session status` takes, so a failure here is a live session
-// reported as absent.
+// is answered by the session's `ping` and `stop` methods before it touches a workspace, both of
+// them off the request gate -- so this costs a process start and nothing else, and it works on a
+// root that has never been restored. It is also the path `cslq session status` takes, so a
+// failure here is a live session reported as absent.
 async Task<int> ServedAsync()
 {
     var served = $"{pipe}-serve";
@@ -253,7 +260,7 @@ async Task<int> ServedAsync()
     }
 
     // The stop lever, so this leaves nothing behind even where the trap cannot see it.
-    await PingAsync(served, quiet: true, argv: "\"--session-stop\"");
+    await PingAsync(served, quiet: true, method: "stop");
     if (!session.WaitForExit(10_000))
     {
         Console.Error.WriteLine("serve: the session did not stop when asked");
@@ -269,9 +276,10 @@ async Task<int> ServedAsync()
     return bad;
 }
 
-// One request against a real session, hand-rolled because this file may not reference Cslq: the
-// shape is Session.Request, and an empty argv is the ping. Null is no answer.
-async Task<long?> PingAsync(string name, bool quiet, string argv = "")
+// One call against a real session, over the same StreamJsonRpc wire the client speaks: this file
+// may not reference Cslq, so the three method names are the whole of the contract between them.
+// Null is no answer.
+async Task<long?> PingAsync(string name, bool quiet, string method = "ping")
 {
     var started = Stopwatch.StartNew();
     try
@@ -280,17 +288,20 @@ async Task<long?> PingAsync(string name, bool quiet, string argv = "")
             ".", name, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         await client.ConnectAsync(ConnectMs);
 
-        var writer = new StreamWriter(client, utf8) { AutoFlush = true, NewLine = "\n" };
-        var reader = new StreamReader(client, utf8);
-        await writer.WriteLineAsync($"{{\"version\":\"probe\",\"argv\":[{argv}]}}");
-        var answer = await reader.ReadLineAsync();
+        // Web defaults, because Session.Json uses them: a formatter left on the defaults agrees
+        // with the session only while every payload here is empty, and mismatches on casing the
+        // first time one is not.
+        using var rpc = new JsonRpc(new HeaderDelimitedMessageHandler(
+            client, client, new SystemTextJsonFormatter
+            {
+                JsonSerializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+                {
+                    TypeInfoResolver = Wire.Default,
+                },
+            }));
+        rpc.StartListening();
+        await rpc.InvokeAsync(method);
         started.Stop();
-
-        if (answer is null)
-        {
-            if (!quiet) Console.Error.WriteLine("serve: connected but was not answered");
-            return null;
-        }
 
         if (!quiet) Console.WriteLine($"serve: answered in {started.ElapsedMilliseconds} ms");
         return started.ElapsedMilliseconds;
@@ -354,7 +365,7 @@ async Task<int> HammeredAsync()
         bad++;
     }
 
-    await PingAsync(hammered, quiet: true, argv: "\"--session-stop\"");
+    await PingAsync(hammered, quiet: true, method: "stop");
 
     // Always, not only on failure: a leg that passes slowly is the thing under investigation,
     // and the session's own log is the only record of a session that died and was replaced.
@@ -419,3 +430,8 @@ enum Shape
     // connection at a time.
     Single,
 }
+
+// `ping` and `stop` take nothing and return nothing, so the whole wire here is the empty result
+// JsonRpc still has to deserialise.
+[JsonSerializable(typeof(object))]
+partial class Wire : JsonSerializerContext;

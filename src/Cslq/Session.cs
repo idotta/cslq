@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using StreamJsonRpc;
 
 namespace Cslq;
 
@@ -40,6 +41,13 @@ internal static class Session
     private const string PipeEnvironmentVariable = "CSLQ_SESSION_PIPE_NAME";
     private const string KeepaliveEnvironmentVariable = "CSLQ_SESSION_KEEPALIVE";
 
+    /// <summary>The three methods a session answers. See <see cref="Endpoint"/>.</summary>
+    private const string RunMethod = "run";
+
+    private const string PingMethod = "ping";
+
+    private const string StopMethod = "stop";
+
     /// <summary>
     /// Web defaults are camelCase and case-insensitive, which is the wire shape
     /// <c>{"version":...,"argv":[...]}</c> asks for. Null is omitted rather than written, so
@@ -63,6 +71,16 @@ internal static class Session
     /// <c>CurrentUserOnly = true</c> on <see cref="StartupLock"/>'s mutex.
     /// </summary>
     private const PipeOptions PipeStreamOptions = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
+
+    /// <summary>
+    /// One end of the wire: JSON-RPC 2.0 over the pipe, framed by <c>Content-Length</c>
+    /// headers, exactly as <see cref="LspClient.StartAsync"/> builds its end of the language
+    /// server's. The formatter is named rather than defaulted because
+    /// <see cref="JsonRpc.Attach(Stream)"/>'s default is Newtonsoft and serialization in this
+    /// tool is System.Text.Json everywhere.
+    /// </summary>
+    internal static JsonRpc Rpc(Stream pipe) => new(new HeaderDelimitedMessageHandler(
+        pipe, pipe, new SystemTextJsonFormatter { JsonSerializerOptions = Json }));
 
     internal sealed record Request(string Version, string[] Argv);
 
@@ -162,7 +180,7 @@ internal static class Session
         {
             // One attempt, no retry: on this path there may genuinely be no session, and the
             // answer to that is to start one rather than to keep asking.
-            var sent = await SendAsync(pipe, request, TimeSpan.Zero, FastConnectMs, null, null, ct);
+            var sent = await SendAsync(pipe, request, TimeSpan.Zero, null, null, ct);
             return sent.Reached switch
             {
                 Reached.Answered => sent.Exit,
@@ -230,7 +248,6 @@ internal static class Session
         string pipe,
         Request request,
         TimeSpan window,
-        int connectMs,
         Action? connected,
         Func<bool>? giveUp,
         CancellationToken ct)
@@ -238,7 +255,7 @@ internal static class Session
         var deadline = DateTime.UtcNow + window;
         while (true)
         {
-            var sent = await SendOnceAsync(pipe, request, connectMs, connected, ct);
+            var sent = await SendOnceAsync(pipe, request, connected, ct);
             if (sent.Reached != Reached.Retry) return sent;
             if (giveUp?.Invoke() == true || DateTime.UtcNow >= deadline) return sent;
             await Task.Delay(RetryDelayMs, ct);
@@ -252,13 +269,13 @@ internal static class Session
     /// committed and a <see cref="DeliveryFailure"/> must escape rather than be retried.
     /// </summary>
     private static async Task<Sent> SendOnceAsync(
-        string pipe, Request request, int connectMs, Action? connected, CancellationToken ct)
+        string pipe, Request request, Action? connected, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut, PipeStreamOptions);
         try
         {
-            await client.ConnectAsync(connectMs, ct);
+            await client.ConnectAsync(FastConnectMs, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -270,17 +287,15 @@ internal static class Session
         Response? response;
         try
         {
-            var writer = new StreamWriter(client, Utf8) { AutoFlush = true, NewLine = "\n" };
-            var reader = new StreamReader(client, Utf8);
-
-            await writer.WriteLineAsync(JsonSerializer.Serialize(request, Json).AsMemory(), ct);
-            if (await reader.ReadLineAsync(ct) is not { } line) return new Sent(Reached.Retry, 0);
-            response = JsonSerializer.Deserialize<Response>(line, Json);
+            using var rpc = Rpc(client);
+            rpc.StartListening();
+            response = await rpc.InvokeWithCancellationAsync<Response>(RunMethod, [request], ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // The connection broke while the answer was being asked for. Nothing has been
-            // printed, so this is the same "in a moment" as a refused connect.
+            // The connection broke while the answer was being asked for, or the thing on the
+            // other end is not a session of ours. Nothing has been printed, so this is the
+            // same "in a moment" as a refused connect.
             return new Sent(Reached.Retry, 0);
         }
 
@@ -350,7 +365,7 @@ internal static class Session
         // mid-flight, a Unix socket path between two binds -- read as absent twice and had a
         // *second* session spawned beside it, each with its own Roslyn attach and neither
         // reporting the other.
-        var sent = await SendAsync(pipe, request, RetryWindow, FastConnectMs, null, null, ct);
+        var sent = await SendAsync(pipe, request, RetryWindow, null, null, ct);
         if (sent.Reached == Reached.Answered) return sent.Exit;
         if (sent.Reached == Reached.Declined) return null;
 
@@ -360,7 +375,7 @@ internal static class Session
         // own disposal opened, and the request behind it was reset.
         using var session = Spawn(pipe, opts);
         sent = await SendAsync(
-            pipe, request, SpawnWindow, FastConnectMs, start.Dispose, () => session.HasExited, ct);
+            pipe, request, SpawnWindow, start.Dispose, () => session.HasExited, ct);
         return sent.Reached == Reached.Answered ? sent.Exit : null;
     }
 
@@ -373,9 +388,10 @@ internal static class Session
     private static readonly TimeSpan MutexWait = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How long to wait for a connection. The fast one is the opening probe, which every call
-    /// pays and which is answered by taking the startup lock; the patient one is everything
-    /// after that lock is held, where the only thing being raced is a session that exists.
+    /// How long to wait for a connection. A request is fast, because the answer to a session
+    /// that is not there is to start one rather than to keep waiting for it; a <c>ping</c> or
+    /// a <c>stop</c> is patient, because the only thing it can be racing is a session that
+    /// exists and reporting one of those as absent is exactly the wrong answer.
     /// </summary>
     private const int FastConnectMs = 300;
 
@@ -522,62 +538,49 @@ internal static class Session
     }
 
     /// <summary>
-    /// Whether a session is accepting on the pipe, asked by exchanging a ping rather than by
-    /// connecting and hanging up: a half-open connection is what races the server's accept.
-    /// A ping is answered off the request gate, so a session in the middle of a cold load or a
-    /// long <c>diag</c> still says yes instead of reading as absent.
+    /// Whether a session answered <paramref name="method"/> — a <c>ping</c> or a <c>stop</c> —
+    /// asked by exchanging a call rather than by connecting and hanging up: a half-open
+    /// connection is what races the server's accept. Both are answered off the request gate, so
+    /// a session in the middle of a cold load or a long <c>diag</c> still says yes instead of
+    /// reading as absent.
     /// <para>
-    /// Only <c>cslq session status</c> asks this now — the request path polled it and then
-    /// opened a second connection for the query, which on Unix put that query into the window
-    /// the probe's own disposal had just made. It is retried over the same bounded window a
-    /// request is, and for the same reason: on that transport a single refused or unanswered
-    /// connect is "in a moment", and status reporting a live session as absent is exactly the
-    /// wrong answer to give about one.
+    /// The request path no longer polls this — it did, and then opened a second connection for
+    /// the query, which on Unix put that query into the window the probe's own disposal had
+    /// just made. It is retried over the same bounded window a request is, and for the same
+    /// reason: on that transport a single refused or unanswered connect is "in a moment", and
+    /// status reporting a live session as absent is exactly the wrong answer to give about one.
     /// </para>
     /// </summary>
-    private static async Task<bool> ListeningAsync(
-        string pipe, int connectMs, TimeSpan window, CancellationToken ct)
+    private static async Task<bool> AskedAsync(
+        string pipe, string method, TimeSpan window, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + window;
         while (true)
         {
-            if (await PingedAsync(pipe, connectMs, ct)) return true;
+            if (await InvokedAsync(pipe, method, ct)) return true;
             if (DateTime.UtcNow >= deadline) return false;
             await Task.Delay(RetryDelayMs, ct);
         }
     }
 
-    private static async Task<bool> PingedAsync(string pipe, int connectMs, CancellationToken ct)
+    private static async Task<bool> InvokedAsync(
+        string pipe, string method, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut, PipeStreamOptions);
         try
         {
-            await client.ConnectAsync(connectMs, ct);
-            var writer = new StreamWriter(client, Utf8) { AutoFlush = true, NewLine = "\n" };
-            var reader = new StreamReader(client, Utf8);
-            await writer.WriteLineAsync(JsonSerializer.Serialize(Ping, Json).AsMemory(), ct);
-            return await reader.ReadLineAsync(ct) is not null;
+            await client.ConnectAsync(PatientConnectMs, ct);
+            using var rpc = Rpc(client);
+            rpc.StartListening();
+            await rpc.InvokeWithCancellationAsync(method, null, ct);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return false;
         }
     }
-
-    /// <summary>
-    /// The liveness probe's request. An empty argv is not a command any client could send --
-    /// <see cref="Normalise"/> always appends <c>--root</c> and its value -- so it needs no
-    /// flag of its own, and it is answered whatever version sent it.
-    /// </summary>
-    private static readonly Request Ping = new(Build.Version, []);
-
-    /// <summary>
-    /// <c>cslq session stop</c>'s request. Like the ping it is answered before the parse and
-    /// cannot collide with a command: <see cref="Normalise"/> appends <c>--root</c> and its
-    /// value to every real one, so no client argv is ever a single token.
-    /// </summary>
-    internal const string StopArgv = "--session-stop";
 
     /// <summary>What <c>cslq session status</c> found. <c>Pid</c> is null when no session has
     /// ever written the log, which is also the only place a pid can be read from: the session
@@ -588,7 +591,7 @@ internal static class Session
     {
         var pipe = PipeName(opts);
         var log = LogPath(pipe);
-        var running = await ListeningAsync(pipe, PatientConnectMs, RetryWindow, ct);
+        var running = await AskedAsync(pipe, PingMethod, RetryWindow, ct);
         return new Status(pipe, opts.Root, log, running, Pid(log));
     }
 
@@ -597,21 +600,8 @@ internal static class Session
     /// it goes, so a caller that gets true knows the process is on its way out rather than
     /// that a signal was sent somewhere.
     /// </summary>
-    internal static async Task<bool> StopAsync(Program.Options opts, CancellationToken ct)
-    {
-        var pipe = PipeName(opts);
-        try
-        {
-            var sent = await SendAsync(
-                pipe, new Request(Build.Version, [StopArgv]), RetryWindow, PatientConnectMs,
-                null, null, ct);
-            return sent.Reached == Reached.Answered;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return false;
-        }
-    }
+    internal static async Task<bool> StopAsync(Program.Options opts, CancellationToken ct) =>
+        await AskedAsync(PipeName(opts), StopMethod, RetryWindow, ct);
 
     /// <summary>
     /// The pid off the last start line the log carries. Best effort by design: the log is
@@ -896,41 +886,25 @@ internal static class Session
     private static async Task ServeOneAsync(
         NamedPipeServerStream pipe, State state, SemaphoreSlim gate, CancellationToken ct)
     {
-        var stop = false;
+        var endpoint = new Endpoint(state, gate, ct);
         try
         {
             await using (pipe)
             {
-                var reader = new StreamReader(pipe, Utf8);
-                var writer = new StreamWriter(pipe, Utf8) { AutoFlush = true, NewLine = "\n" };
-
-                if (await reader.ReadLineAsync(ct) is not { } line) return;
-                var request = JsonSerializer.Deserialize<Request>(line, Json);
-
-                // An empty argv is the liveness probe and a lone --session-stop is the stop
-                // lever, both answered off the request gate: what they ask is whether the
-                // process is there, and a session loading a workspace holds that gate for the
-                // whole load. Neither can be a command -- Normalise always appends --root and
-                // its value, so a real argv is never one token.
-                stop = request is { Argv: [StopArgv] };
-                var response = request switch
-                {
-                    null => new Response(1, "", "", "the request did not parse"),
-                    { Argv.Length: 0 } => new Response(0, "", "", null),
-                    _ when stop => new Response(0, "", "", null),
-                    _ => await AnswerAsync(request, state, gate, ct),
-                };
-
-                await writer.WriteLineAsync(JsonSerializer.Serialize(response, Json).AsMemory(), ct);
-                // Windows closes a named pipe on dispose without draining it, so a response
-                // written and then disposed can reach the client truncated. Off Windows the
-                // stream is socket-backed and the kernel holds the bytes.
-                if (OperatingSystem.IsWindows() && pipe.IsConnected) pipe.WaitForPipeDrain();
+                using var rpc = Rpc(pipe);
+                rpc.AddLocalRpcTarget(endpoint);
+                rpc.StartListening();
+                // Until the client hangs up, which is what makes the answer safe without the
+                // WaitForPipeDrain this replaced: a Windows named pipe disposed under a client
+                // that has not read it truncates the response, and waiting for the far end to
+                // go is the stronger guarantee. One connection is still one request; nothing
+                // here loops.
+                await rpc.Completion.WaitAsync(ct);
             }
 
             // After the connection is closed, so the caller has its answer before the accept
             // loop below goes away underneath it.
-            if (stop) state.Stop?.Cancel();
+            if (endpoint.Stopping) state.Stop?.Cancel();
         }
         catch (Exception ex)
         {
@@ -942,6 +916,34 @@ internal static class Session
             // The keepalive is measured from here, so the log line's "idle for" is the truth.
             if (Interlocked.Decrement(ref state.InFlight) == 0) state.WentIdle();
         }
+    }
+
+    /// <summary>
+    /// What one connection may ask for. <c>ping</c> and <c>stop</c> are about the process
+    /// rather than the workspace and are answered here, off the request gate: what they ask is
+    /// whether it is there, and a session loading a workspace holds that gate for the whole
+    /// load. Only <c>run</c> goes behind it.
+    /// </summary>
+    internal sealed class Endpoint(State state, SemaphoreSlim gate, CancellationToken ct)
+    {
+        /// <summary>Whether <c>stop</c> was asked for, read once the client has its answer.</summary>
+        public bool Stopping { get; private set; }
+
+        // A payload that deserialised to nothing at all is a decline rather than an RPC fault,
+        // like every other thing this session will not answer: the client reads it and falls back.
+        [JsonRpcMethod(RunMethod)]
+        public Task<Response> RunAsync(Request? request) =>
+            request is null
+                ? Task.FromResult(new Response(1, "", "", "the request did not parse"))
+                : AnswerAsync(request, state, gate, ct);
+
+        [JsonRpcMethod(PingMethod)]
+        public void Ping()
+        {
+        }
+
+        [JsonRpcMethod(StopMethod)]
+        public void Stop() => Stopping = true;
     }
 
     /// <summary>
@@ -1116,7 +1118,7 @@ internal static class Session
         }
 
         /// <summary>
-        /// Cancelled by a <c>--session-stop</c> request, which is what ends the accept loop.
+        /// Cancelled by a <c>stop</c> call, which is what ends the accept loop.
         /// Set by <see cref="ServeAsync"/> alone, so a state built for a test has none and
         /// nothing here has to be disposed by the state.
         /// </summary>
