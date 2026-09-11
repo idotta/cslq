@@ -96,10 +96,12 @@ Paths are relative to `--root`; lines and columns are one-based. Add `--json` fo
 ## The session
 
 A background `cslq` holds the loaded workspace open between calls, so only the first call pays
-the solution load. Measured on a 4-project fixture, Release, 2026-09-11: that first call
-4.9-7.6 s — **more** than a one-shot, since it pays the load plus a process start — and every
-call after it 138-188 ms, against 2.2-2.4 s per call with `--no-session`. So spend the first
-call on `cslq ready` and then ask narrow questions freely.
+the solution load. Measured on a 4-project fixture, Release, Windows, 2026-09-11: that first
+call 4.9-7.6 s — **more** than a one-shot, since it pays the load plus a process start — and
+every call after it 138-188 ms, against 2.2-2.4 s per call with `--no-session`. The probe gate
+times that warm call on every platform: 190 ms vs 2951 ms on windows, 131 ms vs 2377 ms on
+ubuntu, 67 ms vs 1429 ms on macos. So spend the first call on `cslq ready` and then ask narrow
+questions freely.
 
 It ends after 900 s idle (`CSLQ_SESSION_KEEPALIVE`), on `cslq session stop`, or with the
 terminal. `cslq session status` names its pipe, root, pid and log. It is not the Roslyn daemon,

@@ -28,11 +28,13 @@ both ride on stderr at exit 0 beside a correct answer.
 What the daemon shares is the server *process*, not a loaded workspace: **every attach re-runs
 the solution load**, which is why the daemon alone never made repeat calls cheap. A few projects
 is a couple of seconds; 26 projects is 28-33 s (measured 2026-09-10). The session is what fixes
-that, by attaching once. Measured on a 4-project fixture, 2026-09-11: first call to a cold
-session 4.9-7.6 s, then `hover` 138-188 ms, `outline` 140 ms, `ready` 145 ms, `refs` 655-734 ms;
-the same `hover` under `--no-session` is 2.2-2.4 s every time. **The first call costs more than a
-one-shot did** — it pays the same load plus a process start — so spend it on `cslq ready` and
-then ask as many narrow questions as you like.
+that, by attaching once. Measured on a 4-project fixture, Windows, 2026-09-11: first call to a
+cold session 4.9-7.6 s, then `hover` 138-188 ms, `outline` 140 ms, `ready` 145 ms, `refs`
+655-734 ms; the same `hover` under `--no-session` is 2.2-2.4 s every time. The probe gate times
+that warm `hover` on all three platforms: 190 ms vs 2951 ms on windows, 131 ms vs 2377 ms on
+ubuntu, 67 ms vs 1429 ms on macos. **The first call costs more than a one-shot did** — it pays
+the same load plus a process start — so spend it on `cslq ready` and then ask as many narrow
+questions as you like.
 
 Re-running a query still does not fix an incomplete answer: the session is in the same state as
 it was, and a warm call does not reload anything.
@@ -62,10 +64,12 @@ has. What you do lose is streaming — a session buffers a whole response and wr
 command finishes, so a long `cslq diag` walk delivers all its rows, and its per-file
 `cslq: skipped —` lines, at the end.
 
-Piping and capturing are safe, the first command included — the daemon does not inherit the
-launching client's stdout. The exception is a shell that is itself captured (a PowerShell-hosted
-harness, whose own stdout is a pipe): there the launching command must be an unredirected
-`cslq ready`, or pass `--no-daemon`.
+Piping and capturing are safe, the first command included — neither the session nor the daemon
+inherits the launching client's stdout. Both outlive the call, so either one holding that pipe
+would leave a capturing caller waiting out the whole keepalive for an answer it already has.
+The exception is a shell that is itself captured (a PowerShell-hosted harness, whose own stdout
+is a pipe): there the launching command must be an unredirected `cslq ready`, or pass
+`--no-daemon`.
 
 ## Targets in full
 

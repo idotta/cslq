@@ -10,16 +10,17 @@ came after it is in **After Milestone 5** below; the batches changed readiness, 
 targeting, multi-targeting and the output rules, so where this file and `DESIGN.md` disagree
 with `CLAUDE.md`, `CLAUDE.md` is the one kept current with the code.
 
-163 legs pass — the 140 rows in `probes/cases.jsonl` plus 23 scripted legs (three
+164 legs pass — the 140 rows in `probes/cases.jsonl` plus 24 scripted legs (three
 source-generator staleness legs, the framework `def`, the forced non-daemon fallback, the
-cold-server `diag`, the packaged-tool install, the captured-stdout daemon leg, the restore that
+cold-server `diag`, the packaged-tool install, the captured-stdout leg, the restore that
 rebuilds the resolver cache, the five first-run failures — no solution, two solutions, `dotnet`
-off `PATH`, an exhausted candidate after load, a failed design-time build — and nine for the
-session: the second call's latency, the hangup race, the reattach on a changed solution, the
-forced in-process fallback, and five document-staleness legs).
+off `PATH`, an exhausted candidate after load, a failed design-time build — and ten for the
+session: the second call's latency, the warm `hover` timed against `--no-session`, the hangup
+race, the reattach on a changed solution, the forced in-process fallback, and five
+document-staleness legs).
 Quote the composition, not the total, so the next drift between the two halves shows up as a
-sum that no longer adds up. One leg, `daemon-survives-captured-stdout`, is Windows-only, so
-162 run on Linux and macOS.
+sum that no longer adds up. All 164 run on Linux, Windows and macOS; `session-pipe-smoke`
+hard-exits before the fixture restore rather than counting as a leg.
 
 Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
@@ -529,13 +530,16 @@ started, which stays an accepted cost.
       `--no-session` is the opt-out, and it is **not** the Roslyn daemon — `--no-daemon` still
       means a private server, and a session with `--no-daemon` is an ordinary session that owns
       its server.
-      **Measured** on the fixture (4 projects), Release, 2026-09-11: the first call to a cold
-      session 4.9-7.6 s, then `hover` 138-188 ms, `outline` 140 ms, `ready` 145 ms, `sym`
-      182 ms, `def` 229 ms, `refs` 655-734 ms, `session status` 158 ms — against 2.2-2.4 s for
-      the same `hover` on every call under `--no-session`, and a 69-77 ms floor for
-      `cslq --version`, which starts nothing. **The first call costs more than a one-shot did**,
-      since it pays the same load plus a process start; that is the trade, and both numbers are
-      stated wherever one appears.
+      **Measured** on the fixture (4 projects), Release, **Windows**, 2026-09-11: the first
+      call to a cold session 4.9-7.6 s, then `hover` 138-188 ms, `outline` 140 ms, `ready`
+      145 ms, `sym` 182 ms, `def` 229 ms, `refs` 655-734 ms, `session status` 158 ms — against
+      2.2-2.4 s for the same `hover` on every call under `--no-session`, and a 69-77 ms floor
+      for `cslq --version`, which starts nothing. Those are one platform's; the gate measures
+      the warm `hover` against `--no-session` on all three (`session-beats-no-session`, PR #30):
+      190 ms vs 2951 ms on windows, 131 ms vs 2377 ms on ubuntu, 67 ms vs 1429 ms on macos.
+      **The first call costs more than a one-shot did**, since it pays the same load plus a
+      process start; that is the trade, and both numbers — and the platform — are stated
+      wherever one appears.
       Four things the transport forced, each of which cost a session to find and is in
       `CLAUDE.md`: a named mutex has thread affinity, so the spawn guard runs on a thread of
       its own or `ReleaseMutex` throws out of a `finally` and the query is answered twice; no

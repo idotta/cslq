@@ -368,7 +368,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   daemon dead, so every call was a launching call. Measured on the fixture, keepalive 20 s:
   `out=$(cslq ready --root fixture)` 25 s before, 4 s after. Best effort by design — a process
   with no console has invalid std handles and must not be broken by this — so a regression is
-  silent, and `daemon-survives-captured-stdout` (Windows-only, `probes/stdout-capture.cs`) is
+  silent, and `captured-stdout-does-not-stall` (`probes/stdout-capture.cs`) is
   the only thing that catches it. **The trap survives one level up:** launch `cslq` from a
   process whose own stdout is an inheritable pipe — `dotnet run probes/stdout-capture.cs`
   under `$(...)` — and *that* pipe is inherited into cslq as an ordinary handle and travels on
@@ -377,11 +377,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   Actions `shell: pwsh`): keepalive 10, bash `out=$(cslq ready)` 4 s against bash
   `out=$(pwsh -c '$x = & cslq ready; $x')` 18 s. So the launch must be an unredirected
   `cslq ready`, or `--no-daemon`, and SKILL.md carries that qualifier because it ships alone.
-  **There is one more process in the chain now.** The session is spawned the same way and
-  outlives the call the same way, so it holds an inherited pipe for its whole keepalive just as
-  the daemon does — the handle clearing covers both because both go through
-  `LspClient.StartProcess`, and `daemon-survives-captured-stdout` names a
-  `CSLQ_SESSION_PIPE_NAME` of its own so the leg measures the launch it means rather than a
+  **There is one more process in the chain now, and the handle clearing is only half of the
+  answer.** The session is spawned the same way and outlives the call the same way, so it holds
+  an inherited pipe for its whole keepalive just as the daemon does. Both go through
+  `LspClient.StartProcess`, so the clearing covers both — **on Windows**.
+  `DisableStdioInheritance` is a Win32 call that returns immediately off it, where a child
+  inherits fds 0/1/2 whole unless the parent redirects them, and `Session.Spawn` did not: that
+  alone was the ~62 s Unix penalty, and redirecting the child's streams is the fix. The leg is
+  `captured-stdout-does-not-stall`, it runs on all three platforms since `67399d3`, and it
+  names a `CSLQ_SESSION_PIPE_NAME` of its own so it measures the launch it means rather than a
   session some earlier case left warm.
 - **Roslyn's daemon binds no named pipe off Windows, so a connect is not a liveness test
   there.** `probes/stdout-capture.cs` asserts that what outlives a captured call is still
@@ -555,17 +559,22 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   holds no workspace) or for `session status`/`session stop` (they are *about* one). The pipe
   name is a hash of root, log level, daemon-or-not, user and `cslq` version — the version
   because an upgraded `cslq` must never talk to a session running the old code. Measured
-  2026-09-11 on the fixture, Release: the first call to a cold session 4.9-7.6 s, then `hover`
-  138-188 ms against 2.2-2.4 s for the same call under `--no-session`. **The cold first call
-  costs more than a one-shot did**, and that is the trade; say both numbers wherever one
-  appears.
+  2026-09-11 on the fixture, Release, **Windows**: the first call to a cold session 4.9-7.6 s,
+  then `hover` 138-188 ms against 2.2-2.4 s for the same call under `--no-session`. The gate
+  times that warm `hover` on every platform it runs — `session-beats-no-session`, PR #30: 190 ms
+  against 2951 ms on windows, 131 ms against 2377 ms on ubuntu, 67 ms against 1429 ms on macos.
+  **The cold first call costs more than a one-shot did**, and that is the trade; say both
+  numbers, and the platform, wherever one appears.
 - **A latency number is a claim about one platform, and a working fallback will hide a broken
   one behind a green gate.** The session shipped through four rounds measured only on Windows
-  while it was a ~62 s *penalty* per call on Linux and macOS: the pipe was unreachable there,
-  every query fell back to loading the workspace in-process, and every leg still passed, because
-  falling back is supposed to answer correctly. The gate said 163 of 163 and CI said nothing —
-  the Unix jobs were merely slow, which reads as a busy runner. Two rules came out of it, and
-  both are cheap:
+  while it was a ~62 s *penalty* per call on Linux and macOS — and the cause was not the
+  transport. `Session.Spawn` left the child's streams unredirected, so off Windows the session
+  inherited the caller's fds 0/1/2 and held a capturing harness's stdout for its whole
+  keepalive: every call *was* answered by a session in milliseconds, and the caller could not
+  read the answer until the session idled out. Every leg still passed, the gate said 163 of
+  163 — the leg that would have caught it did not exist yet — and CI said nothing: the Unix
+  jobs were merely slow, which reads as a busy runner. What hid it for four rounds was a
+  *measurement* taken on one platform. Two rules came out of it, and both are cheap:
   - **Quote no performance figure that the gate does not measure on every platform it runs on.**
     `session-beats-no-session` times a warm `hover` with and against `--no-session` on all three
     and fails when a session costs more than it saves, which is the assertion that would have

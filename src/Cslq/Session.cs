@@ -193,8 +193,8 @@ internal static class Session
     /// What one round trip came to. <c>Declined</c> is the session refusing the request — a
     /// version it does not match, a root it was not started for — and is final: another
     /// attempt gets the same answer and another session cannot be started on a pipe that one
-    /// already holds. <c>Retry</c> is the transport, and on Unix that is not a rare state;
-    /// see <see cref="SendAsync"/>.
+    /// already holds. <c>Retry</c> is the transport, and on Unix it is a real if narrow
+    /// state; see <see cref="SendAsync"/>.
     /// </summary>
     private enum Reached
     {
@@ -208,14 +208,16 @@ internal static class Session
     /// <summary>
     /// The real request, retried over a bounded window while the transport says "not yet".
     /// <para>
-    /// On Unix a named pipe is a Unix domain socket file, and each accepted connection's
-    /// disposal unlinks <c>$TMPDIR/CoreFxPipe_&lt;name&gt;</c> before the accept loop's next
-    /// instance re-binds it. A client arriving inside that window is reset rather than
-    /// queued, so <c>ECONNRESET</c>, <c>ENOENT</c> and a refused connect all mean "in a
-    /// moment" here, not "there is nothing there". On Windows the name is a reference-counted
-    /// kernel object and none of this is observable, which is why it was green here for a day
-    /// while every ubuntu and macos call fell back and paid the whole load — measured by
-    /// <c>probes/pipe-smoke.cs</c>, which reproduced it in 52 s.
+    /// On Unix a named pipe is a Unix domain socket file, and an accepted connection disposed
+    /// while it is the last listening instance unlinks <c>$TMPDIR/CoreFxPipe_&lt;name&gt;</c>
+    /// before the accept loop can re-bind it. A client arriving inside that window is reset
+    /// rather than queued, so <c>ECONNRESET</c>, <c>ENOENT</c> and a refused connect all mean
+    /// "in a moment" here, not "there is nothing there". <see cref="AcceptAsync"/> binds the
+    /// successor first, which closes most of that window — it cost one raw ping in three
+    /// before, measured by <c>probes/pipe-smoke.cs</c> — and the race that is left is the whole
+    /// justification for this retry. It was never the Unix slowness: that was an unredirected
+    /// child in <see cref="Spawn"/> holding the caller's stdout. On Windows the name is a
+    /// reference-counted kernel object and none of this is observable.
     /// </para>
     /// <para>
     /// A window of zero is a single attempt. <paramref name="connected"/> runs the moment the

@@ -581,7 +581,9 @@ through the matcher.
 `cslq` keeps a **session** — a background `cslq` process of its own that holds the loaded
 workspace open between calls — and uses it by default. The first call pays the solution load;
 every later one is a round trip to a process that is already holding the answer. On the fixture
-that is 4.9–7.6 s and then 138–188 ms, against 2.2–2.4 s for every call without it.
+that is 4.9–7.6 s and then 138–188 ms on Windows, against 2.2–2.4 s for every call without
+it. The gate times the same warm `hover` with and against `--no-session` on every platform it
+runs: 190 ms vs 2951 ms on windows, 131 ms vs 2377 ms on ubuntu, 67 ms vs 1429 ms on macos.
 
 **The session is not the daemon, and they are independent.**
 
@@ -666,6 +668,11 @@ round trip. On four projects that is one call at ~5 s buying calls at ~150 ms; o
 is one call at ~30 s buying the same ~150 ms, which is where the session earns most. `--version`
 is the floor a call that starts nothing sits at, and the ~150 ms warm figure is within a factor
 of two of it: what is left is process start and a pipe round trip, not Roslyn.
+
+Every figure in that table is Windows, and a latency number is a claim about one platform. The
+only figures measured everywhere are the gate's own, from `session-beats-no-session` on PR #30:
+the warm `hover` costs 190 ms against 2951 ms under `--no-session` on windows, 131 ms against
+2377 ms on ubuntu, and 67 ms against 1429 ms on macos.
 
 The rest of this section is the one-shot path — what `--no-session` costs, and what the daemon
 does and does not buy underneath it.
@@ -752,9 +759,12 @@ pass `--no-daemon`, whose private server exits with the client.
 `probes/run.sh` scopes itself to its own daemon with
 `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` and a short keepalive, so the gate cannot inherit a
 stale workspace and its opening `cslq ready` is still a real cold load. Its
-`daemon-survives-captured-stdout` leg, Windows only, is what holds the paragraph above:
+`captured-stdout-does-not-stall` leg is what holds the paragraph above:
 `probes/stdout-capture.cs` starts `cslq ready` under `RedirectStandardOutput` and asserts it
-returns well inside the keepalive with the daemon still listening.
+returns well inside the keepalive with the daemon still listening. It ran on Windows alone
+until the same leak was measured off it — the handle flag the Windows fix sets does nothing on
+Unix, where a child inherits fds 0/1/2 whole unless the parent redirects them — so it now runs
+on all three platforms.
 
 ## The pin
 
@@ -887,17 +897,18 @@ weekly bump.
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
 
-**163 legs today = the 140 rows in `cases.jsonl` + 23 scripted ones.** The scripted
-twenty-three are the three source-generator staleness legs, the framework `def` (whose two
+**164 legs today = the 140 rows in `cases.jsonl` + 24 scripted ones.** The scripted
+twenty-four are the three source-generator staleness legs, the framework `def` (whose two
 failure modes are an absence and a duration, neither of which an `expect` substring can pin),
 the forced non-daemon fallback, the cold-server `diag`, the packaged-tool install, the
-captured-stdout daemon leg, the restore that rebuilds the tool-resolver cache, the five
+captured-stdout leg, the restore that rebuilds the tool-resolver cache, the five
 first-run failures (a root with no solution, a root with two, `dotnet` off `PATH`, a candidate
-that cannot resolve after the load notification, and a design-time build that fails), and nine
-for the session: the second call's latency, the hangup race and its pid count, the reattach when
-the solution changes, the forced in-process fallback, and five document-staleness legs that
-edit, rename and restore a file under a live session. One of them,
-`daemon-survives-captured-stdout`, is Windows-only, so Linux and macOS run 162.
+that cannot resolve after the load notification, and a design-time build that fails), and ten
+for the session: the second call's latency, the warm `hover` timed with and against
+`--no-session`, the hangup race and its pid count, the reattach when the solution changes, the
+forced in-process fallback, and five document-staleness legs that edit, rename and restore a
+file under a live session. All 164 run on all three platforms. `session-pipe-smoke` is not one
+of them: it runs before the fixture restore and hard-exits rather than counting.
 Quoting the composition rather than the total is deliberate: the next time the two
 halves drift, the sum stops adding up here rather than going quietly stale. The rows include a
 negative case that pins a query fired before load to a loud failure rather than an empty result.
