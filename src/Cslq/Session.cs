@@ -469,11 +469,23 @@ internal static class Session
     }
 
     /// <summary>
-    /// The session process. No redirects at all, and the inherit flag cleared first: a
-    /// redirected child whose parent exits blocks forever on a full pipe, and an inherited
-    /// handle means the session holds a capturing harness's stdout for its whole life — the
-    /// 25 s-to-4 s bug behind <see cref="LspClient.DisableStdioInheritance"/>, one level up.
-    /// The session redirects its own console to a log file instead.
+    /// The session process. Every stream is redirected and the inherit flag cleared first,
+    /// and both halves are load-bearing on one platform each: clearing the flag is what keeps
+    /// Windows from passing the caller's own inheritable handles through
+    /// (<see cref="LspClient.DisableStdioInheritance"/>) and is a no-op off it, while
+    /// redirecting is the only thing that stops a Unix child inheriting fds 0/1/2 verbatim.
+    /// Unredirected, a session spawned by a <c>cslq</c> whose stdout is a capture pipe held
+    /// that pipe for its whole keepalive, so the capturing harness read EOF only when the
+    /// session idled out: measured on ubuntu and macos as 62.7 s per call against a 60 s
+    /// keepalive, with every request answered in milliseconds inside it.
+    /// <para>
+    /// The child writes nothing here: <see cref="ServeAsync"/> points <c>Console</c> at its
+    /// log file in its first statements and every request redirects <c>Console</c> again into
+    /// its own response. Only a failure before that — an argv this build cannot parse — can
+    /// reach these streams, so they are drained to <see cref="Stream.Null"/> rather than read:
+    /// a full pipe nobody drains is the one way a redirected child can block, and the drain
+    /// ends with this process, after which a write gets <c>EPIPE</c> instead.
+    /// </para>
     /// </summary>
     private static Process Spawn(string pipe, Program.Options opts)
     {
@@ -481,11 +493,20 @@ internal static class Session
         {
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
         };
         foreach (var a in ServeArgv(pipe, opts)) psi.ArgumentList.Add(a);
 
         LspClient.DisableStdioInheritance();
-        return Process.Start(psi) ?? throw new CslqException("could not start a cslq session");
+        var proc = Process.Start(psi) ?? throw new CslqException("could not start a cslq session");
+
+        // A session reads no input, and an open stdin would leave it holding the caller's.
+        proc.StandardInput.Close();
+        _ = proc.StandardOutput.BaseStream.CopyToAsync(Stream.Null);
+        _ = proc.StandardError.BaseStream.CopyToAsync(Stream.Null);
+        return proc;
     }
 
     internal static string[] ServeArgv(string pipe, Program.Options opts)
@@ -754,87 +775,120 @@ internal static class Session
     {
         var stopped = state.Stop?.Token ?? CancellationToken.None;
 
-        while (!ct.IsCancellationRequested && !stopped.IsCancellationRequested)
+        // Bound to the session rather than to one connection, because off Windows the
+        // listening socket is a reference-counted object keyed by the pipe's path and the
+        // last instance to be disposed unlinks that path. An instance that is always alive
+        // is what keeps the count off zero: every disposal below creates its successor
+        // first, so the path a client is connecting to is never the one just unlinked.
+        var pipe = Bind(serve);
+        try
         {
-            var pipe = new NamedPipeServerStream(
-                serve.Pipe, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeStreamOptions);
-
-            using var idle = new CancellationTokenSource();
-            // Armed from when the session last went idle, not from this accept: a request
-            // longer than the keepalive rolls through several of these windows, and arming
-            // each one afresh meant the window current when the request finished fired
-            // moments later with nothing in flight and took the session down. With a 60 s
-            // keepalive and a 55 s walk -- the probe suite's own shape -- the session died at
-            // t=60, five seconds after answering rather than sixty, and the next call
-            // silently paid the whole load again.
-            if (keepalive != Timeout.InfiniteTimeSpan) idle.CancelAfter(state.Remaining(keepalive));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token, stopped);
-
-            try
+            while (!ct.IsCancellationRequested && !stopped.IsCancellationRequested)
             {
-                await pipe.WaitForConnectionAsync(linked.Token);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                await pipe.DisposeAsync();
+                using var idle = new CancellationTokenSource();
+                // Armed from when the session last went idle, not from this accept: a request
+                // longer than the keepalive rolls through several of these windows, and arming
+                // each one afresh meant the window current when the request finished fired
+                // moments later with nothing in flight and took the session down. With a 60 s
+                // keepalive and a 55 s walk -- the probe suite's own shape -- the session died at
+                // t=60, five seconds after answering rather than sixty, and the next call
+                // silently paid the whole load again.
+                if (keepalive != Timeout.InfiniteTimeSpan) idle.CancelAfter(state.Remaining(keepalive));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token, stopped);
 
-                // `cslq session stop` has already been answered by the time this fires; the
-                // line is here rather than there so that every way a session ends is one
-                // line in its own log.
-                if (stopped.IsCancellationRequested)
+                try
                 {
-                    state.Log.WriteLine("cslq session: asked to stop.");
+                    await pipe.WaitForConnectionAsync(linked.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // `cslq session stop` has already been answered by the time this fires; the
+                    // line is here rather than there so that every way a session ends is one
+                    // line in its own log.
+                    if (stopped.IsCancellationRequested)
+                    {
+                        state.Log.WriteLine("cslq session: asked to stop.");
+                        return 0;
+                    }
+
+                    // Only idle out with nothing in flight. Counted rather than read off the
+                    // gate: a request that has been accepted and is still reading its line off the
+                    // pipe holds no gate at all, so the keepalive firing in that window took the
+                    // process down under it -- and the client, seeing the pipe die, paid the whole
+                    // load again for no visible reason.
+                    if (Volatile.Read(ref state.InFlight) != 0)
+                    {
+                        pipe = await RebindAsync(serve, pipe);
+                        continue;
+                    }
+
+                    // A request may have finished while this window was running, which restarts
+                    // the keepalive: the next iteration arms what is left of it.
+                    if (keepalive != Timeout.InfiniteTimeSpan && state.Remaining(keepalive) > TimeSpan.Zero)
+                    {
+                        pipe = await RebindAsync(serve, pipe);
+                        continue;
+                    }
+
+                    state.Log.WriteLine($"cslq session: idle for {keepalive}; stopping.");
                     return 0;
                 }
-
-                // Only idle out with nothing in flight. Counted rather than read off the
-                // gate: a request that has been accepted and is still reading its line off the
-                // pipe holds no gate at all, so the keepalive firing in that window took the
-                // process down under it -- and the client, seeing the pipe die, paid the whole
-                // load again for no visible reason.
-                if (Volatile.Read(ref state.InFlight) != 0) continue;
-
-                // A request may have finished while this window was running, which restarts
-                // the keepalive: the next iteration arms what is left of it.
-                if (keepalive != Timeout.InfiniteTimeSpan && state.Remaining(keepalive) > TimeSpan.Zero)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
+                    // No single connection may end the session. A client that hangs up
+                    // mid-handshake -- which the liveness probe below used to do, twenty times a
+                    // second, from the poll since collapsed into the request itself -- races WaitForConnectionAsync and the accept
+                    // gets `IOException: the pipe is being closed` instead of a connection. That
+                    // used to be rethrown, so the process logged `stopped:` and exited, the caller
+                    // fell back, and the next call paid the whole load again: 4.5 s and three
+                    // processes for one query. The delay is a spin guard, not a wait: an accept
+                    // that fails instantly and forever would otherwise be a busy loop.
+                    pipe = await RebindAsync(serve, pipe);
+                    state.Log.WriteLine($"cslq session: accept failed: {ex.GetType().Name}: {ex.Message}");
+                    await Task.Delay(25, ct);
                     continue;
                 }
 
-                state.Log.WriteLine($"cslq session: idle for {keepalive}; stopping.");
-                return 0;
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                // No single connection may end the session. A client that hangs up
-                // mid-handshake -- which the liveness probe below used to do, twenty times a
-                // second, from the poll since collapsed into the request itself -- races WaitForConnectionAsync and the accept
-                // gets `IOException: the pipe is being closed` instead of a connection. That
-                // used to be rethrown, so the process logged `stopped:` and exited, the caller
-                // fell back, and the next call paid the whole load again: 4.5 s and three
-                // processes for one query. The delay is a spin guard, not a wait: an accept
-                // that fails instantly and forever would otherwise be a busy loop.
-                await pipe.DisposeAsync();
-                state.Log.WriteLine($"cslq session: accept failed: {ex.GetType().Name}: {ex.Message}");
-                await Task.Delay(25, ct);
-                continue;
-            }
-            catch
-            {
-                await pipe.DisposeAsync();
-                throw;
+                // Accepted on this loop and answered on another, so a second client can connect
+                // while the first request is still running. `gate` is what keeps them one at a
+                // time: Console.Out is process-global and the redirect below owns it. The count
+                // goes up here rather than in the task, which has not started yet.
+                //
+                // The successor is bound before the accepted connection is handed off, and that
+                // ordering is the fix for a real defect rather than a tidy-up: off Windows a
+                // client that hangs up instantly made ServeOneAsync dispose the only live
+                // instance, which unlinked the path, and the next client connected into the
+                // backlog of a socket nobody was listening on any more — "connected but never
+                // answered", one ping in three in probes/pipe-smoke.cs.
+                var accepted = pipe;
+                pipe = Bind(serve);
+                Interlocked.Increment(ref state.InFlight);
+                _ = ServeOneAsync(accepted, state, gate, ct);
             }
 
-            // Accepted on this loop and answered on another, so a second client can connect
-            // while the first request is still running. `gate` is what keeps them one at a
-            // time: Console.Out is process-global and the redirect below owns it. The count
-            // goes up here rather than in the task, which has not started yet.
-            Interlocked.Increment(ref state.InFlight);
-            _ = ServeOneAsync(pipe, state, gate, ct);
+            return 0;
         }
+        finally
+        {
+            await pipe.DisposeAsync();
+        }
+    }
 
-        return 0;
+    private static NamedPipeServerStream Bind(Serve serve) => new(
+        serve.Pipe, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
+        PipeTransmissionMode.Byte, PipeStreamOptions);
+
+    /// <summary>
+    /// Replaces a listening instance, successor first: see <see cref="AcceptAsync"/> for why
+    /// the order matters. An instance whose <c>WaitForConnectionAsync</c> was cancelled or
+    /// failed is not reused — on Windows it may hold a pending connect — so every such path
+    /// comes through here.
+    /// </summary>
+    private static async Task<NamedPipeServerStream> RebindAsync(Serve serve, NamedPipeServerStream old)
+    {
+        var next = Bind(serve);
+        await old.DisposeAsync();
+        return next;
     }
 
     private static async Task ServeOneAsync(

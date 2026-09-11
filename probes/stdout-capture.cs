@@ -1,10 +1,18 @@
-// The daemon must not inherit the launching client's stdio. It used to: Windows
-// CreateProcess passes bInheritHandles=TRUE, so cslq's stdout handle reached the thin
-// client and, through it, the daemon that outlives the call -- and a harness capturing
-// cslq's output then waited for EOF on a pipe the daemon still held. Every call was a
-// launching call that blocked for the whole keepalive and returned with the daemon dead.
+// Nothing that outlives a cslq call may inherit the caller's stdio. Two processes do
+// outlive one -- the daemon and the session -- and each platform had its own leak.
 //
-// No bash leg can pin this: Git Bash `> file` hands cslq a file handle, and bash waits for
+// Windows: CreateProcess passes bInheritHandles=TRUE, so cslq's stdout handle reached the
+// thin client and, through it, the daemon -- and a harness capturing cslq's output then
+// waited for EOF on a pipe the daemon still held. Every call was a launching call that
+// blocked for the whole keepalive and returned with the daemon dead.
+//
+// Unix: the handle flag above is a Win32 call and a no-op off Windows, and a Unix child
+// inherits fds 0/1/2 verbatim unless the parent redirects them. Session.Spawn did not, so
+// the session held the capture pipe for its whole keepalive instead: 62.7 s a call against
+// a 60 s keepalive on ubuntu and macos, every request inside it answered in milliseconds.
+// This file ran on Windows alone for as long as that lasted.
+//
+// No bash leg can pin this: `> file` hands cslq a real file handle, and bash waits for
 // exit rather than EOF, so the failure is invisible from the shell that runs the suite.
 // A .NET process with RedirectStandardOutput is the harness under test.
 //

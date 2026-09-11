@@ -782,29 +782,37 @@ else
   fail=$((fail + 1))
 fi
 
-# The daemon under a harness that captures stdout -- Windows only, and unpinnable from bash:
-# `> file` here hands cslq a real file handle and bash waits for exit, not EOF, so the leak
-# this leg is about is invisible from the shell running the suite. probes/stdout-capture.cs is
-# the harness instead, a .NET process with RedirectStandardOutput, on its own pipe.
+# A cslq under a harness that captures its stdout, on every platform the gate runs on. What
+# outlives the call -- the daemon, and now the session too -- must not still be holding that
+# capture pipe, or the harness reads EOF only when the keepalive expires.
+#
+# Unpinnable from bash, which is why the harness is a .NET process: `> file` here hands cslq a
+# real file handle and bash waits for exit rather than EOF, so the leak is invisible from the
+# shell running the suite. probes/stdout-capture.cs redirects instead.
+#
+# It ran on Windows alone until the leak was measured off it. The Windows fix is a handle flag
+# and does nothing on Unix, where a child inherits fds 0/1/2 whole unless the parent redirects
+# them -- so every ubuntu and macos gate case sat on its own capture pipe for the session's
+# whole keepalive, 62.7 s against a 60 s one, with the request answered in milliseconds inside
+# it. The platforms that had the bug are exactly the platforms this leg never ran on.
 #
 # Redirected to a file and cat'd, never $(...): the bash capture pipe would leak through the
 # app into the daemon exactly the way the bug does, and the leg would hang for the reason it
 # is testing.
-if pwd -W >/dev/null 2>&1; then
-  log "captured stdout"
-  sc_log=$(mktemp)
-  CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-capture"     dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
-  rc=$?
-  out=$(cat "$sc_log")
-  rm -f "$sc_log"
-  if [ "$rc" = 0 ]; then
-    printf 'PASS  %s\n' "daemon-survives-captured-stdout"
-    pass=$((pass + 1))
-  else
-    printf 'FAIL  %s (exit %s)\n' "daemon-survives-captured-stdout" "$rc"
-    printf '%s\n' "$out" | sed 's/^/      | /'
-    fail=$((fail + 1))
-  fi
+log "captured stdout"
+sc_log=$(mktemp)
+CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-capture"   dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
+rc=$?
+out=$(cat "$sc_log")
+rm -f "$sc_log"
+if [ "$rc" = 0 ]; then
+  printf 'PASS  %s\n' "captured-stdout-does-not-stall"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s)\n' "captured-stdout-does-not-stall" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
 fi
 
 # The three first-run failures a user who is not this repository hits, two of which are
