@@ -3,21 +3,24 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-11, after the eight fix batches that followed the 0.1.0 testing pass
-(PRs #21-#28) and before the 0.2.0 tag. All five milestones are done: the distance between
+Last updated: 2026-09-11, after the session landed on top of the eight fix batches that
+followed the 0.1.0 testing pass (PRs #21-#28), at version 0.3.0. All five milestones are done: the distance between
 "works on this clone" and "someone else can use it" was Milestone 5, and it is closed. What
 came after it is in **After Milestone 5** below; the batches changed readiness, symbol
 targeting, multi-targeting and the output rules, so where this file and `DESIGN.md` disagree
 with `CLAUDE.md`, `CLAUDE.md` is the one kept current with the code.
 
-154 legs pass — the 140 rows in `probes/cases.jsonl` plus 14 scripted legs (three
+164 legs pass — the 140 rows in `probes/cases.jsonl` plus 24 scripted legs (three
 source-generator staleness legs, the framework `def`, the forced non-daemon fallback, the
-cold-server `diag`, the packaged-tool install, the captured-stdout daemon leg, the restore that
-rebuilds the resolver cache, and the five first-run failures: no solution, two solutions,
-`dotnet` off `PATH`, an exhausted candidate after load, and a failed design-time build).
+cold-server `diag`, the packaged-tool install, the captured-stdout leg, the restore that
+rebuilds the resolver cache, the five first-run failures — no solution, two solutions, `dotnet`
+off `PATH`, an exhausted candidate after load, a failed design-time build — and ten for the
+session: the second call's latency, the warm `hover` timed against `--no-session`, the hangup
+race, the reattach on a changed solution, the forced in-process fallback, and five
+document-staleness legs).
 Quote the composition, not the total, so the next drift between the two halves shows up as a
-sum that no longer adds up. One leg, `daemon-survives-captured-stdout`, is Windows-only, so
-153 run on Linux and macOS.
+sum that no longer adds up. All 164 run on Linux, Windows and macOS; `session-pipe-smoke`
+hard-exits before the fixture restore rather than counting as a leg.
 
 Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
@@ -48,7 +51,7 @@ at all; that stays a one-line coupling at the call site.
 |---|---|---|
 | 1 | `ready` + `refs`, cross-project fixture, probe gate, both workflows | **done** |
 | 2 | The hard fixture cases and the read commands | **done** |
-| 3 | Daemon mode, then `skills/csharp-semantic-queries/SKILL.md` | **done** |
+| 3 | Daemon mode, then `skills/cslq/SKILL.md` | **done** |
 | 4 | Remaining commands and output tuning | **done** |
 | 5 | Shippable: install path, first-run errors, metadata symbols, docs, CI | **done** |
 
@@ -517,6 +520,47 @@ started, which stays an accepted cost.
       the `diag` walk's scope over Razor and misc files, and letting a top-level-statements
       root skip readiness.
 
+- [x] **The session: the workspace is loaded once, not once per call.** The daemon shares a
+      server *process*, not a loaded workspace, so batch 6 measured every attach re-running the
+      whole solution load — ~1.6 s on the fixture, ~25-30 s on CommunityToolkit, on every
+      invocation, warm daemon included. That is upstream and no `initialize`-layer lever
+      reaches it, so the fix is on our side of the wire: a background `cslq` of its own
+      (`cslq --serve <pipe> --root <abs>`) that holds an `LspClient` and its loaded workspace
+      open between calls, spoken to over a named pipe in JSON lines. It is the default;
+      `--no-session` is the opt-out, and it is **not** the Roslyn daemon — `--no-daemon` still
+      means a private server, and a session with `--no-daemon` is an ordinary session that owns
+      its server.
+      **Measured** on the fixture (4 projects), Release, **Windows**, 2026-09-11: the first
+      call to a cold session 4.9-7.6 s, then `hover` 138-188 ms, `outline` 140 ms, `ready`
+      145 ms, `sym` 182 ms, `def` 229 ms, `refs` 655-734 ms, `session status` 158 ms — against
+      2.2-2.4 s for the same `hover` on every call under `--no-session`, and a 69-77 ms floor
+      for `cslq --version`, which starts nothing. Those are one platform's; the gate measures
+      the warm `hover` against `--no-session` on all three (`session-beats-no-session`, PR #30):
+      190 ms vs 2951 ms on windows, 131 ms vs 2377 ms on ubuntu, 67 ms vs 1429 ms on macos.
+      **The first call costs more than a one-shot did**, since it pays the same load plus a
+      process start; that is the trade, and both numbers — and the platform — are stated
+      wherever one appears.
+      Four things the transport forced, each of which cost a session to find and is in
+      `CLAUDE.md`: a named mutex has thread affinity, so the spawn guard runs on a thread of
+      its own or `ReleaseMutex` throws out of a `finally` and the query is answered twice; no
+      single connection may end the accept loop, because a client hanging up mid-handshake
+      races `WaitForConnectionAsync` and killed the session roughly one run in eight;
+      `CSLQ_SESSION_PIPE_NAME` overrides the derived name outright, so `run.sh` derives one per
+      root rather than exporting one; and `File.ReadLines` shares reads alone, so
+      `session status` printed no pid for exactly the sessions that were running.
+      Holding documents open across calls also made two old claims false. A one-shot re-read
+      every file because it died with its answer; a session does not, so `Staleness` stamps
+      every open document and `LspClient` now sends `didClose` — the first thing in `cslq` that
+      ever did. And `textDocument/diagnostic` reporting nothing for a file no project compiles
+      turned out to be a timing artefact of a process that exited before the document bound:
+      under a session it reports, out of Roslyn's misc-files workspace, and a whole-fixture
+      `diag` drifted upward on later calls. `diag` now skips a document with **no project
+      context** — the context and not the directory, so a linked file's real errors survive.
+      **Done.** `src/Cslq/Session.cs`, `src/Cslq/Staleness.cs`, `probes/hangup.cs`,
+      `SessionTests` and `StalenessTests`; `cslq session status` / `cslq session stop`,
+      `--no-session`, `CSLQ_SESSION_PIPE_NAME` and `CSLQ_SESSION_KEEPALIVE` (900 s, `-1`
+      never). Version 0.3.0.
+
 ## Acceptance criteria
 
 - [x] `.config/dotnet-tools.json` pins `roslyn-language-server`; `dotnet tool restore` reproduces it
@@ -537,7 +581,7 @@ started, which stays an accepted cost.
 - [x] A source-generated symbol disappears when what the generator keys on is renamed on
       disk, and comes back when it is restored, against a daemon that outlives both queries
 - [x] A run that silently fell back to a non-daemon server says so, and a probe forces one
-- [x] `skills/csharp-semantic-queries/SKILL.md` exists and tells an agent not to grep for what `cslq` answers
+- [x] `skills/cslq/SKILL.md` exists and tells an agent not to grep for what `cslq` answers
 - [x] The skill is self-contained: it installs with `npx skills add idotta/cslq`, and names the
       commands that install `cslq` rather than pointing at the README
 - [x] `cslq impl` resolves an interface member to implementers in two different projects
@@ -566,6 +610,18 @@ started, which stays an accepted cost.
 - [x] `cslq ready --json` honours the envelope; ambiguity listings honour `--max`
 - [x] The probe suite runs green on a Windows runner as well as `ubuntu-latest`, and
       `dotnet format --verify-no-changes` gates every PR
+- [x] A second call against an already-loaded workspace does not reload the solution: measured
+      under one second on the fixture, with `--no-session` as the opt-out that pays it again
+- [x] A session survives a client that hangs up mid-handshake, and the leg proves it by the pid
+      in the session's log rather than by latency, which a silent restart would pass
+- [x] Two `cslq` calls racing at a cold prompt produce one session, and a client that cannot
+      take the spawn lock loads in-process and says so rather than stalling
+- [x] A file edited between two calls is answered from its new text, and a file deleted between
+      them is closed — a session never answers from the text it first read
+- [x] `cslq session status` names a running session's pipe, root, pid and log, and
+      `cslq session stop` ends it; neither is an error when there is no session
+- [x] The probe suite scopes its own sessions, one pipe per root, and kills every one it
+      started
 
 ## Verified facts, and when
 
@@ -609,7 +665,7 @@ against 5.12.0-1.26426.8 / win-x64.
   linked file's real diagnostics. Verified 2026-09-05 against 5.12.0-1.26426.8 on a scratch copy
   of the fixture.
 - `fixture/` **does** have a solution — `Fixture.slnx` — so it is not a counterexample to
-  `skills/csharp-semantic-queries/SKILL.md`'s entry on solutionless roots, which since PR #12 reads that such a root
+  `skills/cslq/SKILL.md`'s entry on solutionless roots, which since PR #12 reads that such a root
   errors in about a second rather than hanging. `.slnx` counts as the solution there exactly as
   `.sln` does. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is

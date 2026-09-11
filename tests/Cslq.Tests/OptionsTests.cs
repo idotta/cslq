@@ -22,12 +22,39 @@ public class OptionsTests
         Assert.False(opts.ErrorsOnly);
         Assert.False(opts.Json);
         Assert.True(opts.Daemon);
+        Assert.True(opts.Session);
     }
 
     [Fact]
     public void The_daemon_is_on_unless_it_is_opted_out_of()
     {
         Assert.False(Program.Options.Parse(["ready", "--no-daemon"]).Daemon);
+    }
+
+    /// <summary>
+    /// The session is what every invocation gets, so the flag that matters is the one that
+    /// declines it. <c>--session</c> was the opt-in until the default moved; it is gone
+    /// rather than accepted-and-ignored, so a script still passing it is told so.
+    /// </summary>
+    [Fact]
+    public void The_session_is_on_unless_it_is_opted_out_of()
+    {
+        Assert.False(Program.Options.Parse(["ready", "--no-session"]).Session);
+        Assert.Throws<UsageException>(() => Program.Options.Parse(["ready", "--session"]));
+    }
+
+    /// <summary>
+    /// <c>session</c> takes one of two words, and nothing else it could be confused for:
+    /// a verb that is not one of them is a usage error rather than a root, a symbol or a
+    /// silently-ignored positional.
+    /// </summary>
+    [Fact]
+    public void The_session_command_takes_one_of_two_verbs()
+    {
+        Assert.Equal("status", Program.Options.Parse(["session", "status"]).Argument);
+        Assert.Equal("stop", Program.Options.Parse(["session", "stop"]).Argument);
+        Assert.Throws<UsageException>(() => Program.Options.Parse(["session"]));
+        Assert.Throws<UsageException>(() => Program.Options.Parse(["session", "restart"]));
     }
 
     /// <summary>

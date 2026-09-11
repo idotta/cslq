@@ -24,12 +24,24 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **Positions are UTF-16 code units** and the server does not negotiate otherwise. .NET string
   indices are already UTF-16, so naive indexing is correct — counting runes or UTF-8 bytes is the
   bug. `LspClient.InitializeAsync` asserts the encoding and refuses to run if it ever changes.
-- **Do not add `Console.OutputEncoding = UTF8`.** It looks required — this machine's console is
-  code page 850 — but it fixes nothing and was tried and reverted. .NET writes a real console
-  handle with `WriteConsoleW`, so the code page never applies, and redirected stdout is already
-  UTF-8. Verified both ways against the emoji fixture line. Mojibake in a PowerShell pipeline
-  (`cslq refs ... | Select-String`) is PowerShell decoding our bytes with its own
-  `[Console]::OutputEncoding`, which nothing `cslq` sets can change.
+- **Do not add `Console.OutputEncoding = UTF8`, and do not believe redirected stdout is UTF-8
+  on its own.** The rule stands and the reason is unchanged: its setter calls
+  `SetConsoleOutputCP`, which every process sharing the console sees, so one `cslq` would be
+  changing the code page under the shell and everything else attached to it. A real console
+  handle is written with `WriteConsoleW` and ignores the encoding entirely, so only the
+  *redirected* case is ever affected — which is every agent, every pipeline and the whole probe
+  suite. What this bullet used to claim about that case was an accident: redirected output goes
+  through `Console.OutputEncoding`, this machine's console is code page 850, and a code page
+  carries no emoji, ellipsis or accent — they best-fit to `??` and `.` and the answer is wrong
+  at exit 0. It never showed because the language server `cslq` launched attached to the same
+  console and set its output code page to UTF-8 *before* `Console.Out` was built lazily on
+  first use. A call answered by a session launches nothing, which is how sessions-by-default
+  turned `non-ascii-refs-symbol` and `a-long-line-is-elided-around-the-hit-column` red.
+  `Program.WriteUtf8WhenRedirected` is the fix and the place the reasoning lives: writers of
+  our own over the standard handles, redirected streams only, no global code page touched.
+  Mojibake in a PowerShell pipeline (`cslq refs ... | Select-String`) is still PowerShell
+  decoding our bytes with its own `[Console]::OutputEncoding`, which nothing `cslq` sets can
+  change.
 - **The non-ASCII probe cases are the first host-dependent ones.** They no longer go green on
   CI and red in Git Bash: since Milestone 5 item 5 `probe.yml` is a `fail-fast: false` matrix
   over `ubuntu-latest`, `windows-latest` **and** `macos-latest`, where the job runs
@@ -274,13 +286,21 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `TaskCanceled`, and every later request then failed with `-32000: Server was requested to
   shut down`. Payloads are hand-rolled in `Protocol.cs`, so a shape mistake is silent and
   then fatal rather than a clean error.
-- **A `.cs` file no project compiles is half-invisible, and the halves are not the ones you
-  would guess.** `workspace/symbol` does not index it and `textDocument/diagnostic` reports
-  **nothing** for it — but `outline` answers, off the syntax tree. So `cslq outline` on such a
-  file works while `cslq sym` on the type it declares exits 1, and scoping `diag`'s file walk to
-  project directories would suppress no noise whatsoever. The same file **linked in** with
-  `<Compile Include="../Elsewhere/File.cs" />` is fully indexed and does report, so that scoping
-  would silently drop real errors. Measured 2026-09-05; the reasoning is in `DESIGN.md`.
+- **A `.cs` file no project compiles is half-invisible, and `diag` skips it on its project
+  *context*, never on its directory.** `workspace/symbol` does not index it, but `outline`
+  answers off the syntax tree, so `cslq outline` on such a file works while `cslq sym` on the
+  type it declares exits 1. The other half of this bullet used to say `textDocument/diagnostic`
+  reports **nothing** for it (measured 2026-09-05) and that was a timing artefact of a process
+  that exited before the document bound. Under a session it does report: Roslyn answers an
+  unqualified pull out of its misc-files workspace — analyzer rows about a file no compilation
+  contains — so a whole-fixture `diag` drifted upward on later calls and the same command
+  answered differently on the fifth call than on the first. `Program.DiagAsync` therefore skips
+  a document whose `_vs_getProjectContexts` answer is **empty**. That is not the directory
+  scoping this bullet has always rejected, and the linked file is exactly why it cannot be: the
+  same file pulled in with `<Compile Include="../Elsewhere/File.cs" />` has a real context, so
+  it is still walked and its real errors are still reported — which is what a directory rule
+  would silently drop. `non-project-file-no-diagnostics` is the leg; the reasoning is in
+  `DESIGN.md`.
 - **Sentinel inference reads prose, and neither taking every match nor capping at three saves
   it.** The candidate regex matches `class|struct|record|interface|enum` followed by a word, so
   the doc comment "identifying the class and assembly context" yields the candidate `and` — and
@@ -312,14 +332,30 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   never observes a first document at all. If a bump starts answering
   early, `diag` is where it shows up. Do not restore the loop without re-measuring: the old one
   could not have caught that case anyway, since two equally-wrong pulls agree.
-- **`cslq` never sends `didClose`, so daemon document state outlives the client.** `_open` is
-  per-process and says nothing about what the shared daemon still has open. Any measurement of
-  first-open behaviour must use a fresh `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` or
-  `--no-daemon`; a warm daemon shows "no divergence" for the wrong reason. The same effect is
-  worth ~4 s per document: the first `diag` of a file in a fresh daemon cost 7.6 s against 3.3 s
-  warm.
+- **A one-shot `cslq` still sends no `didClose`, so daemon document state outlives it.**
+  `_open` is per-process and says nothing about what the shared daemon still has open. Any
+  measurement of first-open behaviour must use a fresh
+  `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME`, a fresh `CSLQ_SESSION_PIPE_NAME`, or
+  `--no-daemon --no-session`; a warm daemon shows "no divergence" for the wrong reason. The
+  same effect is worth ~4 s per document: the first `diag` of a file in a fresh daemon cost
+  7.6 s against 3.3 s warm.
+- **A session is the one thing that does send `didClose`, and it is not an optimisation —
+  it is what keeps a stale answer from surviving an edit.** A process that died with its
+  answer re-read every file on the next run; a session holds `didOpen` across the edit, and
+  Roslyn owns an open document's text rather than re-reading the file. So `LspClient` stamps
+  every document it opens (`Staleness.Stamp`: `LastWriteTimeUtc` and `Length` — a `stat`, not
+  a hash, because it is taken before *every* use and hashing would cost the reads the session
+  exists to avoid), re-opens with fresh text when the file changed, and sends `didClose` when
+  the file is **gone**. Without it the session answers from the text as it first read it:
+  wrong line numbers, wrong context lines, a renamed symbol still found, all at exit 0. A
+  generated or decompiled URI has no file to stamp and is never stat'ed — `Staleness.HasFile`
+  is the gate, and it matters in both directions: a generated document would read as *deleted*
+  (`PathUri.ToPath` answers a confident `/BuildInfo.g.cs` for one) and a decompiled one would
+  cost a stat per request for an answer no edit can change.
 - **`cases.jsonl` order is load-bearing for the `diag` cases, invisibly.** `run.sh` scopes one
-  daemon for the whole suite, and cases 1-12 never open `App/TypeError.cs`. So
+  daemon for the whole suite and derives one session name per root, and the client that holds
+  the open documents is now the session rather than the process the row launched — so the
+  effect is the same and one level further away. Cases 1-12 never open `App/TypeError.cs`. So
   `deliberate-error-diag` is the first `didOpen` of that document and the only leg that observes
   a cold document at all; by the time `deliberate-error-diag-workspace` and
   `non-project-file-no-diagnostics` run it is already open and warm. Reordering the file, or
@@ -332,7 +368,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   daemon dead, so every call was a launching call. Measured on the fixture, keepalive 20 s:
   `out=$(cslq ready --root fixture)` 25 s before, 4 s after. Best effort by design — a process
   with no console has invalid std handles and must not be broken by this — so a regression is
-  silent, and `daemon-survives-captured-stdout` (Windows-only, `probes/stdout-capture.cs`) is
+  silent, and `captured-stdout-does-not-stall` (`probes/stdout-capture.cs`) is
   the only thing that catches it. **The trap survives one level up:** launch `cslq` from a
   process whose own stdout is an inheritable pipe — `dotnet run probes/stdout-capture.cs`
   under `$(...)` — and *that* pipe is inherited into cslq as an ordinary handle and travels on
@@ -341,6 +377,30 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   Actions `shell: pwsh`): keepalive 10, bash `out=$(cslq ready)` 4 s against bash
   `out=$(pwsh -c '$x = & cslq ready; $x')` 18 s. So the launch must be an unredirected
   `cslq ready`, or `--no-daemon`, and SKILL.md carries that qualifier because it ships alone.
+  **There is one more process in the chain now, and the handle clearing is only half of the
+  answer.** The session is spawned the same way and outlives the call the same way, so it holds
+  an inherited pipe for its whole keepalive just as the daemon does. Both go through
+  `LspClient.StartProcess`, so the clearing covers both — **on Windows**.
+  `DisableStdioInheritance` is a Win32 call that returns immediately off it, where a child
+  inherits fds 0/1/2 whole unless the parent redirects them, and `Session.Spawn` did not: that
+  alone was the ~62 s Unix penalty, and redirecting the child's streams is the fix. The leg is
+  `captured-stdout-does-not-stall`, it runs on all three platforms since `67399d3`, and it
+  names a `CSLQ_SESSION_PIPE_NAME` of its own so it measures the launch it means rather than a
+  session some earlier case left warm.
+- **Roslyn's daemon binds no named pipe off Windows, so a connect is not a liveness test
+  there.** `probes/stdout-capture.cs` asserts that what outlives a captured call is still
+  serving, and its Windows answer — connect to `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` — can
+  never be answered on Unix. Measured 2026-09-11 on ubuntu and macos: the socket path
+  `$TMPDIR/CoreFxPipe_<name>` was polled every 25 ms *through* the call and never appeared, with
+  and without a session in the chain, while `ss -xl` taken at the same moment listed only
+  CoreFxPipe sockets belonging to cslq's own sessions — not one for a daemon, including the
+  gate's own long-lived daemon that `ps` showed alive and serving the suite. The name is a key
+  the daemon chain passes in its environment, not a socket it binds. So the liveness half is
+  per-platform: a connect on Windows, and off it a live process whose environment carries our
+  `NAME=value` token (`/proc/<pid>/environ` on Linux, `ps axeww` on macos). Do not "unify" it
+  back into a connect, and do not read a timeout there as a dead daemon. The *timing* half —
+  a captured call must not cost a keepalive — stays on all three platforms and is what the leg
+  is for.
 - **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
   it terminates the process without ever raising a console control event, so the handler never
   runs and the 130 you see is bash's own signal status. To exercise the real path, launch `cslq`
@@ -447,7 +507,12 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     logs `AutoLoadProjectsInitializer` → `LanguageServerProjectSystem] Loading <solution>` →
     **a fresh `BuildHost` process** → every `.csproj` reloaded →
     `Completed (re)load of all projects in ...`. Fixture ~1.6 s per attach; CommunityToolkit
-    ~25-30 s per attach, which is the entire warm wall clock. The only lever cslq holds is not
+    ~25-30 s per attach, which is the entire warm wall clock. **All of that is still true of
+    the daemon and is no longer what a user pays**: the session attaches once and answers every
+    later call out of the workspace it is already holding, so the reload is paid by the
+    session's first request rather than by every invocation. `--no-session` buys the
+    per-invocation cost back, and is the only way to measure the numbers in this bullet. The
+    only lever cslq holds is not
     sending `workspaceFolders`, and that is measured to leave the client with an **empty**
     workspace rather than the daemon's loaded one — no cslq-side fix exists at the
     `initialize` layer. Consequences, all measured rather than inferred:
@@ -484,10 +549,88 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     probe (`Explicit: true`) to the inferred set and only falls back to it alone when
     `InferSentinels` throws. That probe is not a project: `ready --json`'s three numbers must
     exclude it, and `LspClient.Names` prints it as `explicit sentinel 'X'`.
+- **The session is the default, and it is not the daemon.** Ours is the *session*: a `cslq`
+  we spawn ourselves (`cslq --serve <pipe> --root <abs>`), one per attach, holding an
+  `LspClient` and a loaded workspace open between calls, spoken to over a named pipe in
+  JSON lines. Roslyn's is the *daemon*: one server process per machine, shared across
+  workspaces, which every attach reloads. They are independent — `--no-daemon` still means
+  exactly what it always meant, and a session with `--no-daemon` is an ordinary session over a
+  private server. `--no-session` is the opt-out, and a session is never used for `restore` (it
+  holds no workspace) or for `session status`/`session stop` (they are *about* one). The pipe
+  name is a hash of root, log level, daemon-or-not, user and `cslq` version — the version
+  because an upgraded `cslq` must never talk to a session running the old code. Measured
+  2026-09-11 on the fixture, Release, **Windows**: the first call to a cold session 4.9-7.6 s,
+  then `hover` 138-188 ms against 2.2-2.4 s for the same call under `--no-session`. The gate
+  times that warm `hover` on every platform it runs — `session-beats-no-session`, PR #30: 190 ms
+  against 2951 ms on windows, 131 ms against 2377 ms on ubuntu, 67 ms against 1429 ms on macos.
+  **The cold first call costs more than a one-shot did**, and that is the trade; say both
+  numbers, and the platform, wherever one appears.
+- **A latency number is a claim about one platform, and a working fallback will hide a broken
+  one behind a green gate.** The session shipped through four rounds measured only on Windows
+  while it was a ~62 s *penalty* per call on Linux and macOS — and the cause was not the
+  transport. `Session.Spawn` left the child's streams unredirected, so off Windows the session
+  inherited the caller's fds 0/1/2 and held a capturing harness's stdout for its whole
+  keepalive: every call *was* answered by a session in milliseconds, and the caller could not
+  read the answer until the session idled out. Every leg still passed, the gate said 163 of
+  163 — the leg that would have caught it did not exist yet — and CI said nothing: the Unix
+  jobs were merely slow, which reads as a busy runner. What hid it for four rounds was a
+  *measurement* taken on one platform. Two rules came out of it, and both are cheap:
+  - **Quote no performance figure that the gate does not measure on every platform it runs on.**
+    `session-beats-no-session` times a warm `hover` with and against `--no-session` on all three
+    and fails when a session costs more than it saves, which is the assertion that would have
+    caught this on day one. A README table is not a measurement.
+  - **A primitive whose implementation differs per platform needs its own cheap leg, and it has
+    to run early.** `.NET` emulates named pipes on Unix with a socket file and Windows with a
+    refcounted kernel object; `probes/pipe-smoke.cs` exercises the accept loop and a real
+    `--serve` spawn before the fixture restore, and hard-exits. That moved a 30-minute
+    mystery — the suite crawling case by case with no leg red — to a 52-second diagnosis
+    naming the syscall. Anything platform-divergent below the LSP layer earns the same
+    treatment: prove the primitive first, cheaply, and fail loudly.
+- **A named mutex has thread affinity, and `await` is what breaks it.** `Mutex.ReleaseMutex`
+  has to run on the thread that took it, and a continuation resumes wherever the pool puts it —
+  so the release threw `ApplicationException` out of the `finally`, and a session that had
+  already answered became a fallback that answered the same query twice. `Session.StartupLock`
+  is the answer: a thread of its own acquires, hands back a disposable handle and blocks until
+  that handle is disposed. Do not "simplify" it back into an `await` around a `Mutex`. The two
+  `NamedWaitHandleOptions` are the same pair `probes/hold-mutex.cs` needs and for the same
+  reasons.
+- **No single connection may end the accept loop.** A client that hangs up mid-handshake races
+  `WaitForConnectionAsync`, which then throws `IOException: the pipe is being closed` instead of
+  accepting — and the liveness probe used to do exactly that, twenty times a second. Rethrowing
+  it took the session down: the caller fell back, the next call found nothing listening and paid
+  the whole load again, 4.5 s and three processes for one query, on roughly one run in eight.
+  The catch logs and continues, with a short delay as a spin guard rather than a wait.
+  `session-survives-hangups` (`probes/hangup.cs`) is the leg, and **its pid count is the real
+  assertion**: a session that died and was silently replaced answers the next query perfectly
+  well, just slowly, so latency alone reads as noise. Exactly one `cslq session ... pid` line in
+  the log means the process that answered is the one the leg before it started.
+- **A generated document's cached context lines have no file to stamp, so they are cleared on
+  every request.** `LspClient._lines` is keyed against the same `Staleness.Stamp` the open
+  document is, which is what makes a session render an edited file correctly — but a generated
+  document has no file, its text changes whenever what the generator keys on changes, and a
+  stamp can never see it. `RefreshOpenAsync` drops every generated entry per request. The cost
+  is one `workspace/textDocumentContent` per generated document per request, which is what a
+  one-shot paid anyway; the alternative is a session rendering a generator's old output forever,
+  at exit 0.
+- **`CSLQ_SESSION_PIPE_NAME` overrides the derived name outright**, exactly as
+  `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` does for the daemon — so one exported value puts
+  *every* root on one pipe, and the first session to start then declines every other root's
+  requests while two thirds of the calls run through the fallback. That is why `run.sh` derives
+  a name per root (`pipe_for`) instead of exporting one for the suite, and why the override
+  is read only in `Session.PipeName(Options)` and never in the derivation the unit tests pin.
+- **`File.ReadLines` shares reads only.** A *running* session holds its log open for writing, so
+  the default open failed with a sharing violation on exactly the logs worth reading and
+  `session status` printed no pid for every session it found running. `Session.Pid` opens the
+  file by hand with `FileShare.ReadWrite | FileShare.Delete`. `run.sh`'s EXIT trap reads the same
+  line the same way, which is how it kills every session a gate run started.
 - **`probes/run.sh` must scope its own daemon.** It exports
   `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=cslq-probe-$$` and a 60 s keepalive. Without it the
   gate inherits whatever daemon the developer's session left running — a stale workspace can
-  make the suite lie — and the opening `cslq ready` stops being a cold load.
+  make the suite lie — and the opening `cslq ready` stops being a cold load. **And its own
+  sessions**, for the same reasons and one more: a session a developer left running would answer
+  the gate's calls out of a workspace the gate never loaded. `SESSION_PREFIX` is
+  `cslq-probe-session-$$` and `pipe_for` derives one pipe per root from it, so the trap can
+  find every session this run started and no other.
 - **The staleness legs write to the fixture.** They rename `Greeter` in
   `fixture/Core/Greeter.cs` and rely on a `trap ... EXIT` to put it back. If `run.sh` is
   interrupted between the rename and the trap, check `git diff fixture/` before believing
@@ -549,7 +692,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   prune off the ordinary start path: it costs a `dotnet` launch, and nothing but a restore
   changes what the pin is. To test it live, `mkdir` a fake version beside the real one and run
   `cslq restore`; the unit tests cover the selection.
-- **`skills/csharp-semantic-queries/SKILL.md`'s path is load-bearing twice, and both failures
+- **`skills/cslq/SKILL.md`'s path is load-bearing twice, and both failures
   are silent.** `npx skills add idotta/cslq` — the install the docs now lead with — scans a
   fixed list of container directories (the repository root, `skills/`,
   `skills/.curated|.experimental|.system/`, and each agent's own `.<agent>/skills/`), walking
@@ -559,9 +702,16 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   landed it at `~/.claude/skills/skill/`. Separately, `probes/cases.jsonl` uses `--root skills`
   as the solutionless-root fixture for `no-solution-root-reports` and `unknown-command-reports`:
   the directory is load-bearing there precisely for having no `.sln`, so renaming it turns two
-  cases red for a reason unrelated to the code under test. The file must also stay
-  **self-contained** — `npx skills` puts that one file on a machine holding no clone of this
-  repository, so a cross-reference to the README from inside it points at nothing.
+  cases red for a reason unrelated to the code under test. The directory must also stay
+  **self-contained** — `npx skills` puts it on a machine holding no clone of this repository, so
+  a cross-reference to the README from inside it points at nothing. A *sibling* file is fine and
+  is what `REFERENCE.md` is: `copySkillDirectory` in the CLI's `dist/cli.mjs` recurses the whole
+  skill directory (read 2026-09-11, not assumed), so everything beside `SKILL.md` travels with
+  it. The split is the point — the frontmatter is the only part always in the agent's context,
+  `SKILL.md`'s body loads whenever the skill fires, and `REFERENCE.md` is read only when
+  `SKILL.md` sends the agent there. So a fact belongs in `SKILL.md` only if it changes what an
+  agent does on an ordinary query or prevents a wrong answer at exit 0; everything else goes to
+  `REFERENCE.md`, and growing `SKILL.md` back past ~100 lines undoes the whole change.
 
 ## C# and .NET rules
 

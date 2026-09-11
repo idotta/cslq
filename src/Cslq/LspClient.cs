@@ -11,8 +11,9 @@ internal sealed class LspClient : IAsyncDisposable
     private readonly JsonRpc _rpc;
     private readonly Endpoints _endpoints;
     private readonly StringBuilder _stderr;
-    private readonly HashSet<string> _open = new(PathUri.PathComparer);
-    private readonly Dictionary<string, string[]> _lines = new(PathUri.PathComparer);
+    private readonly Dictionary<string, Staleness.Stamp?> _open = new(PathUri.PathComparer);
+    private readonly Dictionary<string, (Staleness.Stamp? Stamp, string[] Lines)> _lines =
+        new(PathUri.PathComparer);
     private readonly Dictionary<string, IReadOnlyList<DocumentContext>> _contexts = new(PathUri.PathComparer);
     private readonly bool _daemon;
     private readonly CancellationToken _ct;
@@ -193,7 +194,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// Unix is unaffected: .NET opens its own descriptors <c>O_CLOEXEC</c> and dup2s only the
     /// redirected ends.
     /// </summary>
-    private static void DisableStdioInheritance()
+    internal static void DisableStdioInheritance()
     {
         if (!OperatingSystem.IsWindows()) return;
 
@@ -845,18 +846,114 @@ internal sealed class LspClient : IAsyncDisposable
     /// Roslyn will not answer requests for a document it does not consider open. Generated
     /// documents are the exception: they are the server's own, it answers for them without a
     /// didOpen, and there is no file to read the text from anyway.
+    /// <para>
+    /// A document already open is re-sent when the file has changed under it. That costs one
+    /// <c>stat</c> per use in a one-shot run, where the set is always empty and nothing is
+    /// ever re-sent, and it is the only thing keeping a session — which holds this set across
+    /// an edit — from answering forever from the text it first read. <c>didClose</c> and a
+    /// fresh <c>didOpen</c> rather than <c>didChange</c>: the pair needs nothing from the
+    /// server beyond the synchronization capability this client already declares, while a
+    /// whole-document <c>didChange</c> would be correct only for the sync kind the server
+    /// advertises — which <see cref="ServerCapabilities"/> does not even read — and would
+    /// save one notification, not the file read, since the new text has to be read either
+    /// way. The re-send is a file read and two notifications against a query costing
+    /// milliseconds at best, and it only happens when the file actually changed.
+    /// </para>
     /// </summary>
     public async Task OpenAsync(string uri, CancellationToken ct)
     {
-        if (PathUri.IsGenerated(uri) || _open.Contains(uri)) return;
-        // Read before the set is marked, so a document refused for its encoding is not
-        // recorded as open: nothing was sent for it, and the next attempt should fail the
-        // same way rather than silently proceed as if the server had the text.
-        var text = await SourceText.ReadAsync(Root, PathUri.ToPath(uri), ct);
-        _open.Add(uri);
+        if (PathUri.IsGenerated(uri)) return;
+        if (_open.TryGetValue(uri, out var opened))
+        {
+            switch (Staleness.Check(uri, opened))
+            {
+                case DocumentState.Unchanged:
+                    return;
+                case DocumentState.Deleted:
+                    // The server would keep answering for a document that is gone. Drop it
+                    // and fail the way a file that was never there fails.
+                    await CloseAsync(uri);
+                    throw new CslqException($"no such file: {PathUri.Relative(Root, PathUri.ToPath(uri))}");
+                default:
+                    await CloseAsync(uri);
+                    break;
+            }
+        }
+
+        // Stamped and read before the set is marked, so a document refused for its encoding is
+        // not recorded as open: nothing was sent for it, and the next attempt should fail the
+        // same way rather than silently proceed as if the server had the text. The stamp is
+        // taken before the read, so an edit landing during it reads as changed next time
+        // rather than being missed.
+        var path = PathUri.ToPath(uri);
+        var stamp = Staleness.OfPath(path);
+        var text = await SourceText.ReadAsync(Root, path, ct);
+        _open[uri] = stamp;
         await NotifyAsync(
             "textDocument/didOpen",
             new DidOpenTextDocumentParams(new TextDocumentItem(uri, "csharp", 1, text)));
+    }
+
+    /// <summary>
+    /// Re-sends every open document the file behind it has changed under, before the request
+    /// that is about to be answered. <see cref="OpenAsync"/>'s own check is not enough on its
+    /// own: a symbol query reads <c>workspace/symbol</c>, whose index is built from the text
+    /// of the documents this client has open, and it runs <em>before</em> any position is
+    /// known — so a session that only refreshed the document it was about to position in
+    /// answered <c>hover Greeted</c> with <c>no symbol matched</c> after the rename and went
+    /// on doing so, having never re-sent the file that would have told it otherwise
+    /// (measured on the fixture, 2026-09-11).
+    /// <para>
+    /// One <c>stat</c> per open document, which is what a session holds and nothing more. A
+    /// document that has become undecodable, or has been deleted, is left closed rather than
+    /// failed here: this sweep belongs to no command in particular, and the command that does
+    /// ask for that document raises it exactly as it does today.
+    /// </para>
+    /// </summary>
+    public async Task RefreshOpenAsync(CancellationToken ct)
+    {
+        // A generated document has no file behind it, so no stamp can see its text change --
+        // and it does change, whenever what the generator keys on does. Its context lines are
+        // therefore cached for one request rather than for the session: dropping them here
+        // costs one workspace/textDocumentContent per generated document per request, which is
+        // what a one-shot run pays, instead of one per rendered row.
+        foreach (var generated in _lines.Keys.Where(PathUri.IsGenerated).ToList())
+        {
+            _lines.Remove(generated);
+        }
+
+        foreach (var (uri, stamp) in _open.ToList())
+        {
+            var state = Staleness.Check(uri, stamp);
+            if (state == DocumentState.Unchanged) continue;
+
+            await CloseAsync(uri);
+            if (state == DocumentState.Deleted) continue;
+
+            try
+            {
+                await OpenAsync(uri, ct);
+            }
+            catch (CslqException)
+            {
+                // Undecodable, or deleted between the stat above and the read. Either way it
+                // is left closed for the command that asks for it to answer.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives the document back to the server and forgets everything read off it. cslq sent no
+    /// <c>didClose</c> at all before sessions existed, because a process that dies closes
+    /// every document it opened.
+    /// </summary>
+    public async Task CloseAsync(string uri)
+    {
+        _open.Remove(uri);
+        _lines.Remove(uri);
+        await NotifyAsync(
+            "textDocument/didClose",
+            new DidCloseTextDocumentParams(new TextDocumentIdentifier(uri)));
     }
 
     /// <summary>
@@ -866,8 +963,16 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     public async Task<string[]> LinesAsync(string uri, CancellationToken ct)
     {
-        if (_lines.TryGetValue(uri, out var cached)) return cached;
+        // Cached against the same stamp the open document is: a session that rendered a file's
+        // context rows before it was edited would otherwise keep printing the old rows under
+        // fresh positions, which is the same wrong answer one layer out.
+        if (_lines.TryGetValue(uri, out var cached) &&
+            Staleness.Check(uri, cached.Stamp) == DocumentState.Unchanged)
+        {
+            return cached.Lines;
+        }
 
+        var stamp = Staleness.Of(uri);
         string[] lines;
         if (PathUri.IsGenerated(uri))
         {
@@ -885,7 +990,7 @@ internal sealed class LspClient : IAsyncDisposable
             lines = File.Exists(path) ? await TextLinesAsync(path, ct) : [];
         }
 
-        _lines[uri] = lines;
+        _lines[uri] = (stamp, lines);
         return lines;
     }
 
@@ -940,9 +1045,33 @@ internal sealed class LspClient : IAsyncDisposable
         (await ContextsAsync(uri, ct)) is [var first, ..] ? first.File : null;
 
     /// <summary>
+    /// Whether this server does not implement <c>_vs_getProjectContexts</c> at all — a
+    /// <c>RemoteMethodNotFoundException</c> and nothing else, because every other failure is
+    /// transient and a session would carry it forever. It is an optional VS extension, so an
+    /// empty answer means two different things — this document is compiled by no project, or
+    /// this server cannot say — and only a caller that can tell them apart may act on the
+    /// first. <c>diag</c> is that caller: it skips a document with no context, and a server
+    /// that dropped the extension would otherwise turn a whole-tree walk into
+    /// <c>no diagnostics</c>, silently.
+    /// </summary>
+    public bool ProjectContextsUnsupported { get; private set; }
+
+    /// <summary>
+    /// Whether a failed <c>_vs_getProjectContexts</c> means the server does not implement it,
+    /// which is the only failure <see cref="ProjectContextsUnsupported"/> may remember.
+    /// <c>RemoteMethodNotFoundException</c> alone: it is a sibling of
+    /// <c>RemoteInvocationException</c> rather than a subclass, and the base of both,
+    /// <c>RemoteRpcException</c>, also covers <c>ConnectionLostException</c> — which is a
+    /// blip, not a capability, and catching it here is what made one dropped connection
+    /// permanent for a whole session.
+    /// </summary>
+    internal static bool ContextsUnsupported(Exception ex) => ex is RemoteMethodNotFoundException;
+
+    /// <summary>
     /// Every project context the document is compiled in, in <see cref="Contexts.Order"/>'s
     /// order. Empty when no project compiles it, and empty rather than fatal when the server
-    /// will not answer the request at all.
+    /// does not implement the request at all — but a failed one is a failed command, not an
+    /// empty list; see <see cref="ContextsUnsupported"/>.
     /// <para>
     /// <c>textDocument/_vs_getProjectContexts</c> is a VS protocol extension rather than LSP,
     /// and the server neither advertises it nor requires a matching client capability
@@ -957,7 +1086,7 @@ internal sealed class LspClient : IAsyncDisposable
     {
         if (_contexts.TryGetValue(uri, out var cached)) return cached;
 
-        IReadOnlyList<DocumentContext> contexts = [];
+        IReadOnlyList<DocumentContext> contexts;
         try
         {
             var list = await _rpc.InvokeWithParameterObjectAsync<ProjectContextList?>(
@@ -967,18 +1096,29 @@ internal sealed class LspClient : IAsyncDisposable
 
             contexts = Contexts.Read(list?.Contexts ?? []);
         }
-        catch (RemoteRpcException)
+        catch (Exception ex) when (ContextsUnsupported(ex))
         {
-            // RemoteRpcException, not RemoteInvocationException: a server that drops the
-            // extension answers RemoteMethodNotFoundException, which is a sibling of the
-            // latter, not a subclass -- catching the narrower type would turn a coarser label
-            // into a crash. A generator-only label is a correct if coarser answer, and a
-            // positional request with no context is what every one of them was before this.
+            // The one failure that is a property of the server rather than of this moment:
+            // it does not implement the extension, it never will within this attach, and a
+            // generator-only label is a correct if coarser answer. Cached and remembered.
             //
-            // The one call that deliberately bypasses RequestAsync, for that reason: this is
-            // an optional VS extension the server need not implement, so a failure here is a
-            // label to soften rather than a command to fail. Every other request wants the
-            // wrapper's CslqException, which this catch would swallow into a silent empty.
+            // This is also the one call that deliberately bypasses RequestAsync, for the same
+            // reason: an optional VS extension the server need not implement is a label to
+            // soften rather than a command to fail.
+            ProjectContextsUnsupported = true;
+            contexts = [];
+        }
+        catch (Exception ex) when (Describe("textDocument/_vs_getProjectContexts", ex, PipeName) is { } message)
+        {
+            // Everything else is transient — a connection lost mid-request most of all — and
+            // must be neither remembered nor cached. A one-shot process retried on its next
+            // run; a session has no next run, so a single blip used to set the flag for the
+            // life of the session (which stops `diag` skipping misc-file documents, the very
+            // drift this guard exists to prevent) and cache an empty context list for the URI
+            // (which asks every later positional request with no _vs_projectContext, the
+            // multi-TFM coin flip). It fails the request instead: a walk that names the file
+            // it could not read is strictly better than one that drops it at exit 0.
+            throw new CslqException(message + (ex is ConnectionLostException ? StderrTail() : string.Empty));
         }
 
         _contexts[uri] = contexts;

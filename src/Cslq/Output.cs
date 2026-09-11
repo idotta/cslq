@@ -766,6 +766,56 @@ internal static class Output
     }
 
     /// <summary>
+    /// Where the session for these options is, whether it is there, and what to read if it
+    /// went wrong. Exit 0 either way: "no session is running" is an answer, not a failure —
+    /// the usual state after a keepalive, and the state a caller asking this most wants
+    /// distinguished from a session that is running badly.
+    /// </summary>
+    public static void WriteSessionStatus(Session.Status status, bool json)
+    {
+        if (!json)
+        {
+            Console.WriteLine(status.Running
+                ? $"running{(status.Pid is { } pid ? $"  pid {pid}" : "")}"
+                : "not running");
+            Console.WriteLine("pipe  " + status.Pipe);
+            Console.WriteLine("root  " + status.Root);
+            Console.WriteLine("log   " + status.Log);
+            return;
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(
+            new
+            {
+                count = 1,
+                truncated = false,
+                results = new[]
+                {
+                    new { running = status.Running, pipe = status.Pipe, root = status.Root, pid = status.Pid, log = status.Log },
+                },
+            },
+            JsonOut));
+    }
+
+    /// <summary>
+    /// Whether <c>cslq session stop</c> found one to stop. Not a failure either way, for the
+    /// reason <see cref="WriteSessionStatus"/> is not: the caller asked for there to be no
+    /// session, and there is none.
+    /// </summary>
+    public static void WriteSessionStopped(bool stopped, string pipe, bool json)
+    {
+        if (!json)
+        {
+            Console.WriteLine(stopped ? "stopped the session on " + pipe : "no session was running on " + pipe);
+            return;
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(
+            new { count = 1, truncated = false, results = new[] { new { stopped, pipe } } },
+            JsonOut));
+    }
+
+    /// <summary>
     /// What the post-restore prune did, one line per outcome, unprefixed: <c>cslq restore</c>
     /// prints them as they are and <see cref="LspClient.StartAsync"/> prefixes them for
     /// stderr. Nothing at all when nothing was there to remove.

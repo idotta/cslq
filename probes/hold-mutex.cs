@@ -13,13 +13,17 @@
 // run.sh means writing a backslash inside a double-quoted shell string next to a variable,
 // where `"Global\${pipe}.client"` silently yields a literal `${pipe}` -- a mutex nothing
 // contends for, so the case fails with no hint of why.
-if (args.Length != 2)
+//
+// The suffix names which of the two startup mutexes to hold: `client` is the Roslyn thin
+// client's, `start` is the cslq session's. Same mechanism, same options, two callers.
+if (args.Length is not (2 or 3))
 {
-    Console.Error.WriteLine("usage: dotnet run probes/hold-mutex.cs -- <pipe name> <seconds>");
+    Console.Error.WriteLine(
+        "usage: dotnet run probes/hold-mutex.cs -- <pipe name> <seconds> [client|start]");
     return 2;
 }
 
-var name = $@"Global\{args[0]}.client";
+var name = $@"Global\{args[0]}.{(args.Length == 3 ? args[2] : "client")}";
 using var mutex = new Mutex(
     false, name, new NamedWaitHandleOptions { CurrentUserOnly = true, CurrentSessionOnly = false });
 
