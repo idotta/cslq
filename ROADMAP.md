@@ -3,18 +3,21 @@
 Work spans multiple sessions. This file is the handoff: what is done, what is next, and which
 questions are already settled. `DESIGN.md` holds the why behind the settled ones.
 
-Last updated: 2026-09-07, after Milestone 5 item 5 put the gate on a Windows runner. All five
-milestones are done: the distance between "works on this clone" and "someone else can use it"
-was Milestone 5, and it is closed. Output tuning held two concrete changes: `sym` ranks its
-hits client-side — exact, then prefix, then substring, source before generated — and applies
-`--max` to that ranking, sorting only what survives, so a capped broad query keeps the best
-matches; and a generated document's label now names the project that consumed the generator,
-which the URI never did.
+Last updated: 2026-09-11, after the eight fix batches that followed the 0.1.0 testing pass
+(PRs #21-#28) and before the 0.2.0 tag. All five milestones are done: the distance between
+"works on this clone" and "someone else can use it" was Milestone 5, and it is closed. What
+came after it is in **After Milestone 5** below; the batches changed readiness, symbol
+targeting, multi-targeting and the output rules, so where this file and `DESIGN.md` disagree
+with `CLAUDE.md`, `CLAUDE.md` is the one kept current with the code.
 
-80 legs pass — the 71 rows in `probes/cases.jsonl` plus 9 scripted legs (three source-generator
-staleness legs, the framework `def`, the forced non-daemon fallback, the cold-server `diag`, the
-packaged-tool install, and the two first-run failures). Quote the composition, not the total, so the next
-drift between the two halves shows up as a sum that no longer adds up.
+154 legs pass — the 140 rows in `probes/cases.jsonl` plus 14 scripted legs (three
+source-generator staleness legs, the framework `def`, the forced non-daemon fallback, the
+cold-server `diag`, the packaged-tool install, the captured-stdout daemon leg, the restore that
+rebuilds the resolver cache, and the five first-run failures: no solution, two solutions,
+`dotnet` off `PATH`, an exhausted candidate after load, and a failed design-time build).
+Quote the composition, not the total, so the next drift between the two halves shows up as a
+sum that no longer adds up. One leg, `daemon-survives-captured-stdout`, is Windows-only, so
+153 run on Linux and macOS.
 
 Getting there took the readiness rewrite below: the suite failed a *different*
 pair of cases on each of three runs, always by answering with a cross-project or generated hit
@@ -386,7 +389,7 @@ nothing after item 1 matters to a user who cannot start `cslq`.
       holding the `.sln`/`.slnx`. A sub-section says how the skill reaches an agent, and that
       other agents take the same file. (That sub-section is now step 2 of **Install**, and
       leads with `npx skills add`; see the follow-up below.) The disagreements are closed: the status line matches this table; the case
-      count is stated as its composition (55 rows + 8 scripted legs = 63) in both files so the
+      count is stated as its composition (then 55 rows + 8 scripted legs = 63) in both files so the
       next drift stops adding up rather than going stale; the two references to a
       `Program.Query*` symbol-retry helper that never existed are gone, since
       `MatchSymbolsAsync` issues one query and no longer retries; and
@@ -492,6 +495,28 @@ started, which stays an accepted cost.
       the skill at all, which is the worse of the two omissions — nuget.org is where a reader
       lands first. Verified against the `npx skills` README on 2026-09-08.
 
+- [x] **The 0.1.0 testing pass, and the eight batches that answered it.** Testing 0.1.0 against
+      the fixtures, this repository, OrchardCore and CommunityToolkit produced 88 findings; the
+      ones that changed code merged as PRs #21-#28 between 2026-09-08 and 2026-09-11. What
+      each batch settled, since it is what a reader of the milestones above will otherwise
+      look for:
+      **1** (#21) every failure exits with a `cslq:` line rather than a stack trace, and a
+      non-C# target is named. **2** (#22) duplicate location rows fold, `sym` ranks before the
+      cap, a generated label names the consuming project. **3** (#23) the daemon no longer
+      inherits the client's stdout, so a captured launch returns — 25 s to 4 s on the fixture.
+      **4** (#24) a dotted target is matched against the syntax tree, a type wins over its
+      constructors, and ambiguity lists as `sym` rows. **5** (#25) readiness reads each
+      project's own `.csproj`, `--sentinel` became additive rather than replacing the set, two
+      solutions became an error, and the wait is bounded after the load notification. **6**
+      (#26) the per-attach reload was measured to the server log and found to be upstream: no
+      `src/` change, the daemon and readiness claims in the docs corrected instead. **7** (#27)
+      `_vs_projectContext` pins the context a positional request is answered in, and set-valued
+      commands union every context. **8** (#28) one rule for non-answers and usage errors —
+      exit 2 for a usage error, a non-answer on stdout — and the quiet wrong answers closed.
+      Deferred with reasons, none of them blocking: overload/partial selectors, CJK by name,
+      the `diag` walk's scope over Razor and misc files, and letting a top-level-statements
+      root skip readiness.
+
 ## Acceptance criteria
 
 - [x] `.config/dotnet-tools.json` pins `roslyn-language-server`; `dotnet tool restore` reproduces it
@@ -564,13 +589,16 @@ against 5.12.0-1.26426.8 / win-x64.
   `kind: "full"` reports. `workspace/diagnostic` also answers but returns zero reports —
   `workspaceDiagnostics: false` in its dynamic registration is honest. Roslyn leaves
   `source` null on compiler diagnostics and sends `code` as a string (`"CS0029"`).
-- Against a **cold** server `workspace/symbol` answers nothing at all — not a partial list —
-  until `workspace/projectInitializationComplete` fires, and then answers completely: measured
-  0 hits for 8.1 s, then the full 3 on the same poll the notification arrived, with the
-  inferred sentinel resolving 0.33 s later. So the partial-answer window is not a property of
-  cold load. It belongs to a client attaching to a **daemon loading a root it has not loaded
-  before**, where the notification already fired for the previous root and never fires again —
-  which is exactly the case the notification cannot be used to close. Verified 2026-09-05.
+- `workspace/symbol` answers **partially** during a load, and the partial-answer window
+  straddles `workspace/projectInitializationComplete` rather than ending at it. The
+  three-project fixture is what suggested otherwise: 0 hits for 8.1 s, then the full 3 on the
+  same poll the notification arrived (2026-09-05), which on a fixture that small is one
+  transition and not a rule. Measured 2026-09-10 on CommunityToolkit (26 projects): sentinels
+  resolved progressively through the load, eight of twelve before the notification and spread
+  over 20 s, and four kept resolving for a further 6-8 s *after* it. The notification also
+  fires **once per attach**, warm daemon included — it ends this client's own reload, which the
+  daemon re-runs every time — so it is a bound on the tail, not a point where the answer
+  becomes complete. `PostLoadGrace` (20 s) is that tail.
 - A `.cs` file that **no project compiles** is answered for asymmetrically: `workspace/symbol`
   does not index it (`cslq sym` on a type declared only there exits 1 with `no results`) and
   `textDocument/diagnostic` reports **nothing** for it, but `textDocument/documentSymbol` still
@@ -585,8 +613,10 @@ against 5.12.0-1.26426.8 / win-x64.
   errors in about a second rather than hanging. `.slnx` counts as the solution there exactly as
   `.sln` does. Verified 2026-09-05.
 - The server exposes **no project list to ask for**. `workspace/_roslyn_restorableProjects` is
-  a server-to-client request and carries none, so `cslq` enumerates `.csproj` files instead and
-  accepts that this is an approximation. Verified 2026-09-05.
+  a server-to-client request and carries none, so `cslq` reads the root's solution for the
+  project list (Milestone 5 item 2 replaced the `.csproj` scan that stood here). The on-disk
+  `.csproj` set is still scanned, but only to compute nesting boundaries. Verified 2026-09-05,
+  discovery superseded 2026-09-09.
 - **`textDocument/diagnostic` does not answer from the misc-files state and then correct
   itself -- it blocks until the document is bound.** A cross-project error opened as the first
   and only document in a never-used daemon returns the correct `CS0029` on the *first* pull;
@@ -624,11 +654,14 @@ against 5.12.0-1.26426.8 / win-x64.
   2026-09-09 against the same server: `cslq ready --root <OrchardCore> --timeout 600 --json`
   resolves in ~165 s with `projects: 214`, that one wrapper in `skipped` and twelve projects
   that declare no type in `unprobed` -- 227 discovered project directories, all accounted for.
-- **Project discovery reads the root's solution; the `.csproj` scan is now the fallback.**
-  Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list; more than one
-  falls back to the recursive scan, and **none is now an error** rather than a third route into
-  the scan — `--autoLoadProjects` does not discover a bare project, so scanning one up only
-  bought a full timeout. A solution one directory down does not count, which is
+- **Project discovery reads the root's solution, and only that; there is no `.csproj` scan
+  fallback left.** Exactly one `.sln`/`.slnx` at the top of `--root` supplies the project list.
+  **Zero is an error and so is more than one**, both thrown before the server starts
+  (`no-solution-root-fails-fast`, `two-solutions-root-fails-fast`): `--autoLoadProjects` does
+  not discover a bare project under the daemon, and the scan that used to answer a two-solution
+  root is over-inclusive, so a project neither solution loads gets a sentinel that can never
+  resolve and readiness burns the whole timeout. A solution one directory down does not count,
+  which is
   what keeps `fixture/Fixture.slnx` from narrowing a root above it. `.slnf` is not read, a listed
   project that is not on disk is dropped, and a root whose solution lists no C# project is named
   in the error rather than reported as "no .csproj under <root>". This also made the repository
@@ -769,5 +802,7 @@ flag and env-var names that appear in no `--help`.
   before the server starts, so the timeout is no longer reachable — the underlying fact about
   `--autoLoadProjects` is what the rejection rests on. `SKILL.md` carries the error, not the
   hang.
-- `premature-query-fails-loudly` still exits 1 against a warm daemon, because `--timeout 0` means
-  `WaitReadyAsync` never issues a query at all. That case pins the timeout guard, not cold load.
+- `premature-query-fails-loudly` still exits 1 against a warm daemon, and not because the query
+  is skipped: `WaitReadyAsync` polls first and checks the deadline second, so even `--timeout 0`
+  fails on a sentinel round that was really issued. That case pins the timeout guard, not cold
+  load.

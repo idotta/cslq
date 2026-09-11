@@ -11,7 +11,9 @@ Two constraints drive the design:
 1. **Official tooling only.** The C#-specific component in the query path is Microsoft-published.
 2. **Always current.** A weekly cron bumps the pin and a probe suite gates the bump.
 
-Status: **all five milestones done, `0.1.0` is the first release.** Ten commands — `ready`,
+Status: **all five milestones done; `0.2.0` follows `0.1.0` and the eight fix batches behind
+it** (PRs #21-#28: readiness per project, symbol targeting, multi-targeted contexts, and one
+rule for non-answers and usage errors). Ten commands — `ready`,
 `refs`, `def`, `impl`, `hover`, `sym`, `outline`, `diag`, `project` and `restore` — over a
 cross-project fixture with source-generated, non-ASCII, metadata and deliberate-error cases;
 the shared server daemon on by default; `skills/csharp-semantic-queries/SKILL.md` for the
@@ -413,7 +415,9 @@ registration means.
 
 Options: `--root <dir>` (default: cwd), `--sentinel <symbol>`, `--max N` (default 50),
 `--context N` (default 1; inert for `outline`, `sym` and `hover`), `--timeout N` seconds
-(default 180), `--log-level L`, `--errors-only` (`diag` only), `--tfm T`, `--json`.
+(default 180), `--log-level L`, `--errors-only` (only `diag` reads it; it is accepted and inert
+elsewhere, unlike `--tfm`, which is rejected where it would filter nothing), `--tfm T`,
+`--json`.
 
 **Options may appear anywhere** — before the command, between the command and its argument, or
 after both — the way every other `dotnet` CLI takes them. The set is closed and each member is
@@ -582,7 +586,11 @@ one private server per invocation:
 | `cslq diag <file>` | ~9.2–10.9 s |
 | `cslq diag` (whole fixture) | ~14.4–15.3 s over 12 files |
 
-The same suite on `ubuntu-latest` reaches ready in ~12 s and runs six cases in ~39 s.
+The file count in that last row is the fixture as it stood on the measurement date; it holds 19
+`.cs` files today, so read the row as a per-file cost and not as a current total.
+
+A whole `probe.yml` run — checkout, restore, build and every leg — took 9-12 minutes over
+PRs #24-#28, `ubuntu-latest` included.
 
 Milestone 1 started a dedicated server per invocation, so every command paid a full solution
 load. Since Milestone 3 `cslq` connects to the shared daemon by default and the cost is a pipe
@@ -604,7 +612,10 @@ the root's project count rather than staying flat. Measured 2026-09-10 on Commun
 reload, and repeat attaches cost the same as the first. Above a few dozen projects the daemon
 buys only process start and MEF composition, a couple of seconds, and `--no-daemon` costs about
 the same per call while avoiding the queueing several concurrent clients hit. The cause is in
-the server, not in `cslq`; see `FIXES-0.1.0.md`, batch 6.
+the server, not in `cslq`: each attach runs `AutoLoadProjectsInitializer`, starts a fresh
+`BuildHost` and reloads every `.csproj`, and the only lever a client holds — not sending
+`workspaceFolders` — leaves it with an empty workspace instead. The measurements and the log
+trace behind that are in `CLAUDE.md`, under the daemon bullet.
 
 About 2.5x on `refs`, with little variance across repeats once the daemon has seen the document
 — the high end of each warm range is the first invocation, which still pays the `didOpen` and
@@ -709,7 +720,10 @@ until the flow has run once for real.
 Two prerequisites live outside the repo: a `release` environment on GitHub, and a trusted
 publishing policy on nuget.org naming this repo, `release.yml` and that environment.
 
-`0.1.0` is the first release and goes out as-is — no `rc`.
+`0.1.0` was the first release and went out as-is — no `rc`. `0.2.0` is the second: the minor
+moves because the eight fix batches changed observable behaviour (exit 2 for a usage error,
+readiness covering every project, a context-pinned positional answer), and `bump.yml` continues
+from it one patch at a time.
 
 ## Dependencies
 
@@ -753,7 +767,7 @@ weekly bump.
 | Roslyn ignoring unopened documents | Every query opens its document via `textDocument/didOpen` first — except source-generated ones, which the server owns and answers for without it. |
 | A source file that is not valid UTF-8 | Decoding it with substitutions is silent and wrong: invalid bytes collapse to one U+FFFD, so the text `cslq` sends and the text Roslyn parses off disk stop agreeing and every later column on the line is short. Measured — column 48 where the editor showed 49, and `def` at the position `cslq` printed answering `no results` at exit 0. The decoder throws instead, with BOM detection left on so UTF-8 and UTF-16 BOM files are unaffected. Named as a target it is exit 1; found by `diag`'s walk it is named on stderr and skipped, so one undecodable file cannot hide the diagnostics of every other. |
 | A workspace whose design-time build fails | `projectInitializationComplete` fired and *every* probed project empty is the signature: the solution loaded and compiled nothing. Only in that state, and only after the wait has already failed, `cslq` runs `dotnet --version` in the root (exit 155 when a `global.json` pins an SDK nobody has) and looks for `obj/project.assets.json` per project, and names what it finds. A staged root went from 181.7 s with no cause to 23 s with one. |
-| No auto-restore | `probes/run.sh` runs `dotnet restore` on the fixture before starting the server — not because the server will not (it does, as part of its design-time build), but to keep the cold `ready` a measurement of load time and a failed restore loud. |
+| A restore the gate does not leave to the server | `probes/run.sh` runs `dotnet restore` on the fixture before starting the server — not because the server will not (it does, as part of its design-time build), but to keep the cold `ready` a measurement of load time and a failed restore loud. |
 | A framework or NuGet symbol rendering as a machine-absolute temp path | Roslyn answers for one from a document it decompiles under `<temp>/MetadataAsSource/<guid>/.../<Type>.cs`. `PathUri.Display` labels it `<metadata>/<assembly>/<TypeName>.cs`, reading the assembly off the `#region Assembly` header in the document, since the URI carries only the type name. `def` at `Console.WriteLine` used to print the raw path — after a 10 s stall in the decompilation guard, which now re-asks only when the workspace also declares that type. See `DESIGN.md`. |
 | Source-generated symbols rendering as a nonexistent path | Generated documents come back under a `roslyn-source-generated:` URI. `new Uri(u).LocalPath` does not throw for one, it returns `/BuildInfo.g.cs`, so `PathUri.Display` branches on the scheme and labels them `<generated>/<project>/<assembly>/<generator type name>/<hintName>`, mirroring what `EmitCompilerGeneratedFiles` writes on disk — the generator type is what separates two generators in one assembly emitting the same `hintName`. The project comes from `textDocument/_vs_getProjectContexts` — the URI names only the generator, so without it one generator serving several projects renders every one of its documents identically. Text comes from `workspace/textDocumentContent`. |
 | An unbuilt source generator contributing nothing, silently | With the analyzer assembly absent the workspace still loads and the sentinel still resolves; only the generated symbol is missing, with no error or diagnostic anywhere. `probes/run.sh` builds `fixture/Gen` before starting the server, and three cases assert the generated symbol resolves. |
@@ -769,12 +783,15 @@ weekly bump.
 Runs `tests/Cslq.Tests` first, then restores the tool and the fixture, builds `cslq`, asserts
 readiness, and runs every case in `probes/cases.jsonl`. Exits non-zero on any mismatch.
 
-**88 legs today = the 78 rows in `cases.jsonl` + 10 scripted ones.** The scripted ten are the
-three source-generator staleness legs, the framework `def` (whose two failure modes are an
-absence and a duration, neither of which a `expect` substring can pin), the forced non-daemon
-fallback, the cold-server `diag`, the packaged-tool install, the two first-run failures (a root
-with no solution, and `dotnet` off `PATH`), and the restore that rebuilds the tool-resolver
-cache. Quoting the composition rather than the total is deliberate: the next time the two
+**154 legs today = the 140 rows in `cases.jsonl` + 14 scripted ones.** The scripted fourteen are
+the three source-generator staleness legs, the framework `def` (whose two failure modes are an
+absence and a duration, neither of which an `expect` substring can pin), the forced non-daemon
+fallback, the cold-server `diag`, the packaged-tool install, the captured-stdout daemon leg, the
+restore that rebuilds the tool-resolver cache, and the five first-run failures: a root with no
+solution, a root with two, `dotnet` off `PATH`, a candidate that cannot resolve after the load
+notification, and a design-time build that fails. One of them,
+`daemon-survives-captured-stdout`, is Windows-only, so Linux and macOS run 153.
+Quoting the composition rather than the total is deliberate: the next time the two
 halves drift, the sum stops adding up here rather than going quietly stale. The rows include a
 negative case that pins a query fired before load to a loud failure rather than an empty result.
 

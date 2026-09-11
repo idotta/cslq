@@ -17,7 +17,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>cslq</ToolCommandName>
     <PackageId>cslq</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>iuri dotta</Authors>
     <Description>Semantic C# queries over the official roslyn-language-server, for coding agents.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
