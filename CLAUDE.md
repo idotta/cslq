@@ -551,8 +551,14 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     exclude it, and `LspClient.Names` prints it as `explicit sentinel 'X'`.
 - **The session is the default, and it is not the daemon.** Ours is the *session*: a `cslq`
   we spawn ourselves (`cslq --serve <pipe> --root <abs>`), one per attach, holding an
-  `LspClient` and a loaded workspace open between calls, spoken to over a named pipe in
-  JSON lines. Roslyn's is the *daemon*: one server process per machine, shared across
+  `LspClient` and a loaded workspace open between calls, spoken to over a named pipe as
+  JSON-RPC (StreamJsonRpc, `Content-Length` framing) with three methods: `run` behind the
+  request gate, `ping` and `stop` off it, because a session loading a workspace holds that gate
+  for the whole load and what those two ask is whether it is there. A session declining a call —
+  a version it does not match, a root it was not started for, a payload that did not parse — is
+  `Response.Error` **data**, never an RPC fault: a fault is indistinguishable from the transport
+  breaking, which the client retries, and a decline has to make it fall back instead.
+  Roslyn's is the *daemon*: one server process per machine, shared across
   workspaces, which every attach reloads. They are independent — `--no-daemon` still means
   exactly what it always meant, and a session with `--no-daemon` is an ordinary session over a
   private server. `--no-session` is the opt-out, and a session is never used for `restore` (it
@@ -669,6 +675,10 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **`probes/hold-mutex.cs` is a .NET 10 file-based app, not a project, and that is deliberate.**
   `dotnet run probes/hold-mutex.cs` compiles a bare `.cs` in under a second with no `.csproj`.
   Reach for that before adding a project to the tree for a probe.
+  **A file-based app is AOT-shaped, so reflection-based System.Text.Json is off**: `JsonRpc`
+  then cannot deserialise even an empty result, and it fails as "connected but never accepted"
+  with nothing in any log. `#:property JsonSerializerIsReflectionEnabledByDefault=true` is the
+  fix, and `probes/pipe-smoke.cs` carries it.
 - **The unrestored-tool message is localised; the command inside it is not.** `dotnet tool run`
   against a manifest whose tool is missing exits 1 with `Run "dotnet tool restore" to make the
   "<tool>" command available.` — in Portuguese on this machine, since

@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Nerdbank.Streams;
+using StreamJsonRpc;
 
 namespace Cslq.Tests;
 
@@ -54,10 +56,9 @@ public class SessionTests
     public void A_request_survives_the_wire()
     {
         var sent = new Session.Request("0.2.0", ["hover", "Greet", "--root", Root]);
-        var line = JsonSerializer.Serialize(sent, Session.Json);
+        var back = JsonSerializer.Deserialize<Session.Request>(
+            JsonSerializer.Serialize(sent, Session.Json), Session.Json);
 
-        Assert.DoesNotContain("\n", line, StringComparison.Ordinal);
-        var back = JsonSerializer.Deserialize<Session.Request>(line, Session.Json);
         Assert.Equal(sent.Version, back!.Version);
         Assert.Equal(sent.Argv, back.Argv);
     }
@@ -70,26 +71,81 @@ public class SessionTests
     public void A_response_survives_the_wire()
     {
         var sent = new Session.Response(1, "Grüße/日本語 🙂\n", "cslq: nada\n");
-        var line = JsonSerializer.Serialize(sent, Session.Json);
+        var back = JsonSerializer.Deserialize<Session.Response>(
+            JsonSerializer.Serialize(sent, Session.Json), Session.Json);
 
-        Assert.DoesNotContain("\n", line, StringComparison.Ordinal);
-        var back = JsonSerializer.Deserialize<Session.Response>(line, Session.Json);
         Assert.Equal(sent, back);
         Assert.Null(back!.Error);
     }
 
     /// <summary>
-    /// Declining to answer is a field rather than an exit code: the client falls back on it
-    /// instead of reading it as the query's own failure.
+    /// The three named methods, exercised over a real <c>JsonRpc</c> pair rather than a pipe:
+    /// the client and the server agree on nothing else, so a renamed method is otherwise
+    /// caught only by a gate run. <c>ping</c> and <c>stop</c> answer without a workspace —
+    /// they are asked of sessions in a cold load — and <c>stop</c> is a flag the connection
+    /// reads afterwards rather than something that ends anything here.
     /// </summary>
     [Fact]
-    public void A_declined_request_carries_its_reason()
+    public async Task Ping_and_stop_are_answered_off_the_workspace()
     {
-        var sent = new Session.Response(1, "", "", "this session is 0.2.0");
-        var back = JsonSerializer.Deserialize<Session.Response>(
-            JsonSerializer.Serialize(sent, Session.Json), Session.Json);
+        var ct = TestContext.Current.CancellationToken;
+        await using var wire = Wired(ct);
 
-        Assert.Equal("this session is 0.2.0", back!.Error);
+        await wire.Client.InvokeWithCancellationAsync("ping", null, ct);
+        Assert.False(wire.Endpoint.Stopping);
+
+        await wire.Client.InvokeWithCancellationAsync("stop", null, ct);
+        Assert.True(wire.Endpoint.Stopping);
+    }
+
+    /// <summary>
+    /// Declining to answer is a field of the response rather than an RPC fault: the client
+    /// falls back on it instead of reading it as the query's own failure, and a fault would
+    /// be indistinguishable from the transport breaking — which it retries.
+    /// </summary>
+    [Fact]
+    public async Task A_declined_run_is_data_rather_than_a_fault()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var wire = Wired(ct);
+
+        var response = await wire.Client.InvokeWithCancellationAsync<Session.Response>(
+            "run", [new Session.Request("0.0.0-not-this-one", ["ready"])], ct);
+
+        Assert.Equal(1, response.Exit);
+        Assert.Contains("cannot answer", response.Error!, StringComparison.Ordinal);
+    }
+
+    /// <summary>A <c>JsonRpc</c> client and a session endpoint joined stream to stream.</summary>
+    private sealed class Wire(
+        JsonRpc client, JsonRpc server, Session.Endpoint endpoint, Session.State state) : IAsyncDisposable
+    {
+        public JsonRpc Client => client;
+
+        public Session.Endpoint Endpoint => endpoint;
+
+        public async ValueTask DisposeAsync()
+        {
+            client.Dispose();
+            server.Dispose();
+            await state.DisposeAsync();
+        }
+    }
+
+    private static Wire Wired(CancellationToken ct)
+    {
+        var (a, b) = FullDuplexStream.CreatePair();
+        var state = new Session.State(
+            new Session.Serve("cslq-test", Path.GetFullPath(Root), "Warning", true), TextWriter.Null);
+        var endpoint = new Session.Endpoint(state, new SemaphoreSlim(1, 1), ct);
+
+        var server = Session.Rpc(a);
+        server.AddLocalRpcTarget(endpoint);
+        server.StartListening();
+
+        var client = Session.Rpc(b);
+        client.StartListening();
+        return new Wire(client, server, endpoint, state);
     }
 
     /// <summary>

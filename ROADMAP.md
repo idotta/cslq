@@ -526,7 +526,7 @@ started, which stays an accepted cost.
       invocation, warm daemon included. That is upstream and no `initialize`-layer lever
       reaches it, so the fix is on our side of the wire: a background `cslq` of its own
       (`cslq --serve <pipe> --root <abs>`) that holds an `LspClient` and its loaded workspace
-      open between calls, spoken to over a named pipe in JSON lines. It is the default;
+      open between calls, spoken to over a named pipe as JSON-RPC. It is the default;
       `--no-session` is the opt-out, and it is **not** the Roslyn daemon — `--no-daemon` still
       means a private server, and a session with `--no-daemon` is an ordinary session that owns
       its server.
@@ -560,6 +560,30 @@ started, which stays an accepted cost.
       `SessionTests` and `StalenessTests`; `cslq session status` / `cslq session stop`,
       `--no-session`, `CSLQ_SESSION_PIPE_NAME` and `CSLQ_SESSION_KEEPALIVE` (900 s, `-1`
       never). Version 0.3.0.
+
+- [x] **The session's wire is JSON-RPC over StreamJsonRpc, not a hand-rolled line protocol.**
+      It replaced JSON lines over the pipe plus two argv sentinels — a lone `--session-stop`
+      for `stop`, an empty argv for `ping` — with `Content-Length` framing and a
+      `SystemTextJsonFormatter` over `Session.Json`, the same shape `LspClient` already builds
+      for the language server, and
+      three named methods: `run` behind the request gate, `ping` and `stop` off it, since a
+      session loading a workspace holds that gate for the whole load. A decline stayed
+      **data** — `Response.Error`, not an RPC fault — because a fault is indistinguishable
+      from the transport breaking, which the client retries, and a session refusing a version
+      or a root it was not started for has to make the client fall back instead. The Windows
+      `WaitForPipeDrain` before hanging up is gone: the server awaits `rpc.Completion`, which
+      is the library's own answer to the same question and is not per-platform. One trap came
+      with it and is in `CLAUDE.md`: a file-based app is AOT-shaped, so reflection-based
+      System.Text.Json is off and `JsonRpc` cannot deserialise even an empty result — it fails
+      as "connected but never accepted" with nothing logged, and
+      `#:property JsonSerializerIsReflectionEnabledByDefault=true` is the fix
+      `probes/pipe-smoke.cs` now carries, along with the `JsonSerializerDefaults.Web` options
+      both ends of the real wire use.
+      **Measured**: the gate 164 of 164 on **Windows**, `session-beats-no-session` 194 ms
+      against 2191 ms, format clean, 345 unit tests green, and no `request failed` noise in any
+      session log. **Only Windows was exercised** — WSL and Docker are both unavailable on this
+      machine and no PR was opened, so CI has not seen it on ubuntu or macos.
+      **Done.** `src/Cslq/Session.cs`, `probes/pipe-smoke.cs`, `SessionTests`.
 
 ## Acceptance criteria
 

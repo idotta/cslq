@@ -56,8 +56,9 @@ near-useless to a model.
   `cslq diag` walk no longer streams its rows as it goes, and its per-file `cslq: skipped —`
   lines all arrive at the end rather than interleaved with the files they name. That is the
   price of the transport and it is worth paying, because the alternative — streaming two
-  channels down one pipe — is a framing problem on every call for an ordering benefit on one
-  command. `--no-session` streams as it always did.
+  channels down one pipe — means a notification per row and an ordering rule between the two
+  channels on every call, for an interleaving benefit on one command. `--no-session` streams as
+  it always did.
 - **`diag` reports only on documents a project compiles, and the test is the project *context*,
   not the directory.** A document whose `_vs_getProjectContexts` answer is empty is compiled by
   nothing, and an unqualified pull against one is answered out of Roslyn's misc-files workspace:
