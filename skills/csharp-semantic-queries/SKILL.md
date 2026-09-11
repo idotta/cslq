@@ -39,13 +39,18 @@ cslq ready
 ```
 
 Blocks until the workspace has loaded and exits 0. Every other command waits for readiness on
-its own, so this looks optional. It is not, and latency is the smaller half of why.
+its own, so this looks optional. It is not, and the reason is not latency: it does not make the
+commands after it cheaper. The daemon shares a server *process*, not a loaded workspace, so
+every invocation reloads the solution — what that costs on a large root is under **Options
+worth knowing**. What `ready` buys is a single place for the workspace to fail. A root that
+never loads says so here, once, instead of inside a query whose empty answer then has to be
+told apart from a real absence.
 
-`cslq` starts a shared background daemon on first use, and the first command pays the solution
-load for everything after it. Piping and capturing are safe, including on that first command —
-the daemon does not inherit the launching client's stdout. The exception is a shell that is
-itself captured (a PowerShell-hosted harness, whose own stdout is a pipe): there the launching
-command should be an unredirected `cslq ready`, or pass `--no-daemon`.
+`cslq` starts that shared daemon on first use, and the first command is the launch. Piping and
+capturing are safe, including on that first command — the daemon does not inherit the launching
+client's stdout. The exception is a shell that is itself captured (a PowerShell-hosted harness,
+whose own stdout is a pipe): there the launching command should be an unredirected
+`cslq ready`, or pass `--no-daemon`.
 
 ## Task → command
 
@@ -200,11 +205,14 @@ as "this implements something".
 --context N         source lines either side of a hit (default 1; inert for outline, sym, hover)
 --timeout N         seconds to wait for the workspace to load (default 180)
 --tfm T             answer in this target framework's context only (multi-targeted files)
+--errors-only       drop warnings and info rows (only diag reads it)
 --json              machine-readable output
 --sentinel <sym>    also require this symbol to resolve before answering
 --no-daemon         start a private server instead of sharing the daemon
 --log-level L       server log level: Trace, Debug, Information, Warning (default),
                     Error, Critical, None
+--version           print the cslq version and exit
+-h, --help          print usage and exit
 ```
 
 Options go anywhere — before the command, between it and its argument, or after both — so
@@ -312,8 +320,9 @@ misconfiguration, so do not send the user off to fix their setup over one:
   one — while `hover` and `def` inside `BType.cs` answered `no results`. Giving each project
   its own directory is the only fix; no flag helps.
 
-If a result looks like it is missing a project's hits in either shape, re-run the query — the
-second one is against a fully loaded workspace.
+Re-running the query does not fix either shape: every invocation reloads the solution and waits
+for readiness again, so the second run is in the same state as the first. Say which project may
+be missing instead.
 
 Two more, neither of them about readiness:
 

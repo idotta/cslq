@@ -102,7 +102,7 @@ near-useless to a model.
   admits. Rows carry an `external` boolean beside `generated` and `metadata`, for the reason
   those two exist: a caller never has to parse a prefix back off `path`. It is a label rather
   than a target, exactly as the other two are: the argument guard rejects a path outside
-  `--root` before the server starts, so the `..` says where to open the file and not that it
+  `--root` before readiness, so the `..` says where to open the file and not that it
   can be handed back. That is worth writing down where the label is, because unlike
   `<generated>/` and `<metadata>/` this one *looks* pasteable. The order of the
   checks in `PathUri.Display` is load-bearing — a decompiled document is a real file under
@@ -470,9 +470,11 @@ overloaded constructors remain ambiguous with each other; a selector for them is
 design.
 
 The kind a row prints is the one `workspace/symbol` reported, except where the chain has
-already been read. `sym` prints `method` for a constructor, because `sym` must not spend a
-`documentSymbol` request per hit and the chain is the only thing that identifies one — LSP kind
-9 is mapped, but the server never sends it. The ambiguity listing runs after the selection that
+already been read. A constructor is never reported as one — LSP kind 9 is mapped, but the
+server never sends it, and the chain is the only thing that identifies one — so `sym` recovers
+it rather than printing `method`: `ConstructorsAsync` asks for a declaration chain, but only for
+a document holding a method-kind hit that shares its name with a type-kind hit, so a broad query
+costs no extra request. The ambiguity listing runs after the selection that
 computes those chains, so it carries them through and prints `constructor`; the `candidates:`
 dump has no chains and prints what the server said. No listing asks for one.
 
@@ -488,17 +490,23 @@ which is localised display text. The nested exclusion is not a corner case: `Web
 `Web/Tests/` both declaring `Program` is the ordinary shape, and without it Tests loading marks
 Web ready, which is the exact silently-incomplete failure above.
 
-The wait is bounded once, and only on a cold load. When `projectInitializationComplete` fires
-**in this process** — `--no-daemon`, or the first client of a fresh daemon — the still-pending
-sentinels get 20 s more and then the wait fails with the message that names them. Measured on
-the wire: against a cold server `workspace/symbol` answers nothing until that notification and
-then jumps straight to complete, so a candidate unresolved after it is not going to resolve.
-The shape that produces one is a project whose only type declaration sits inside an `#if false`
-branch: the regex reads it, no compilation ever contains it, and the `.csproj` is otherwise
-ordinary, so none of the skip rules above can see it. On a daemon attach the notification fired
-before this process existed and there is nothing to bound from — and that is precisely the case
-where the incomplete-answer window lives — so the full `--timeout` stands there. A `--timeout`
-shorter than the grace still wins.
+The wait is bounded once. When `projectInitializationComplete` fires **in this process** the
+still-pending sentinels get 20 s more and then the wait fails with the message that names them.
+That covers cold and warm alike: the notification ends *this client's* own reload, and the
+daemon re-runs the whole solution load on every attach, so it fires once per attach rather than
+once per daemon. The shape the bound exists for is a project whose only type declaration sits
+inside an `#if false` branch: the regex reads it, no compilation ever contains it, and the
+`.csproj` is otherwise ordinary, so none of the skip rules above can see it.
+
+The grace is 20 s rather than zero because the notification is not the end of the incomplete
+answers. Measured 2026-09-10 on CommunityToolkit: sentinels resolved progressively *through*
+the load — eight of twelve projects before the notification, spread over 20 s — and four kept
+resolving for a further 6-8 s after it. So `workspace/symbol` answers partially on both sides of
+it, which is why the wait polls the sentinels from the first round instead of blocking on the
+notification and asking afterwards. While the notification has **not** fired the wait is never
+bounded early: that state means the load this client asked for is still running, and the
+incomplete-answer window is inside it, so the full `--timeout` stands. A `--timeout` shorter
+than the grace still wins.
 
 A root whose path contains a `%XX` sequence never becomes ready, and the cause is outside
 `cslq`. `new Uri(path).AbsoluteUri` escapes a literal `%` to `%25`, so `.../pct%20x` becomes
