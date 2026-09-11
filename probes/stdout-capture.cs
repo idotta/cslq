@@ -44,25 +44,23 @@ var notes = new StringBuilder();
 notes.Append(string.Create(
     CultureInfo.InvariantCulture,
     $"captured stdout: exit {exit} after {elapsed:F1}s, daemon on {pipe}: {how}"));
-notes.Append("; ").Append(Socket(pipe));
 notes.Append("; during the call: ").Append(watched);
-if (Servers(pipe) is { Length: > 0 } servers) notes.Append("; ").Append(servers);
-if (Listening() is { Length: > 0 } listening) notes.Append("; ").Append(listening);
 
-// The control, run only when the liveness half has already failed: it costs a second cold
-// load, and what it separates is worth that when the answer is in doubt. --no-session is the
-// pre-session chain -- cslq launches the thin client itself -- so a daemon missing here too
-// is a property of the daemon on this platform rather than of anything the session does.
+// Everything below is for the failure, where the question is which of the three things this
+// leg watches went wrong, and none of it is worth a second cold load on a passing run.
 if (!alive)
 {
+    notes.Append("; ").Append(Socket(pipe)).Append("; ").Append(Listening());
+
+    // --no-session is the pre-session chain -- cslq launches the thin client itself -- so a
+    // daemon missing there too is a property of this platform rather than of the session.
     var control = $"{pipe}-nosession";
     var (cx, cs, _, cwatched) = await RunAsync(control, session: false, "--no-session");
+    Alive(control, out var chow);
     notes.Append(string.Create(
         CultureInfo.InvariantCulture,
-        $"; --no-session control: exit {cx} after {cs:F1}s, daemon on {control}: "));
-    Alive(control, out var chow);
-    notes.Append(chow).Append("; ").Append(Socket(control))
-        .Append("; during the call: ").Append(cwatched);
+        $"; --no-session control: exit {cx} after {cs:F1}s, daemon on {control}: {chow}"));
+    notes.Append("; during the call: ").Append(cwatched);
 }
 
 Console.WriteLine(notes.ToString());
@@ -112,9 +110,11 @@ async Task<(int Exit, double Seconds, string Output, string Watched)> RunAsync(
     }
 
     var started = Stopwatch.StartNew();
-    // Watching the socket path while the call runs is what separates a daemon that never
-    // bound it from one that bound it and died with the call: after the fact the two look
-    // alike, and a connect afterwards cannot tell them apart either.
+    // Watching the socket path while the call runs is what separated a daemon that never bound
+    // it from one that bound it and died with the call -- the measurement behind the platform
+    // split in Alive below. It is kept because it is the evidence: off Windows this says
+    // `socket never appeared` on every run, and the day it stops saying that, the reasoning
+    // there needs re-reading.
     using var watching = new CancellationTokenSource();
     var watch = WatchAsync(daemon, started, watching.Token);
     using var proc = Process.Start(psi)!;
@@ -160,16 +160,35 @@ static async Task<string> WatchAsync(string daemon, Stopwatch clock, Cancellatio
         : string.Create(CultureInfo.InvariantCulture, $"socket present from +{first:F1}s to +{last:F1}s");
 }
 
-// Connecting is the liveness test rather than looking for the name: .NET normalises
-// `\.\pipe\` into a path that does not exist and Directory.GetFiles throws. A bare
-// connect-and-close leaves the daemon serving -- measured: it answers the next client warm.
+// The daemon that was launched must still be serving, and what proves that differs by
+// platform because the daemon itself does.
 //
-// Twice, because the two sides do not agree on options: the server sets CurrentUserOnly and
-// this client did not, which on Windows is an ACL the client never checks and off Windows is
-// a different question entirely. Either connect counts as alive; which one answered is in
-// the line above, so a difference shows up as a measurement rather than as a green row.
+// Windows: connect to the pipe. That is the bug this leg was written for -- the daemon died
+// with the captured call -- and a connect is exactly the question. Looking for the name is
+// not an option: .NET normalises `\\.\pipe\` into a path Directory.GetFiles throws on. A bare
+// connect-and-close leaves the daemon serving; measured, it answers the next client warm.
+//
+// Unix: a connect can never answer, and that is a property of the daemon rather than of this
+// probe. Measured on ubuntu and macos with the socket watch above and with `ss -xl` taken
+// while the gate's own daemon was serving the whole suite: no CoreFxPipe socket for the
+// daemon's pipe name is ever created, on either platform, with or without a session in the
+// chain -- every CoreFxPipe socket listening on that runner belonged to a cslq session. So
+// the pipe name is a key the daemon chain passes in its environment rather than a socket it
+// binds, and a live process carrying ours is the liveness test that means something here.
+// `ps axeww` prints the environment of one's own processes on both platforms; the match is on
+// the whole `NAME=value` token, so the -nosession control's name cannot satisfy the main run's.
 static bool Alive(string daemon, out string how)
 {
+    if (!OperatingSystem.IsWindows())
+    {
+        var token = "ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=" + daemon;
+        var mine = Carriers(token);
+        how = mine.Length == 0
+            ? $"unreachable (no live process carries {token}; {Listening()})"
+            : $"{mine.Length} live process(es) carry {token}: {Short(mine[0])}";
+        return mine.Length > 0;
+    }
+
     var plain = Connect(daemon, PipeOptions.None);
     if (plain is null)
     {
@@ -177,6 +196,9 @@ static bool Alive(string daemon, out string how)
         return true;
     }
 
+    // The two sides do not agree on options: the server sets CurrentUserOnly and this client
+    // does not. Either connect counts as alive; which one answered is in the line, so a
+    // difference shows up as a measurement rather than as a green row.
     var owned = Connect(daemon, PipeOptions.CurrentUserOnly);
     how = owned is null
         ? $"connected with CurrentUserOnly only (plain: {plain})"
@@ -196,11 +218,45 @@ static bool Alive(string daemon, out string how)
             return $"{ex.GetType().Name}: {ex.Message.ReplaceLineEndings(" ")}";
         }
     }
+
+    static string Short(string line) => line[..Math.Min(line.Length, 120)];
 }
 
-// What .NET's Unix named pipes actually are: a socket file under the temp directory. Printed
-// whether or not the connect worked, because "no server listening" and "no socket at all" are
-// different failures and the connect alone cannot tell them apart.
+// The live processes whose environment carries one NAME=value token. /proc on Linux, where a
+// process's environment is a file and needs no parsing of ps output; `ps axeww` on macos,
+// which has no /proc and prints the environment of one's own processes after the command.
+static string[] Carriers(string token)
+{
+    if (OperatingSystem.IsLinux())
+    {
+        var carriers = new List<string>();
+        foreach (var dir in Directory.EnumerateDirectories("/proc"))
+        {
+            if (!int.TryParse(Path.GetFileName(dir), out _)) continue;
+            try
+            {
+                if (!File.ReadAllText($"{dir}/environ").Split('\0').Contains(token)) continue;
+                var cmd = File.ReadAllText($"{dir}/cmdline").Replace('\0', ' ').Trim();
+                carriers.Add($"{Path.GetFileName(dir)} {cmd}");
+            }
+            catch (Exception)
+            {
+                // A process that exited between the listing and the read, or one that is not
+                // ours: neither is an answer about the daemon.
+            }
+        }
+
+        return [.. carriers];
+    }
+
+    return Run("ps", "axeww -o pid= -o command=") is { } text
+        ? [.. text.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(token))]
+        : [];
+}
+
+// What .NET's Unix named pipes actually are: a socket file under the temp directory.
 static string Socket(string daemon)
 {
     if (OperatingSystem.IsWindows()) return @"socket: n/a (\\.\pipe\)";
@@ -208,49 +264,8 @@ static string Socket(string daemon)
     return $"socket {path}: {(File.Exists(path) ? "present" : "absent")}";
 }
 
-// A process listing filtered to the language server, which separates a daemon that died from
-// one that was never started. ps rather than /proc so macos answers -- but the gate runs a
-// daemon of its own for every other leg, so a bare listing proves only that some daemon is
-// alive. On Linux /proc/<pid>/environ carries the pipe name and says which daemon is which;
-// macos has no equivalent that does not need a second implementation, so it says so instead.
-static string Servers(string daemon)
-{
-    if (OperatingSystem.IsWindows()) return "";
-    if (Run("ps", "ax -o pid=,command=") is not { } text) return "ps failed";
-
-    var hits = text.Split('\n')
-        .Select(l => l.Trim())
-        .Where(l => l.Length > 0)
-        .Where(l => l.Contains("roslyn", StringComparison.OrdinalIgnoreCase)
-            || l.Contains("LanguageServer", StringComparison.Ordinal))
-        .Select(l => l[..Math.Min(l.Length, 140)] + Owner(l, daemon))
-        .Take(4)
-        .ToArray();
-    return hits.Length == 0 ? "no server process" : $"server processes: {string.Join(" | ", hits)}";
-
-    static string Owner(string line, string daemon)
-    {
-        if (!OperatingSystem.IsLinux()) return " [pipe unknown: macos]";
-        var pid = line.Split(' ', StringSplitOptions.RemoveEmptyEntries) is [var head, ..] ? head : "";
-        try
-        {
-            var env = File.ReadAllText($"/proc/{pid}/environ").Split('\0');
-            var name = env.FirstOrDefault(
-                v => v.StartsWith("ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=", StringComparison.Ordinal));
-            if (name is null) return " [no pipe name in its environment]";
-            return name.EndsWith('=' + daemon, StringComparison.Ordinal) ? " [OURS]" : $" [{name}]";
-        }
-        catch (Exception ex)
-        {
-            return $" [environ unreadable: {ex.GetType().Name}]";
-        }
-    }
-}
-
-// What the kernel says is listening, which is the one answer that does not depend on the
-// probe guessing the path. A CoreFxPipe socket on a path Path.GetTempPath() does not build
-// means the connect above was asking in the wrong place; nothing listening at all means it
-// was asking the right question and the answer is no.
+// What the kernel says is listening, which is the one answer that does not depend on this
+// probe guessing a path. It is what proved the Unix reasoning in Alive above.
 static string Listening()
 {
     if (OperatingSystem.IsWindows()) return "";

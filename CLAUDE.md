@@ -383,6 +383,20 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `LspClient.StartProcess`, and `daemon-survives-captured-stdout` names a
   `CSLQ_SESSION_PIPE_NAME` of its own so the leg measures the launch it means rather than a
   session some earlier case left warm.
+- **Roslyn's daemon binds no named pipe off Windows, so a connect is not a liveness test
+  there.** `probes/stdout-capture.cs` asserts that what outlives a captured call is still
+  serving, and its Windows answer — connect to `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME` — can
+  never be answered on Unix. Measured 2026-09-11 on ubuntu and macos: the socket path
+  `$TMPDIR/CoreFxPipe_<name>` was polled every 25 ms *through* the call and never appeared, with
+  and without a session in the chain, while `ss -xl` taken at the same moment listed only
+  CoreFxPipe sockets belonging to cslq's own sessions — not one for a daemon, including the
+  gate's own long-lived daemon that `ps` showed alive and serving the suite. The name is a key
+  the daemon chain passes in its environment, not a socket it binds. So the liveness half is
+  per-platform: a connect on Windows, and off it a live process whose environment carries our
+  `NAME=value` token (`/proc/<pid>/environ` on Linux, `ps axeww` on macos). Do not "unify" it
+  back into a connect, and do not read a timeout there as a dead daemon. The *timing* half —
+  a captured call must not cost a keepalive — stays on all three platforms and is what the leg
+  is for.
 - **Nothing in the suite covers Ctrl+C, and MSYS `kill -INT` does not test it.** From Git Bash
   it terminates the process without ever raising a console control event, so the handler never
   runs and the 130 you see is bash's own signal status. To exercise the real path, launch `cslq`
