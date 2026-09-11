@@ -24,12 +24,24 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **Positions are UTF-16 code units** and the server does not negotiate otherwise. .NET string
   indices are already UTF-16, so naive indexing is correct — counting runes or UTF-8 bytes is the
   bug. `LspClient.InitializeAsync` asserts the encoding and refuses to run if it ever changes.
-- **Do not add `Console.OutputEncoding = UTF8`.** It looks required — this machine's console is
-  code page 850 — but it fixes nothing and was tried and reverted. .NET writes a real console
-  handle with `WriteConsoleW`, so the code page never applies, and redirected stdout is already
-  UTF-8. Verified both ways against the emoji fixture line. Mojibake in a PowerShell pipeline
-  (`cslq refs ... | Select-String`) is PowerShell decoding our bytes with its own
-  `[Console]::OutputEncoding`, which nothing `cslq` sets can change.
+- **Do not add `Console.OutputEncoding = UTF8`, and do not believe redirected stdout is UTF-8
+  on its own.** The rule stands and the reason is unchanged: its setter calls
+  `SetConsoleOutputCP`, which every process sharing the console sees, so one `cslq` would be
+  changing the code page under the shell and everything else attached to it. A real console
+  handle is written with `WriteConsoleW` and ignores the encoding entirely, so only the
+  *redirected* case is ever affected — which is every agent, every pipeline and the whole probe
+  suite. What this bullet used to claim about that case was an accident: redirected output goes
+  through `Console.OutputEncoding`, this machine's console is code page 850, and a code page
+  carries no emoji, ellipsis or accent — they best-fit to `??` and `.` and the answer is wrong
+  at exit 0. It never showed because the language server `cslq` launched attached to the same
+  console and set its output code page to UTF-8 *before* `Console.Out` was built lazily on
+  first use. A call answered by a session launches nothing, which is how sessions-by-default
+  turned `non-ascii-refs-symbol` and `a-long-line-is-elided-around-the-hit-column` red.
+  `Program.WriteUtf8WhenRedirected` is the fix and the place the reasoning lives: writers of
+  our own over the standard handles, redirected streams only, no global code page touched.
+  Mojibake in a PowerShell pipeline (`cslq refs ... | Select-String`) is still PowerShell
+  decoding our bytes with its own `[Console]::OutputEncoding`, which nothing `cslq` sets can
+  change.
 - **The non-ASCII probe cases are the first host-dependent ones.** They no longer go green on
   CI and red in Git Bash: since Milestone 5 item 5 `probe.yml` is a `fail-fast: false` matrix
   over `ubuntu-latest`, `windows-latest` **and** `macos-latest`, where the job runs

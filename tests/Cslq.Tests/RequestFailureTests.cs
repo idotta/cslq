@@ -63,4 +63,26 @@ public class RequestFailureTests
     {
         Assert.Null(LspClient.Describe("workspace/symbol", new InvalidOperationException("boom"), null));
     }
+
+    /// <summary>
+    /// <c>textDocument/_vs_getProjectContexts</c> is the one request that does not go through
+    /// <c>RequestAsync</c>, because an unimplemented optional extension is a label to soften
+    /// rather than a command to fail. Only that one failure may be remembered: the catch was
+    /// <c>RemoteRpcException</c>, which is also the base of <c>ConnectionLostException</c>, so
+    /// one dropped connection set the flag for the life of a session — which stops <c>diag</c>
+    /// skipping misc-file documents — and cached an empty context list for the document, which
+    /// asks every later positional request with no <c>_vs_projectContext</c>.
+    /// <para>
+    /// <c>RemoteMethodNotFoundException</c> has no public constructor, so as in the cases
+    /// above there is no positive leg here; the negatives are the regression.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void Only_an_unimplemented_extension_is_remembered()
+    {
+        Assert.False(LspClient.ContextsUnsupported(new ConnectionLostException()));
+        Assert.False(LspClient.ContextsUnsupported(
+            new RemoteInvocationException("internal error", -32603, new object())));
+        Assert.False(LspClient.ContextsUnsupported(new IOException("the pipe is being closed")));
+    }
 }

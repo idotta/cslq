@@ -125,25 +125,38 @@ internal static partial class Program
     {
         var utf8 = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-        if (Console.IsOutputRedirected)
+        // Best effort: a handle that cannot be opened is a console cslq cannot write anyway,
+        // and the encoding it would have been given is the least of that run's problems. The
+        // wrapping matters because Main's own catches are typed — a raw IOException from here
+        // would be an unhandled stack trace rather than a cslq error line.
+        try
         {
-            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true });
-        }
+            if (Console.IsOutputRedirected)
+            {
+                Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true });
+            }
 
-        if (Console.IsErrorRedirected)
+            if (Console.IsErrorRedirected)
+            {
+                Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
         }
     }
 
     private static async Task<int> Main(string[] argv)
     {
-        // First, and before anything can print: Console.Out is built on first use and keeps
-        // whatever encoding it was built with.
-        WriteUtf8WhenRedirected();
-
         try
         {
+            // First, and before anything can print: Console.Out is built on first use and
+            // keeps whatever encoding it was built with. Inside the try because it touches
+            // the standard handles, which are not guaranteed to be valid — the session is
+            // spawned with no redirects and with the inherit flag cleared, which is exactly
+            // that state — and a throw out here would be an unhandled stack trace instead of
+            // any cslq output at all.
+            WriteUtf8WhenRedirected();
             return await RunAsync(argv);
         }
         catch (UsageException ex)
@@ -769,7 +782,16 @@ internal static partial class Program
                 // directory on purpose: a file linked in with <Compile Include="../.." /> has
                 // a real context, so its real errors are still reported, which is the case
                 // directory scoping would have dropped.
-                if (all.Count == 0 && !client.ProjectContextsUnsupported) continue;
+                if (all.Count == 0 && !client.ProjectContextsUnsupported)
+                {
+                    // Given back rather than left open. A one-shot exited and closed it for
+                    // free; a session holds every document this walk touched for its whole
+                    // life, and a whole-tree walk touches the repository. It costs one
+                    // didClose against a document nothing will ask about again, and it bounds
+                    // what RefreshOpenAsync has to stat before every later request.
+                    await client.CloseAsync(uri);
+                    continue;
+                }
 
                 var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
                 findings.AddRange(Reports(uri, views));

@@ -166,6 +166,50 @@ public class SessionTests
         Assert.Contains("unknown command", response.Stderr, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Once a byte of a session's answer has reached the caller the run is committed: falling
+    /// back then reruns the query and prints the whole answer a second time, under the
+    /// fallback notice, on top of the partial one. A stdout that closes mid-write — a
+    /// <c>| head</c>-shaped consumer — is the way it happens.
+    /// </summary>
+    [Fact]
+    public void A_partial_answer_is_never_retried()
+    {
+        var response = new Session.Response(0, "the answer", "", null);
+
+        Assert.Throws<Session.DeliveryFailure>(
+            () => Session.Deliver(response, new Breaks(), TextWriter.Null));
+    }
+
+    /// <summary>
+    /// The other half, and the reason the guard is a flag rather than a blanket rethrow:
+    /// nothing written is nothing the caller has seen, so that run may still fall back.
+    /// </summary>
+    [Fact]
+    public void An_empty_answer_can_still_fall_back()
+    {
+        Assert.Equal(3, Session.Deliver(new Session.Response(3, "", "", null), new Breaks(), new Breaks()));
+    }
+
+    [Fact]
+    public void An_answer_that_writes_is_the_exit_code_it_carries()
+    {
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        Assert.Equal(1, Session.Deliver(new Session.Response(1, "out", "err", null), stdout, stderr));
+        Assert.Equal("out", stdout.ToString());
+        Assert.Equal("err", stderr.ToString());
+    }
+
+    /// <summary>A stdout the consumer has closed.</summary>
+    private sealed class Breaks : TextWriter
+    {
+        public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+
+        public override void Write(string? value) => throw new IOException("the pipe is being closed");
+    }
+
     private static Program.Options Options(string logLevel, bool daemon) => new(
         "hover", "Greet", Path.GetFullPath(Root), null, 50, 1, TimeSpan.FromSeconds(180),
         logLevel, false, false, daemon, true, null);

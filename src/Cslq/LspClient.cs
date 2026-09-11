@@ -947,7 +947,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// <c>didClose</c> at all before sessions existed, because a process that dies closes
     /// every document it opened.
     /// </summary>
-    private async Task CloseAsync(string uri)
+    public async Task CloseAsync(string uri)
     {
         _open.Remove(uri);
         _lines.Remove(uri);
@@ -1045,9 +1045,33 @@ internal sealed class LspClient : IAsyncDisposable
         (await ContextsAsync(uri, ct)) is [var first, ..] ? first.File : null;
 
     /// <summary>
+    /// Whether this server does not implement <c>_vs_getProjectContexts</c> at all — a
+    /// <c>RemoteMethodNotFoundException</c> and nothing else, because every other failure is
+    /// transient and a session would carry it forever. It is an optional VS extension, so an
+    /// empty answer means two different things — this document is compiled by no project, or
+    /// this server cannot say — and only a caller that can tell them apart may act on the
+    /// first. <c>diag</c> is that caller: it skips a document with no context, and a server
+    /// that dropped the extension would otherwise turn a whole-tree walk into
+    /// <c>no diagnostics</c>, silently.
+    /// </summary>
+    public bool ProjectContextsUnsupported { get; private set; }
+
+    /// <summary>
+    /// Whether a failed <c>_vs_getProjectContexts</c> means the server does not implement it,
+    /// which is the only failure <see cref="ProjectContextsUnsupported"/> may remember.
+    /// <c>RemoteMethodNotFoundException</c> alone: it is a sibling of
+    /// <c>RemoteInvocationException</c> rather than a subclass, and the base of both,
+    /// <c>RemoteRpcException</c>, also covers <c>ConnectionLostException</c> — which is a
+    /// blip, not a capability, and catching it here is what made one dropped connection
+    /// permanent for a whole session.
+    /// </summary>
+    internal static bool ContextsUnsupported(Exception ex) => ex is RemoteMethodNotFoundException;
+
+    /// <summary>
     /// Every project context the document is compiled in, in <see cref="Contexts.Order"/>'s
     /// order. Empty when no project compiles it, and empty rather than fatal when the server
-    /// will not answer the request at all.
+    /// does not implement the request at all — but a failed one is a failed command, not an
+    /// empty list; see <see cref="ContextsUnsupported"/>.
     /// <para>
     /// <c>textDocument/_vs_getProjectContexts</c> is a VS protocol extension rather than LSP,
     /// and the server neither advertises it nor requires a matching client capability
@@ -1058,21 +1082,11 @@ internal sealed class LspClient : IAsyncDisposable
     /// That is what this cache is: per document, per attach, never across runs.
     /// </para>
     /// </summary>
-    /// <summary>
-    /// Whether this server answered <c>_vs_getProjectContexts</c> with a failure rather than
-    /// with a list. It is an optional VS extension, so an empty answer means two different
-    /// things — this document is compiled by no project, or this server cannot say — and only
-    /// a caller that can tell them apart may act on the first. <c>diag</c> is that caller: it
-    /// skips a document with no context, and a server that dropped the extension would
-    /// otherwise turn a whole-tree walk into <c>no diagnostics</c>, silently.
-    /// </summary>
-    public bool ProjectContextsUnsupported { get; private set; }
-
     public async Task<IReadOnlyList<DocumentContext>> ContextsAsync(string uri, CancellationToken ct)
     {
         if (_contexts.TryGetValue(uri, out var cached)) return cached;
 
-        IReadOnlyList<DocumentContext> contexts = [];
+        IReadOnlyList<DocumentContext> contexts;
         try
         {
             var list = await _rpc.InvokeWithParameterObjectAsync<ProjectContextList?>(
@@ -1082,19 +1096,29 @@ internal sealed class LspClient : IAsyncDisposable
 
             contexts = Contexts.Read(list?.Contexts ?? []);
         }
-        catch (RemoteRpcException)
+        catch (Exception ex) when (ContextsUnsupported(ex))
         {
-            // RemoteRpcException, not RemoteInvocationException: a server that drops the
-            // extension answers RemoteMethodNotFoundException, which is a sibling of the
-            // latter, not a subclass -- catching the narrower type would turn a coarser label
-            // into a crash. A generator-only label is a correct if coarser answer, and a
-            // positional request with no context is what every one of them was before this.
+            // The one failure that is a property of the server rather than of this moment:
+            // it does not implement the extension, it never will within this attach, and a
+            // generator-only label is a correct if coarser answer. Cached and remembered.
             //
-            // The one call that deliberately bypasses RequestAsync, for that reason: this is
-            // an optional VS extension the server need not implement, so a failure here is a
-            // label to soften rather than a command to fail. Every other request wants the
-            // wrapper's CslqException, which this catch would swallow into a silent empty.
+            // This is also the one call that deliberately bypasses RequestAsync, for the same
+            // reason: an optional VS extension the server need not implement is a label to
+            // soften rather than a command to fail.
             ProjectContextsUnsupported = true;
+            contexts = [];
+        }
+        catch (Exception ex) when (Describe("textDocument/_vs_getProjectContexts", ex, PipeName) is { } message)
+        {
+            // Everything else is transient — a connection lost mid-request most of all — and
+            // must be neither remembered nor cached. A one-shot process retried on its next
+            // run; a session has no next run, so a single blip used to set the flag for the
+            // life of the session (which stops `diag` skipping misc-file documents, the very
+            // drift this guard exists to prevent) and cache an empty context list for the URI
+            // (which asks every later positional request with no _vs_projectContext, the
+            // multi-TFM coin flip). It fails the request instead: a walk that names the file
+            // it could not read is strictly better than one that drops it at exit 0.
+            throw new CslqException(message + (ex is ConnectionLostException ? StderrTail() : string.Empty));
         }
 
         _contexts[uri] = contexts;

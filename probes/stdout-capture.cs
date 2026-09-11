@@ -42,10 +42,20 @@ psi.Environment["ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE"] = Keepalive.ToString(
 // holding that pipe for its whole life if either link stopped clearing the inherit flag.
 // Inherited when the caller named one -- probes/run.sh does, so its EXIT trap can find the
 // session this leaves behind -- and invented otherwise, so the file runs on its own too.
-psi.Environment["CSLQ_SESSION_PIPE_NAME"] =
-    Environment.GetEnvironmentVariable("CSLQ_SESSION_PIPE_NAME") is { Length: > 0 } named
-        ? named
-        : $"cslq-capture-session-{Environment.ProcessId}";
+if (Environment.GetEnvironmentVariable("CSLQ_SESSION_PIPE_NAME") is { Length: > 0 } named)
+{
+    psi.Environment["CSLQ_SESSION_PIPE_NAME"] = named;
+}
+else
+{
+    // An invented name is a session nothing else knows about, so it also gets a keepalive
+    // short enough to clean up after itself: the default is 900 s and a standalone run would
+    // leave the process and its server behind for a quarter of an hour. Only on this path --
+    // a suite that named the pipe has its own trap and its own keepalive, and overriding it
+    // here would answer for the suite.
+    psi.Environment["CSLQ_SESSION_PIPE_NAME"] = $"cslq-capture-session-{Environment.ProcessId}";
+    psi.Environment["CSLQ_SESSION_KEEPALIVE"] = Keepalive.ToString();
+}
 
 var started = Stopwatch.StartNew();
 using var proc = Process.Start(psi)!;

@@ -52,6 +52,18 @@ internal static class Session
 
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
 
+    /// <summary>
+    /// <c>CurrentUserOnly</c> is the whole of the pipe's security, and it is needed on both
+    /// ends. The name is derived from public inputs and <see cref="LogPath"/> writes it into
+    /// the shared temp directory, so it is not a secret: without this the server's ACL lets
+    /// any local user drive a session — which runs arbitrary <c>cslq</c> commands as its
+    /// owner and reads every file under the root — and, worse, a hostile process can own the
+    /// name before we do and answer a developer's query with fabricated stdout at exit 0. On
+    /// the client it is what refuses such a squatter. Same reasoning as the
+    /// <c>CurrentUserOnly = true</c> on <see cref="StartupLock"/>'s mutex.
+    /// </summary>
+    private const PipeOptions PipeStreamOptions = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
+
     internal sealed record Request(string Version, string[] Argv);
 
     /// <summary>
@@ -155,6 +167,12 @@ internal static class Session
         {
             throw;
         }
+        catch (DeliveryFailure ex)
+        {
+            // The one failure that must not fall back: part of the answer is already on the
+            // caller's stdout. See Deliver.
+            throw new CslqException(ex.Message);
+        }
         catch (Exception)
         {
             // A session is an optimisation. Anything at all — a pipe that vanished mid-round
@@ -172,7 +190,7 @@ internal static class Session
         string pipe, Request request, int connectMs, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
-            ".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous);
+            ".", pipe, PipeDirection.InOut, PipeStreamOptions);
         try
         {
             await client.ConnectAsync(connectMs, ct);
@@ -191,10 +209,50 @@ internal static class Session
         var response = JsonSerializer.Deserialize<Response>(line, Json);
         if (response is null || response.Error is not null) return null;
 
-        Console.Out.Write(response.Stdout);
-        Console.Error.Write(response.Stderr);
+        return Deliver(response, Console.Out, Console.Error);
+    }
+
+    /// <summary>
+    /// Hands a session's answer to the caller, and marks the run committed the moment the
+    /// first byte goes out. Everything before this point falls back on failure, which is
+    /// right — nothing has been printed, so running the query here is invisible. After it the
+    /// fallback is a bug: a stdout that closed mid-write (a <c>| head</c>-shaped consumer)
+    /// was swallowed into a null, and the caller then printed the fallback notice and the
+    /// whole answer a second time on top of the partial one. A failure with nothing written
+    /// yet still falls back, which is what the <c>wrote</c> guard is for.
+    /// </summary>
+    internal static int Deliver(Response response, TextWriter stdout, TextWriter stderr)
+    {
+        var wrote = false;
+        try
+        {
+            if (response.Stdout.Length > 0)
+            {
+                wrote = true;
+                stdout.Write(response.Stdout);
+            }
+
+            if (response.Stderr.Length > 0)
+            {
+                wrote = true;
+                stderr.Write(response.Stderr);
+            }
+        }
+        catch (Exception ex) when (wrote && ex is not OperationCanceledException)
+        {
+            throw new DeliveryFailure(ex);
+        }
+
         return response.Exit;
     }
+
+    /// <summary>
+    /// A session answered and the answer could not be fully written. Its own type so that
+    /// <see cref="TryRunAsync"/>'s blanket catch — which exists to turn every other session
+    /// failure into a fallback — lets exactly this one through.
+    /// </summary>
+    internal sealed class DeliveryFailure(Exception inner)
+        : Exception($"the session's answer could not be written: {inner.Message}", inner);
 
     /// <summary>
     /// Takes the startup mutex, re-tries the connect under it — another client may have won
@@ -371,7 +429,7 @@ internal static class Session
     private static async Task<bool> ListeningAsync(string pipe, int connectMs, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
-            ".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous);
+            ".", pipe, PipeDirection.InOut, PipeStreamOptions);
         try
         {
             await client.ConnectAsync(connectMs, ct);
@@ -538,10 +596,15 @@ internal static class Session
     /// </summary>
     internal static async Task<int> ServeAsync(Serve serve, CancellationToken ct)
     {
-        var log = new StreamWriter(
+        // Synchronized because the accept loop and every in-flight request write it from
+        // threads of their own, and StreamWriter is not thread-safe. It is not cosmetic: the
+        // start line below is the only place a session's pid is recorded, Session.Pid parses
+        // it and probes/run.sh's EXIT trap kills by it, so two interleaved writes leak a
+        // session and its Roslyn server past the end of a gate run.
+        var log = TextWriter.Synchronized(new StreamWriter(
             new FileStream(LogPath(serve.Pipe), FileMode.Append, FileAccess.Write, FileShare.ReadWrite),
             Utf8)
-        { AutoFlush = true };
+        { AutoFlush = true });
         // Console is redirected too, for anything printed outside a request -- the LSP
         // client's own warnings, most of all -- but the session's own lines go to the writer
         // directly: inside a request Console is a StringWriter belonging to that request's
@@ -594,10 +657,17 @@ internal static class Session
         {
             var pipe = new NamedPipeServerStream(
                 serve.Pipe, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                PipeTransmissionMode.Byte, PipeStreamOptions);
 
             using var idle = new CancellationTokenSource();
-            if (keepalive != Timeout.InfiniteTimeSpan) idle.CancelAfter(keepalive);
+            // Armed from when the session last went idle, not from this accept: a request
+            // longer than the keepalive rolls through several of these windows, and arming
+            // each one afresh meant the window current when the request finished fired
+            // moments later with nothing in flight and took the session down. With a 60 s
+            // keepalive and a 55 s walk -- the probe suite's own shape -- the session died at
+            // t=60, five seconds after answering rather than sixty, and the next call
+            // silently paid the whole load again.
+            if (keepalive != Timeout.InfiniteTimeSpan) idle.CancelAfter(state.Remaining(keepalive));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token, stopped);
 
             try
@@ -623,6 +693,14 @@ internal static class Session
                 // process down under it -- and the client, seeing the pipe die, paid the whole
                 // load again for no visible reason.
                 if (Volatile.Read(ref state.InFlight) != 0) continue;
+
+                // A request may have finished while this window was running, which restarts
+                // the keepalive: the next iteration arms what is left of it.
+                if (keepalive != Timeout.InfiniteTimeSpan && state.Remaining(keepalive) > TimeSpan.Zero)
+                {
+                    continue;
+                }
+
                 state.Log.WriteLine($"cslq session: idle for {keepalive}; stopping.");
                 return 0;
             }
@@ -704,7 +782,8 @@ internal static class Session
         }
         finally
         {
-            Interlocked.Decrement(ref state.InFlight);
+            // The keepalive is measured from here, so the log line's "idle for" is the truth.
+            if (Interlocked.Decrement(ref state.InFlight) == 0) state.WentIdle();
         }
     }
 
@@ -865,6 +944,19 @@ internal static class Session
 
         /// <summary>Requests accepted and not yet answered. Read and written with interlocks.</summary>
         public int InFlight;
+
+        private long _idleSince = DateTime.UtcNow.Ticks;
+
+        /// <summary>Called when <see cref="InFlight"/> drops to zero: the keepalive restarts.</summary>
+        public void WentIdle() => Interlocked.Exchange(ref _idleSince, DateTime.UtcNow.Ticks);
+
+        /// <summary>What is left of <paramref name="keepalive"/>, never negative.</summary>
+        public TimeSpan Remaining(TimeSpan keepalive)
+        {
+            var idleFor = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref _idleSince));
+            var remaining = keepalive - idleFor;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
 
         /// <summary>
         /// Cancelled by a <c>--session-stop</c> request, which is what ends the accept loop.

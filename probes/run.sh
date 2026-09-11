@@ -90,6 +90,30 @@ dotnet tool restore || exit 1
 log "dotnet test"
 dotnet test --project tests/Cslq.Tests/Cslq.Tests.csproj || exit 1
 
+log "build cslq"
+dotnet build src/Cslq/Cslq.csproj -c Release --nologo -v q || exit 1
+
+CSLQ="$root/src/Cslq/bin/Release/net10.0/cslq"
+[ -x "$CSLQ" ] || CSLQ="$CSLQ.exe"
+[ -x "$CSLQ" ] || { echo "cslq not found at $CSLQ" >&2; exit 1; }
+# The same binary as a Windows path, for the legs that hand it to a .NET harness rather
+# than running it from bash.
+CSLQ_WIN="${CSLQ/#$root/$root_abs}"
+
+# Before the fixture restore, and a hard exit rather than a counted case: a platform whose
+# named pipes cannot hold the session's accept-loop shape answers every query correctly
+# through the fallback, so nothing goes red -- it just costs MutexWait + WaitForPipeAsync on
+# every single invocation, which is how a gate that passes on Windows in six minutes was
+# still running on ubuntu and macos after twenty-eight. Seconds here instead of half an hour
+# there. Its own pipe name under SESSION_PREFIX so the trap's glob covers anything it leaves.
+log "session pipe smoke"
+if dotnet run probes/pipe-smoke.cs -- "$SESSION_PREFIX-smoke" 3 "$CSLQ_WIN" fixture; then
+  echo 'PASS  session-pipe-smoke'
+else
+  echo 'FAIL  session-pipe-smoke (this platform cannot hold a session; every call would fall back)'
+  exit 1
+fi
+
 # The server restores on its own as part of its design-time build (measured: a never-restored
 # solution is ready in 7 s and has an obj/project.assets.json afterwards), so this is here to
 # make the gate deterministic rather than to make it work: restoring up front keeps the cold
@@ -128,15 +152,6 @@ log "build fixture2 generator + consumers"
 dotnet build fixture2/Alpha/Alpha.csproj -c Debug --nologo -v q || exit 1
 dotnet build fixture2/Beta/Beta.csproj -c Debug --nologo -v q || exit 1
 
-log "build cslq"
-dotnet build src/Cslq/Cslq.csproj -c Release --nologo -v q || exit 1
-
-CSLQ="$root/src/Cslq/bin/Release/net10.0/cslq"
-[ -x "$CSLQ" ] || CSLQ="$CSLQ.exe"
-[ -x "$CSLQ" ] || { echo "cslq not found at $CSLQ" >&2; exit 1; }
-# The same binary as a Windows path, for the legs that hand it to a .NET harness rather
-# than running it from bash.
-CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 
 # Readiness is asserted before any case runs: project load is async and a query fired
 # too early returns empty results, not an error, so a naive probe reports a false pass.
@@ -598,7 +613,10 @@ unset CSLQ_SESSION_PIPE_NAME
 # Both halves matter, for the reason the daemon fallback's do: exit 0 says the query was
 # still answered, and the line says cslq noticed rather than silently taking the slow path.
 log "session fallback"
-sf_pipe="cslq-probe-session-fb-$$"
+# Under the prefix like every other pipe here, so kill_sessions' glob finds it: the suffix
+# used to sit in the middle of the name, where the trap could not match it, and this leg is
+# exactly the one that spawns a session nobody is waiting on.
+sf_pipe="$SESSION_PREFIX-sessionfb"
 sf_log=$(mktemp)
 dotnet run probes/hold-mutex.cs -- "$sf_pipe" 90 start > "$sf_log" 2>&1 &
 sf_holder=$!
@@ -1066,6 +1084,17 @@ else
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
+
+# Every session this run started, in full. A session's own log is the only record of what it
+# saw -- the client that fell back reports nothing about why -- and a CI failure that says
+# only "the fallback answered" is the one thing we could not read the day the Unix penalty
+# showed up. Short by construction: a start line, and a line for anything that went wrong.
+log "session logs"
+for session_log in "$(session_dir)/cslq-session-$SESSION_PREFIX-"*.log; do
+  [ -f "$session_log" ] || continue
+  echo "--- $(basename "$session_log")"
+  sed 's/^/      | /' "$session_log"
+done
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
