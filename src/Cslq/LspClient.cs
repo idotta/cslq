@@ -399,22 +399,74 @@ internal sealed class LspClient : IAsyncDisposable
             await Task.Delay(250, ct);
         }
 
-        var fired = _endpoints.ProjectInitialized.IsCompleted ? "fired" : "never fired";
-        var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
-        // Projects nothing probed are named too: readiness says nothing about them either way,
-        // and leaving them out is the same quiet degradation the per-project set exists to end.
-        var skipped = string.Concat(
-            unprobed.Count == 0
-                ? string.Empty
-                : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.",
-            linked.Count == 0
-                ? string.Empty
-                : $" Not probed at all, having no sources of their own: {Names(linked)}.");
-        throw new CslqException(
-            $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
-            $"returned no symbols for project(s) {Names(pending)} " +
-            $"(projectInitializationComplete {fired}).{skipped}{StderrTail()}");
+        var fired = _endpoints.ProjectInitialized.IsCompleted;
+        var probed = sentinels.Count(s => s.Candidates.Count > 0);
+        // The whole load finished and not one project answered: that is what a failed
+        // design-time build looks like from here, and it is the only state worth a `dotnet`
+        // launch to explain. Anything less is an ordinary unresolvable candidate.
+        var cause = fired && Readiness.EveryProjectEmpty(pending.Count, probed)
+            ? Diagnosis.Cause(
+                await SdkAsync(ct),
+                Diagnosis.Unrestored(Root, sentinels.Where(s => !s.Explicit).Select(s => s.Directory)))
+            : null;
+
+        throw new CslqException(Readiness.Message(new Readiness.Failure(
+            timeout,
+            fired,
+            [.. pending.Select(s => new Readiness.Unresolved(Subject(s), s.Candidates))],
+            // Projects nothing probed are named too: readiness says nothing about them either
+            // way, and leaving them out is the same quiet degradation the per-project set
+            // exists to end.
+            [.. unprobed.Select(Name)],
+            [.. linked.Select(Name)],
+            cause,
+            StderrTail())));
     }
+
+    /// <summary>
+    /// <c>dotnet --version</c> with the working directory set to the root, which is where a
+    /// <c>global.json</c> pinning an absent SDK bites: it exits 155 with "A compatible .NET SDK
+    /// was not found", and nothing else cslq can see says so. Null when the launch itself could
+    /// not happen — <c>dotnet</c> off <c>PATH</c> has its own message and must not be reported
+    /// here as an SDK mismatch.
+    /// </summary>
+    private async Task<Diagnosis.Sdk?> SdkAsync(CancellationToken ct)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(ServerArgs.Command)
+            {
+                WorkingDirectory = Root,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var a in ServerArgs.Version()) psi.ArgumentList.Add(a);
+            psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
+
+            using var proc = StartProcess(psi, "ask the SDK for its version");
+            proc.StandardInput.Close();
+            var stdout = proc.StandardOutput.ReadToEndAsync(ct);
+            var stderr = proc.StandardError.ReadToEndAsync(ct);
+            await proc.WaitForExitAsync(ct);
+
+            var said = (await stderr).Trim();
+            if (said.Length == 0) said = (await stdout).Trim();
+            return new Diagnosis.Sdk(proc.ExitCode, Diagnosis.Summary(said));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>One project, or the explicit probe, named for a message.</summary>
+    private static string Name(Sentinel sentinel) => Names([sentinel]);
+
+    /// <summary>The same, in the grammatical position the failure text puts it in.</summary>
+    private static string Subject(Sentinel sentinel) =>
+        sentinel.Explicit ? Name(sentinel) : $"project {Name(sentinel)}";
 
     /// <summary>
     /// Whether any of a project's candidate sentinels resolves to a hit the project accepts —
@@ -756,8 +808,12 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     public async Task OpenAsync(string uri, CancellationToken ct)
     {
-        if (PathUri.IsGenerated(uri) || !_open.Add(uri)) return;
-        var text = await File.ReadAllTextAsync(PathUri.ToPath(uri), ct);
+        if (PathUri.IsGenerated(uri) || _open.Contains(uri)) return;
+        // Read before the set is marked, so a document refused for its encoding is not
+        // recorded as open: nothing was sent for it, and the next attempt should fail the
+        // same way rather than silently proceed as if the server had the text.
+        var text = await SourceText.ReadAsync(Root, PathUri.ToPath(uri), ct);
+        _open.Add(uri);
         await NotifyAsync(
             "textDocument/didOpen",
             new DidOpenTextDocumentParams(new TextDocumentItem(uri, "csharp", 1, text)));
@@ -786,11 +842,31 @@ internal sealed class LspClient : IAsyncDisposable
         else
         {
             var path = PathUri.ToPath(uri);
-            lines = File.Exists(path) ? await File.ReadAllLinesAsync(path, ct) : [];
+            lines = File.Exists(path) ? await TextLinesAsync(path, ct) : [];
         }
 
         _lines[uri] = lines;
         return lines;
+    }
+
+    /// <summary>
+    /// Context lines off disk, with the encoding failure answered the way this method answers
+    /// every other unreadable document: no lines, so the hit still prints with its position.
+    /// The difference is that this one is said out loud — a file decoded with substitutions
+    /// renders context rows whose columns no longer agree with the header above them, and a
+    /// silent wrong rendering is the whole of T-75.
+    /// </summary>
+    private async Task<string[]> TextLinesAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            return await SourceText.ReadLinesAsync(Root, path, ct);
+        }
+        catch (InvalidTextException ex)
+        {
+            Console.Error.WriteLine($"cslq: no context lines — {ex.Message}");
+            return [];
+        }
     }
 
     /// <summary>

@@ -36,10 +36,27 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `./probes/run.sh` under the runner's `bash` — which on Windows is Git Bash, the shell that
   raised the encoding question in the first place. `bump.yml` and `release.yml` stay
   `ubuntu-latest` alone; they gate a publish, and the platform coverage lives on every PR.
-  Also note `File.ReadAllTextAsync` substitutes U+FFFD for invalid
-  bytes rather than throwing, so a fixture file corrupted to a non-UTF-8 encoding would desync
-  the `didOpen` text from what Roslyn parses off disk — silently, except that
-  `non-ascii-refs-position` then fails.
+  The desync this bullet used to warn about is now an error rather than a silence — see
+  the next bullet.
+- **Every read of a source file goes through `SourceText`, and its decoder throws.**
+  `File.ReadAllTextAsync` substitutes U+FFFD for invalid bytes and says nothing, which desyncs
+  the `didOpen` text from what Roslyn parses off disk: measured on CP1252 bytes `E9 A0`, one
+  U+FFFD replaced two characters, every column after it was one short, and `def` at the
+  position `cslq` itself printed answered `no results` — a wrong answer at exit 0. The reader
+  is a `StreamReader` over `new UTF8Encoding(false, throwOnInvalidBytes: true)` with
+  `detectEncodingFromByteOrderMarks: true`, and that second argument is load-bearing: read the
+  bytes as UTF-8 and nothing else and every BOM'd file in a repository breaks instead —
+  `utf8-bom-is-still-read` and `utf16-bom-is-still-read` are the guards, and
+  `SourceTextTests` covers UTF-16 BE as well. The two callers answer the failure differently
+  and deliberately: a document named as the target is an exit-1 failure, while `diag`'s
+  *walk* names it on stderr and carries on, because failing a whole-tree walk over one
+  undecodable file hides every real diagnostic behind it. `DiagFiles` returns that
+  `Walked` flag for exactly this. The line number in the message comes from a second, lenient
+  decode — `DecoderFallbackException.Index` is an offset into whatever buffer the reader
+  handed the fallback, not into the file — and that second read only ever happens on a file
+  that is already failing. `fixture/encoding/` is the fixture: three files no project
+  compiles, one of them genuinely invalid, pinned byte-for-byte by a `-text` line in
+  `.gitattributes` so no checkout can normalise the thing under test.
 - **Server flags live only in `src/Cslq/ServerArgs.cs`.** The thin client forwards options it does
   not recognise straight through to the server, so a renamed flag produces no error at all. The
   probes are the only thing that catches it.
@@ -67,6 +84,23 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   notification has not fired**: that state means the load this client asked for has not
   finished, and the incomplete-answer window is inside it.
   `exhausted-candidate-fails-after-load` is the leg.
+- **The readiness failure text is assembled in `Readiness.Message`, one item per line, and
+  what it says about the notification is a sentence rather than its name.** On a 26-project
+  repository the old single line ran to 1,050 characters. Two wordings are load-bearing.
+  *Not fired* is not a fault and must never be reported as `never fired`: it is the ordinary
+  state of every attach until the reload ends, so the line says the workspace is still
+  loading and names the lever (`Raise --timeout`) — and one sentinel round is always issued
+  before that conclusion, which `--timeout 0` proves in ~0.5 s warm. *Fired with every probed
+  project empty* is the one state that earns a `dotnet` launch: it is the signature of a
+  design-time build that failed, and `Diagnosis.Cause` runs `dotnet --version` with the
+  working directory set to `--root` (a `global.json` pinning an absent SDK exits 155 there)
+  and then checks `obj/project.assets.json` per project. **On the failure path only** — the
+  run has already spent its whole timeout, whereas a pre-flight would cost a process start on
+  every invocation, the same reason the prune is kept off the start path. Do not print that
+  exit code: Windows reports the 155 a shell shows as `-2147450725`. Measured 2026-09-10 on a
+  staged root: 23 s and the cause named, against the 181.7 s and no cause testers measured.
+  `failed-design-time-build-names-the-sdk` is the leg, and it stages the tree itself because
+  the repro needs an SDK nobody has installed.
 - **A `%XX` in the root path is MSBuild's problem, not the URI layer's.** A root like
   `.../pct%20x` never becomes ready, and the obvious suspect is wrong: `new Uri(path)` escapes
   the literal `%` to `%25`, so `PathUri.FromPath` / `ToPath` round-trip it exactly (pinned by
@@ -377,7 +411,13 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   SDK's real directory (`dirname` of `readlink -f "$(command -v dotnet)"`, through `pwd -W` on
   Git Bash) leaves the apphost able to find its own runtime while `Process.Start("dotnet")`
   fails — which is the failure under test. `dotnet-off-path-reports` is the leg.
-- **The server does not restore your projects.** `dotnet restore` before starting it.
+- **The server *does* restore your projects, and the boundary is a restore that fails.**
+  Measured 2026-09-10 on a never-restored single-project solution: `cslq ready` exit 0 in 7 s,
+  with `Lib/obj/project.assets.json` on disk only afterwards. So the old flat claim — still
+  quoted in README, PACKAGE.md and SKILL.md until this batch — was wrong. Restore first
+  anyway: an unresolvable `PackageReference` makes the design-time build fail, every project
+  then loads empty, and all `cslq` can say is that it happened (the T-35 diagnosis below);
+  `dotnet restore` is what names the package.
 - **The daemon is the default, and it changes what "ready" means.** `cslq` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every
   workspace on the machine, keyed by user and server path rather than by root, and it outlives

@@ -49,9 +49,13 @@ rather not pay the download inside the first query.
 Then, in the repository you want to query:
 
 ```
-dotnet restore                 # the server does not restore your projects
+dotnet restore                 # not required, but a restore that fails is invisible without it
 cslq ready --root <dir>
 ```
+
+The server restores as part of its design-time build — measured on a never-restored solution,
+ready in 7 s. What it cannot do is tell you when that restore *failed*: every project then
+loads empty, and `dotnet restore` is what names the package.
 
 `--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
 that solution lists. A root with no solution at its top is an error, reported in about a second

@@ -260,11 +260,24 @@ query to several narrow ones.
    root's `.sln`/`.slnx` lists. A root holding *several* of them gives no basis for choosing
    one and is an error too, naming both files: point `--root` at a directory holding the one
    solution you mean.
-3. **Run `dotnet restore` first.** The language server does not restore for you, and anything
-   needing resolved references comes back empty rather than erroring.
+3. **Run `dotnet restore` first.** Not because the server will not — it does, as part of its
+   design-time build — but because a restore that *fails* is invisible from here: every
+   project loads empty and `cslq` can say only that it happened. `dotnet restore` names the
+   package.
 4. **A source generator has to be built** before its output exists. If a generated symbol is
    missing, build the analyzer project.
 5. **Check the symbol with `cslq def`** before concluding anything about `refs`.
+6. **Read the readiness failure, it names what it found.** *"the workspace is still loading …
+   Raise --timeout"* means exactly that — the load had not finished inside the deadline, and
+   the only lever is a larger `--timeout`. *"every probed project answered empty"* is the
+   other one: the solution loaded and compiled nothing, which is a failed design-time build,
+   and the `cause:` line under it names what `cslq` found — an SDK a `global.json` pins but
+   nobody has installed, or a restore that did not succeed. Fix that, not the query.
+7. **A file that is not valid UTF-8 is refused, not guessed at.** `cslq` reads sources as
+   UTF-8 (a UTF-8 or UTF-16 BOM is honoured), and a file that is neither is an error when you
+   name it and a skipped line on stderr when `diag` walks over it. Decoding it anyway would
+   move every column after the bad bytes, which is a wrong answer rather than a wrong-looking
+   one. Re-save the file as UTF-8.
 
 ## Two readiness limits that are `cslq`'s, not the user's
 

@@ -127,3 +127,8 @@
 {"name":"a-linked-file-outside-the-root-is-labelled","args":"sym OutsideLinked --root fixture","exit":"0","expect":"class  OutsideLinked|<external>/../fixture-linked/Outside.cs:12:21"}
 {"name":"an-external-row-says-so-under-json","args":"sym OutsideLinked --root fixture --json","exit":"0","expect":"'path': '<external>/../fixture-linked/Outside.cs'|'external': true|'generated': false"}
 {"name":"a-diagnostic-row-carries-external-and-no-source","args":"diag App/TypeError.cs --root fixture --json","exit":"0","expect":"'code': 'CS0029'|'external': false|'metadata': false"}
+{"name":"invalid-utf8-target-is-refused","args":"outline encoding/NotUtf8.cs --root fixture","exit":"1","expect":"is not valid UTF-8|first invalid byte on line 10|encoding/NotUtf8.cs"}
+{"name":"invalid-utf8-is-named-and-skipped-by-a-walk","args":"diag encoding --root fixture","exit":"0","expect":"cslq: skipped|is not valid UTF-8|no diagnostics"}
+{"name":"utf8-bom-is-still-read","args":"outline encoding/Utf8Bom.cs --root fixture","exit":"0","expect":"encoding/Utf8Bom.cs|class Utf8Bom"}
+{"name":"utf16-bom-is-still-read","args":"outline encoding/Utf16Bom.cs --root fixture","exit":"0","expect":"encoding/Utf16Bom.cs|class Utf16Bom"}
+{"name":"short-timeout-says-the-workspace-is-still-loading","args":"ready --root fixture --timeout 0","exit":"1","expect":"the workspace is still loading|Raise --timeout"}

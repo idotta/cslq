@@ -43,6 +43,13 @@ internal static class ServerArgs
     public static string[] Restore() => ["tool", "restore"];
 
     /// <summary>
+    /// Prints the SDK version that would be used in a directory, which is where a
+    /// <c>global.json</c> pinning an SDK nobody has installed is felt: the command exits 155
+    /// there. Asked only on the readiness failure path — see <see cref="Diagnosis"/>.
+    /// </summary>
+    public static string[] Version() => ["--version"];
+
+    /// <summary>
     /// Prints <c>global-packages: &lt;path&gt;</c>, the folder every restored pin lands in.
     /// Asked once, right after a restore, so the prune deletes from where NuGet actually
     /// extracted rather than from where <c>~/.nuget/packages</c> would be.

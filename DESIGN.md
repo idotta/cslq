@@ -374,6 +374,23 @@ has it.
 and a walk spans documents with different context sets; the per-row labels are what carry the
 fact there.
 
+A source file that is not valid UTF-8 is refused rather than decoded with substitutions. The
+decoder is strict, with byte-order-mark detection left on, so a UTF-8 BOM and a UTF-16 BOM are
+read exactly as before and only a file claiming to be UTF-8 and failing to be one is an error.
+The reason is a wrong answer rather than a wrong rendering: substitution collapses invalid
+bytes to a single U+FFFD, so the text `cslq` sends in `didOpen` and the text Roslyn parses off
+disk stop agreeing, and every column after the bad bytes is short by the difference. Measured:
+CP1252 `E9 A0` rendered a hit at column 48 where the editor showed 49, and `def` at the
+position `cslq` itself printed answered `no results` — at exit 0.
+
+Which failure it is depends on how the file was reached, and that distinction is the rule. A
+document **named as the target** is an argument that cannot be used: one `cslq: ` line and
+exit 1, like `no such file`. A document found by `diag`'s **walk** is named on stderr and
+skipped, and the walk carries on at exit 0: the caller asked about a tree, and failing the
+whole tree over one file they never named would hide every real diagnostic behind it. A hit
+that merely *renders* in such a file loses its context lines and says so, because a location
+with a correct position is still worth printing.
+
 ## Targeting a symbol by name
 
 A dotted target is verified against the **syntax tree**, one
@@ -554,6 +571,32 @@ v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
 `'and' / 'and' / 'and'`. Stripping is regex-level, not syntax-aware — parsing would mean a
 Roslyn dependency the README rejects — so several candidates are still kept as a fallback chain
 against a type the regex reads out of an excluded `#if` branch or a file no project compiles.
+
+When the wait fails, the message is **one item per line**. Its content was already right — it
+is what exposed the linked-only project class — but on a 26-project repository it arrived as a
+single 1,050-character line. A headline, then the cause if one was found, then one line per
+project that never answered with what was asked for it, then the two not-probed classes.
+
+Two of its wordings carry a decision. The notification **not** having fired is reported as
+*the workspace is still loading*, with `Raise --timeout` named as the lever, rather than as
+`projectInitializationComplete never fired`: that is the ordinary state of every attach until
+the reload ends, so naming the protocol reports normality as a fault. A sentinel round is
+always issued before the conclusion — the wait polls first and checks the deadline second — so
+even `--timeout 0` fails on a query that was really asked.
+
+The notification having fired **with every probed project empty** is the opposite: it is not
+ordinary, and it is the signature of a design-time build that failed. The server loaded the
+solution, compiled nothing, and answered every query with an honest empty list; nothing else on
+the machine is in a position to say so, because a design-time build failure is reported to the
+server and never to us. So that state, and only that state, spends a `dotnet` launch on a
+diagnosis: `dotnet --version` with the working directory set to `--root`, which exits 155 with
+"A compatible .NET SDK was not found" when a `global.json` pins an SDK that is not installed,
+and then `obj/project.assets.json` per project, whose absence after a completed load means the
+restore the server ran did not succeed. The diagnosis is on the **failure path**, never as a
+pre-flight: the run has already spent its whole `--timeout` by then, while a pre-flight would
+cost a process start on every invocation for a state almost no invocation is in. Measured
+2026-09-10 on a root pinning an absent SDK: 23 s with the cause named, against the 181.7 s and
+no cause testers measured.
 
 `diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
 Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to

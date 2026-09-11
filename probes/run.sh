@@ -40,8 +40,11 @@ dotnet tool restore || exit 1
 log "dotnet test"
 dotnet test --project tests/Cslq.Tests/Cslq.Tests.csproj || exit 1
 
-# The language server does not restore your projects. Skip this and anything needing
-# resolved references comes back empty rather than erroring -- a silent false pass.
+# The server restores on its own as part of its design-time build (measured: a never-restored
+# solution is ready in 7 s and has an obj/project.assets.json afterwards), so this is here to
+# make the gate deterministic rather than to make it work: restoring up front keeps the cold
+# `ready` below a measurement of load time, and a restore that *fails* is loud here and silent
+# there -- every project would simply load empty.
 log "dotnet restore (fixture)"
 dotnet restore fixture/Fixture.slnx --nologo -v q || exit 1
 
@@ -200,6 +203,8 @@ install_tmp=""
 ts_tmp=""
 # Set only while the exhausted-candidate leg below has its two-project tree on disk.
 ec_tmp=""
+# Set only while the failed-design-time-build leg below has its pinned-SDK tree on disk.
+gj_tmp=""
 # Set only while the restore leg below has the tool resolver cache entry moved aside. Leaving
 # it moved would make every later `dotnet tool run` on this machine re-resolve the pin.
 cache_saved=""
@@ -210,6 +215,7 @@ cleanup() {
   [ -n "$install_tmp" ] && rm -rf "$install_tmp"
   [ -n "$ts_tmp" ] && rm -rf "$ts_tmp"
   [ -n "$ec_tmp" ] && rm -rf "$ec_tmp"
+  [ -n "$gj_tmp" ] && rm -rf "$gj_tmp"
   # The restore writes a fresh entry; the saved one is the developer's, and it covers every
   # manifest on the machine rather than only this repository's.
   if [ -n "$cache_saved" ] && [ -e "$cache_saved" ]; then
@@ -527,7 +533,7 @@ namespace B;
 public class Ghost { }
 #endif
 ' > "$ec_tmp/B/Ghost.cs"
-# The server does not restore your projects.
+# Deterministic rather than required -- see the fixture restore at the top.
 dotnet restore "$ec_tmp/Two.slnx" --nologo -v q > /dev/null 2>&1
 ec_abs=$( cd "$ec_tmp" && { pwd -W 2>/dev/null || pwd; } )
 
@@ -541,7 +547,7 @@ ec_tmp=""
 ok=1
 [ "$rc" = 1 ] || ok=0
 [ "$ec_elapsed" -lt 90 ] || ok=0
-for want in "did not become ready" "Ghost" "project(s) B" "projectInitializationComplete fired"; do
+for want in "did not become ready" "Ghost" "for project B" "projectInitializationComplete fired"; do
   case "$out" in
     *"$want"*) ;;
     *) ok=0 ;;
@@ -553,6 +559,62 @@ if [ "$ok" = 1 ]; then
 else
   printf 'FAIL  %s (exit %s after %ss, wanted 1 under 90s naming B and the notification)\n' \
     "exhausted-candidate-fails-after-load" "$rc" "$ec_elapsed"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# A design-time build that cannot run at all: a `global.json` pinning an SDK nobody has
+# installed. Testers measured 181.7 s and a message naming neither global.json, the SDK nor
+# MSBuild -- the notification fires, the solution loads, and every project answers empty,
+# because MSBuild never produced a compilation. That combination is the tell-tale, and the
+# cause is one `dotnet --version` away with the working directory set to the root.
+#
+# A scripted leg for the same two reasons the legs above are: the state has to be staged and
+# torn down, and the elapsed bound is half the assertion -- the whole point is that this no
+# longer costs the full `--timeout`. `--no-daemon`, so the broken root cannot be answered out
+# of a daemon another leg has already loaded something into.
+gj_tmp=$(mktemp -d)
+mkdir -p "$gj_tmp/Lib"
+printf '{ "sdk": { "version": "9.9.900", "rollForward": "disable" } }
+' > "$gj_tmp/global.json"
+printf '<Solution>
+  <Project Path="Lib/Lib.csproj" />
+</Solution>
+' > "$gj_tmp/One.slnx"
+printf '<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+' > "$gj_tmp/Lib/Lib.csproj"
+printf 'namespace Lib;
+
+public class LibType { }
+' > "$gj_tmp/Lib/LibType.cs"
+gj_abs=$( cd "$gj_tmp" && { pwd -W 2>/dev/null || pwd; } )
+
+gj_start=$(date +%s)
+out=$("$CSLQ" ready --root "$gj_abs" --no-daemon --timeout 150 2>&1)
+rc=$?
+gj_elapsed=$(( $(date +%s) - gj_start ))
+rm -rf "$gj_tmp"
+gj_tmp=""
+
+ok=1
+[ "$rc" = 1 ] || ok=0
+[ "$gj_elapsed" -lt 90 ] || ok=0
+for want in "every probed project answered empty" "cause: the .NET SDK cannot run in this root" "9.9.900" "global.json"; do
+  case "$out" in
+    *"$want"*) ;;
+    *) ok=0 ;;
+  esac
+done
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%ss)\n' "failed-design-time-build-names-the-sdk" "$gj_elapsed"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 under 90s naming the SDK and global.json)\n' \
+    "failed-design-time-build-names-the-sdk" "$rc" "$gj_elapsed"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi

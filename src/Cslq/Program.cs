@@ -614,7 +614,7 @@ internal static partial class Program
     private static async Task<int> DiagAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var files = DiagFiles(opts);
+        var (files, walked) = DiagFiles(opts);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -624,11 +624,22 @@ internal static partial class Program
         ContextNote? note = null;
         foreach (var uri in files.Select(PathUri.FromPath))
         {
-            var (all, asked) = await ContextsAsync(client, opts, uri, ct);
-            if (files.Count == 1) note = Union(all, asked);
+            try
+            {
+                var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+                if (files.Count == 1) note = Union(all, asked);
 
-            var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
-            findings.AddRange(Reports(uri, views));
+                var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
+                findings.AddRange(Reports(uri, views));
+            }
+            catch (InvalidTextException ex) when (walked)
+            {
+                // A walk names the file and carries on. Failing the whole tree because one
+                // file in it is not UTF-8 would hide every real diagnostic behind a file the
+                // caller never asked about; a file named as the target is the other case and
+                // is not caught here, so `diag Bad.cs` is an ordinary exit-1 failure.
+                Console.Error.WriteLine($"cslq: skipped — {ex.Message}");
+            }
         }
 
         if (opts.ErrorsOnly)
@@ -682,15 +693,21 @@ internal static partial class Program
     /// errors at exit 0. Per file, not <c>workspace/diagnostic</c>: that endpoint answers but
     /// returns zero reports, which is what <c>workspaceDiagnostics: false</c> in its dynamic
     /// registration means. Verified against 5.12.0-1.26426.8.
+    /// <para>
+    /// <c>Walked</c> says which of the two the caller got, because a file that cannot be
+    /// decoded is answered differently either side of that line: named as the target it is a
+    /// failure, found by a walk it is skipped with a line on stderr. A directory holding one
+    /// file is still a walk — what matters is whether the caller asked for that document.
+    /// </para>
     /// </summary>
-    private static IReadOnlyList<string> DiagFiles(Options opts)
+    private static (IReadOnlyList<string> Files, bool Walked) DiagFiles(Options opts)
     {
-        if (opts.Argument is not { } target) return SourceFiles(opts.Root).ToList();
+        if (opts.Argument is not { } target) return (SourceFiles(opts.Root).ToList(), true);
 
         var full = CheckUnderRoot(opts.Root, target);
-        if (Directory.Exists(full)) return SourceFiles(full).ToList();
+        if (Directory.Exists(full)) return (SourceFiles(full).ToList(), true);
         if (!File.Exists(full)) throw new CslqException($"no such file or directory: {target}");
-        return [CheckDocument(opts.Root, target)];
+        return ([CheckDocument(opts.Root, target)], false);
     }
 
     /// <summary>
