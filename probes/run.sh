@@ -107,7 +107,7 @@ CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 # still running on ubuntu and macos after twenty-eight. Seconds here instead of half an hour
 # there. Its own pipe name under SESSION_PREFIX so the trap's glob covers anything it leaves.
 log "session pipe smoke"
-if dotnet run probes/pipe-smoke.cs -- "$SESSION_PREFIX-smoke" 3 "$CSLQ_WIN" fixture; then
+if dotnet run probes/pipe-smoke.cs -- "$SESSION_PREFIX-smoke" 3 "$CSLQ_WIN" fixture probes/roots/toplevel; then
   echo 'PASS  session-pipe-smoke'
 else
   echo 'FAIL  session-pipe-smoke (this platform cannot hold a session; every call would fall back)'
@@ -460,6 +460,31 @@ else
   fail=$((fail + 1))
 fi
 rm -f "$sn_log" "$sn_first_log"
+
+# The comparison the whole session exists to win, measured on every platform the gate runs on
+# rather than inferred from this one. It was never measured off Windows, and for a day it was
+# false there: on ubuntu and macos every call was reset into the fallback, so a session cost a
+# spawn and two timeouts and then did the work anyway. The median of three because a single
+# warm call on a loaded runner is noise; the margin is ~20x, so this is not a tight bound.
+log "session vs --no-session"
+median3() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" | sort -n | sed -n 2p; }
+time_hover() {
+  th_start=$(now_ms)
+  # shellcheck disable=SC2086 -- $1 is an optional flag, deliberately word-split.
+  "$CSLQ" hover Greet --root fixture $1 > /dev/null 2>&1
+  printf '%s' "$(( $(now_ms) - th_start ))"
+}
+sv_session=$(median3 "$(time_hover "")" "$(time_hover "")" "$(time_hover "")")
+sv_none=$(median3 "$(time_hover --no-session)" "$(time_hover --no-session)" "$(time_hover --no-session)")
+printf 'hover Greet: session %sms vs --no-session %sms (median of 3)\n' "$sv_session" "$sv_none"
+if [ "$sv_session" -lt "$sv_none" ]; then
+  printf 'PASS  %s (%sms vs %sms)\n' "session-beats-no-session" "$sv_session" "$sv_none"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (%sms vs %sms: the session costs more than it saves on this platform)\n'     "session-beats-no-session" "$sv_session" "$sv_none"
+  sed 's/^/      | /' "$(session_log_path "$CSLQ_SESSION_PIPE_NAME")" 2>/dev/null
+  fail=$((fail + 1))
+fi
 
 # A session must survive a client that hangs up. The liveness probe used to prove a session
 # was up by connecting and dropping the connection, and WaitForPipeAsync did that up to twenty

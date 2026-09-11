@@ -30,6 +30,9 @@ var rounds = args.Length > 1 ? int.Parse(args[1]) : 3;
 // fails, and say nothing.
 var cslq = args.Length > 2 ? args[2] : null;
 var serveRoot = args.Length > 3 ? Path.GetFullPath(args[3]) : Environment.CurrentDirectory;
+// A root whose `ready` fails in Sentinels, before any server is started: the cheapest
+// command that still makes a whole round trip through a session. 95 ms warm, measured.
+var hammerRoot = args.Length > 4 ? Path.GetFullPath(args[4]) : serveRoot;
 var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
 // Where .NET puts the socket file off Windows. Reported rather than asserted: if the
@@ -68,8 +71,77 @@ Console.WriteLine(
         ? $"pipe smoke: {rounds * 2} of {rounds * 2} connections answered on {pipe}"
         : $"pipe smoke: {failures} of {rounds * 2} connections failed on {pipe}");
 
-if (cslq is not null) failures += await ServedAsync();
+if (cslq is not null)
+{
+    failures += await ServedAsync();
+    failures += await HammeredAsync();
+}
+
 return failures == 0 ? 0 : 1;
+
+// The sequence that actually broke, driven through the real client rather than through this
+// file's own sockets: connect, ping, hang up, and immediately ask a question. The hang-up is
+// what unlinks and re-binds the socket path on Unix, and the request behind it used to be
+// reset -- answered correctly, but by the fallback, at the cost of the whole load. So the
+// assertion is not "the query worked" (it always did) but "no fallback notice", which can
+// only hold if the client survived the window. A leg that passed because the timing missed
+// the window would be worth nothing, so it is hammered.
+async Task<int> HammeredAsync()
+{
+    const int Hammers = 10;
+    var hammered = $"{pipe}-hammer";
+    var log = Path.Combine(Path.GetTempPath(), $"cslq-session-{hammered}.log");
+
+    var (exit, first) = await AskAsync(hammered);
+    if (first.Contains("session unavailable", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine($"hammer: the first call could not reach a session at all: {first}");
+        Dump(log);
+        return 1;
+    }
+
+    var bad = 0;
+    for (var i = 1; i <= Hammers; i++)
+    {
+        // Ping and hang up, exactly as the client's own liveness poll used to.
+        await ServeRoundTripAsync(hammered, quiet: true);
+
+        var (code, output) = await AskAsync(hammered);
+        if (code == exit && !output.Contains("session unavailable", StringComparison.Ordinal)) continue;
+
+        Console.Error.WriteLine($"hammer {i} of {Hammers}: exit {code}, {output.Trim()}");
+        bad++;
+    }
+
+    await ServeRoundTripAsync(hammered, quiet: true, argv: "\"--session-stop\"");
+    if (bad > 0) Dump(log);
+    Console.WriteLine(
+        bad == 0
+            ? $"pipe smoke: {Hammers} of {Hammers} requests survived a probe-then-send on {hammered}"
+            : $"pipe smoke: {bad} of {Hammers} requests fell back after a probe-then-send on {hammered}");
+    return bad;
+}
+
+// One real cslq run against its own session, output captured.
+async Task<(int Exit, string Output)> AskAsync(string name)
+{
+    var psi = new ProcessStartInfo(cslq!)
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
+    foreach (var a in new[] { "ready", "--root", hammerRoot }) psi.ArgumentList.Add(a);
+    psi.Environment["CSLQ_SESSION_PIPE_NAME"] = name;
+
+    using var proc = Process.Start(psi)!;
+    var stdout = proc.StandardOutput.ReadToEndAsync();
+    var stderr = proc.StandardError.ReadToEndAsync();
+    using var cap = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+    await proc.WaitForExitAsync(cap.Token);
+    return (proc.ExitCode, (await stdout + await stderr).ReplaceLineEndings(" "));
+}
 
 // The same question asked of a real session, across a process boundary. Everything here is
 // answered by Session.ServeOneAsync before it touches a workspace -- an empty argv is the

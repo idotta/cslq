@@ -160,8 +160,15 @@ internal static class Session
 
         try
         {
-            if (await SendAsync(pipe, request, FastConnectMs, ct) is { } answered) return answered;
-            return await StartAndSendAsync(pipe, opts, request, ct);
+            // One attempt, no retry: on this path there may genuinely be no session, and the
+            // answer to that is to start one rather than to keep asking.
+            var sent = await SendAsync(pipe, request, TimeSpan.Zero, FastConnectMs, null, null, ct);
+            return sent.Reached switch
+            {
+                Reached.Answered => sent.Exit,
+                Reached.Declined => null,
+                _ => await StartAndSendAsync(pipe, opts, request, ct),
+            };
         }
         catch (OperationCanceledException)
         {
@@ -183,11 +190,67 @@ internal static class Session
     }
 
     /// <summary>
-    /// One round trip against a session that may not exist. Null when there is nothing
-    /// listening, or when the session declined the request.
+    /// What one round trip came to. <c>Declined</c> is the session refusing the request — a
+    /// version it does not match, a root it was not started for — and is final: another
+    /// attempt gets the same answer and another session cannot be started on a pipe that one
+    /// already holds. <c>Retry</c> is the transport, and on Unix that is not a rare state;
+    /// see <see cref="SendAsync"/>.
     /// </summary>
-    private static async Task<int?> SendAsync(
-        string pipe, Request request, int connectMs, CancellationToken ct)
+    private enum Reached
+    {
+        Answered,
+        Declined,
+        Retry,
+    }
+
+    private readonly record struct Sent(Reached Reached, int Exit);
+
+    /// <summary>
+    /// The real request, retried over a bounded window while the transport says "not yet".
+    /// <para>
+    /// On Unix a named pipe is a Unix domain socket file, and each accepted connection's
+    /// disposal unlinks <c>$TMPDIR/CoreFxPipe_&lt;name&gt;</c> before the accept loop's next
+    /// instance re-binds it. A client arriving inside that window is reset rather than
+    /// queued, so <c>ECONNRESET</c>, <c>ENOENT</c> and a refused connect all mean "in a
+    /// moment" here, not "there is nothing there". On Windows the name is a reference-counted
+    /// kernel object and none of this is observable, which is why it was green here for a day
+    /// while every ubuntu and macos call fell back and paid the whole load — measured by
+    /// <c>probes/pipe-smoke.cs</c>, which reproduced it in 52 s.
+    /// </para>
+    /// <para>
+    /// A window of zero is a single attempt. <paramref name="connected"/> runs the moment the
+    /// connection is established, which is how the startup lock is released before the cold
+    /// load rather than after it, and <paramref name="giveUp"/> is what stops the wait when
+    /// the session we spawned has died instead of coming up.
+    /// </para>
+    /// </summary>
+    private static async Task<Sent> SendAsync(
+        string pipe,
+        Request request,
+        TimeSpan window,
+        int connectMs,
+        Action? connected,
+        Func<bool>? giveUp,
+        CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + window;
+        while (true)
+        {
+            var sent = await SendOnceAsync(pipe, request, connectMs, connected, ct);
+            if (sent.Reached != Reached.Retry) return sent;
+            if (giveUp?.Invoke() == true || DateTime.UtcNow >= deadline) return sent;
+            await Task.Delay(RetryDelayMs, ct);
+        }
+    }
+
+    /// <summary>
+    /// One round trip against a session that may not exist. Everything up to and including
+    /// the response being parsed is retryable, because none of it has reached the caller;
+    /// <see cref="Deliver"/> is deliberately outside the catch, since past it the run is
+    /// committed and a <see cref="DeliveryFailure"/> must escape rather than be retried.
+    /// </summary>
+    private static async Task<Sent> SendOnceAsync(
+        string pipe, Request request, int connectMs, Action? connected, CancellationToken ct)
     {
         using var client = new NamedPipeClientStream(
             ".", pipe, PipeDirection.InOut, PipeStreamOptions);
@@ -197,19 +260,32 @@ internal static class Session
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null;
+            return new Sent(Reached.Retry, 0);
         }
 
-        var writer = new StreamWriter(client, Utf8) { AutoFlush = true, NewLine = "\n" };
-        var reader = new StreamReader(client, Utf8);
+        connected?.Invoke();
 
-        await writer.WriteLineAsync(JsonSerializer.Serialize(request, Json).AsMemory(), ct);
-        if (await reader.ReadLineAsync(ct) is not { } line) return null;
+        Response? response;
+        try
+        {
+            var writer = new StreamWriter(client, Utf8) { AutoFlush = true, NewLine = "\n" };
+            var reader = new StreamReader(client, Utf8);
 
-        var response = JsonSerializer.Deserialize<Response>(line, Json);
-        if (response is null || response.Error is not null) return null;
+            await writer.WriteLineAsync(JsonSerializer.Serialize(request, Json).AsMemory(), ct);
+            if (await reader.ReadLineAsync(ct) is not { } line) return new Sent(Reached.Retry, 0);
+            response = JsonSerializer.Deserialize<Response>(line, Json);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The connection broke while the answer was being asked for. Nothing has been
+            // printed, so this is the same "in a moment" as a refused connect.
+            return new Sent(Reached.Retry, 0);
+        }
 
-        return Deliver(response, Console.Out, Console.Error);
+        if (response is null) return new Sent(Reached.Retry, 0);
+        if (response.Error is not null) return new Sent(Reached.Declined, 0);
+
+        return new Sent(Reached.Answered, Deliver(response, Console.Out, Console.Error));
     }
 
     /// <summary>
@@ -267,18 +343,23 @@ internal static class Session
         using var start = await StartupLock.AcquireAsync($@"Global\{pipe}.start", MutexWait, ct);
         if (start is null) return null;
 
-        // Patiently, unlike the probe on the fast path: the lock is already paid for, and a
-        // live session that is merely slow to accept -- a loaded machine, a request mid-flight
-        // -- read as absent twice and had a *second* session spawned beside it, each with its
-        // own Roslyn attach and neither reporting the other.
-        if (!await ListeningAsync(pipe, PatientConnectMs, ct))
-        {
-            using var session = Spawn(pipe, opts);
-            if (!await WaitForPipeAsync(pipe, session, ct)) return null;
-        }
+        // Patiently, unlike the single attempt on the fast path: the lock is already paid for,
+        // and a live session that is merely slow to accept -- a loaded machine, a request
+        // mid-flight, a Unix socket path between two binds -- read as absent twice and had a
+        // *second* session spawned beside it, each with its own Roslyn attach and neither
+        // reporting the other.
+        var sent = await SendAsync(pipe, request, RetryWindow, FastConnectMs, null, null, ct);
+        if (sent.Reached == Reached.Answered) return sent.Exit;
+        if (sent.Reached == Reached.Declined) return null;
 
-        start.Dispose();
-        return await SendAsync(pipe, request, PatientConnectMs, ct);
+        // The spawned session binds its pipe before it loads anything, so the first attempt
+        // that connects is also the one that carries the query. There is no separate liveness
+        // probe any more: that throwaway connection was disposed straight into the window its
+        // own disposal opened, and the request behind it was reset.
+        using var session = Spawn(pipe, opts);
+        sent = await SendAsync(
+            pipe, request, SpawnWindow, FastConnectMs, start.Dispose, () => session.HasExited, ct);
+        return sent.Reached == Reached.Answered ? sent.Exit : null;
     }
 
     /// <summary>
@@ -297,6 +378,23 @@ internal static class Session
     private const int FastConnectMs = 300;
 
     private const int PatientConnectMs = 2000;
+
+    /// <summary>
+    /// How long a request keeps asking while the transport says "not yet", and how long it
+    /// waits between attempts. Short: the states it covers are a socket path being re-bound
+    /// and a session a millisecond from accepting, not a workspace loading — a session that
+    /// has accepted holds the connection for as long as the query takes.
+    /// </summary>
+    private static readonly TimeSpan RetryWindow = TimeSpan.FromSeconds(2);
+
+    private const int RetryDelayMs = 25;
+
+    /// <summary>
+    /// How long to keep trying a session we have just started. It binds its pipe before it
+    /// loads anything, so this is generous for what it covers; the give-up that matters is
+    /// the process exiting, which is answered the moment it happens.
+    /// </summary>
+    private static readonly TimeSpan SpawnWindow = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// A named mutex has thread affinity — <see cref="Mutex.ReleaseMutex"/> has to run on the
@@ -480,8 +578,10 @@ internal static class Session
         var pipe = PipeName(opts);
         try
         {
-            return await SendAsync(pipe, new Request(Build.Version, [StopArgv]), PatientConnectMs, ct)
-                is not null;
+            var sent = await SendAsync(
+                pipe, new Request(Build.Version, [StopArgv]), RetryWindow, PatientConnectMs,
+                null, null, ct);
+            return sent.Reached == Reached.Answered;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -708,7 +808,7 @@ internal static class Session
             {
                 // No single connection may end the session. A client that hangs up
                 // mid-handshake -- which the liveness probe below used to do, twenty times a
-                // second, from WaitForPipeAsync -- races WaitForConnectionAsync and the accept
+                // second, from the poll since collapsed into the request itself -- races WaitForConnectionAsync and the accept
                 // gets `IOException: the pipe is being closed` instead of a connection. That
                 // used to be rethrown, so the process logged `stopped:` and exited, the caller
                 // fell back, and the next call paid the whole load again: 4.5 s and three
