@@ -545,6 +545,24 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   138-188 ms against 2.2-2.4 s for the same call under `--no-session`. **The cold first call
   costs more than a one-shot did**, and that is the trade; say both numbers wherever one
   appears.
+- **A latency number is a claim about one platform, and a working fallback will hide a broken
+  one behind a green gate.** The session shipped through four rounds measured only on Windows
+  while it was a ~62 s *penalty* per call on Linux and macOS: the pipe was unreachable there,
+  every query fell back to loading the workspace in-process, and every leg still passed, because
+  falling back is supposed to answer correctly. The gate said 163 of 163 and CI said nothing —
+  the Unix jobs were merely slow, which reads as a busy runner. Two rules came out of it, and
+  both are cheap:
+  - **Quote no performance figure that the gate does not measure on every platform it runs on.**
+    `session-beats-no-session` times a warm `hover` with and against `--no-session` on all three
+    and fails when a session costs more than it saves, which is the assertion that would have
+    caught this on day one. A README table is not a measurement.
+  - **A primitive whose implementation differs per platform needs its own cheap leg, and it has
+    to run early.** `.NET` emulates named pipes on Unix with a socket file and Windows with a
+    refcounted kernel object; `probes/pipe-smoke.cs` exercises the accept loop and a real
+    `--serve` spawn before the fixture restore, and hard-exits. That moved a 30-minute
+    mystery — the suite crawling case by case with no leg red — to a 52-second diagnosis
+    naming the syscall. Anything platform-divergent below the LSP layer earns the same
+    treatment: prove the primitive first, cheaply, and fail loudly.
 - **A named mutex has thread affinity, and `await` is what breaks it.** `Mutex.ReleaseMutex`
   has to run on the thread that took it, and a continuation resumes wherever the pool puts it —
   so the release threw `ApplicationException` out of the `finally`, and a session that had
