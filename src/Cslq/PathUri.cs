@@ -107,6 +107,24 @@ internal static class PathUri
     }
 
     /// <summary>
+    /// Whether a location is an ordinary file that sits <em>outside</em> the workspace root —
+    /// the shape a <c>&lt;Compile Include="../../Elsewhere/File.cs" /&gt;</c> produces, and the
+    /// one the output rules had no label for. Roslyn indexes such a file fully, so it turns up
+    /// in <c>sym</c>, <c>refs</c> and <c>diag</c> like any other, and
+    /// <see cref="Relative(string, string)"/> hands back the machine-absolute path the moment
+    /// the relative one would start with <c>..</c>.
+    /// <para>
+    /// Generated and decompiled URIs are excluded, and the decompiled one is the reason the
+    /// order of the checks in <see cref="Display(string, string, string?, string?)"/> matters:
+    /// a decompiled document is a real file under the temp directory, so it is outside the
+    /// root by this test too and would take the <c>&lt;external&gt;/</c> label — with the
+    /// machine-absolute temp path inside it — if it were asked first.
+    /// </para>
+    /// </summary>
+    public static bool IsExternal(string root, string uri) =>
+        !IsGenerated(uri) && !IsDecompiled(uri) && !IsUnder(root, ToPath(uri));
+
+    /// <summary>
     /// Whether any of <paramref name="uris"/> is an ordinary file inside
     /// <paramref name="root"/>. That is the discriminator between the two decompiled cases: a
     /// type Roslyn answered for out of an assembly <em>and</em> declares in a workspace file is
@@ -133,7 +151,13 @@ internal static class PathUri
                target.StartsWith(full + Path.DirectorySeparatorChar, PathComparison);
     }
 
-    /// <summary>Agents want repo-relative forward-slash paths, not absolute paths or URIs.</summary>
+    /// <summary>
+    /// Agents want repo-relative forward-slash paths, not absolute paths or URIs. The
+    /// absolute fallback for a path outside the root is not a display form and no location
+    /// reaches it any more — <see cref="Display(string, string, string?, string?)"/> routes
+    /// those to <c>&lt;external&gt;/</c>. It survives for the callers that pass a path known
+    /// to be inside the root and want no label at all: a project directory, a sentinel's.
+    /// </summary>
     public static string Relative(string root, string path)
     {
         var rel = Path.GetRelativePath(root, path);
@@ -141,7 +165,12 @@ internal static class PathUri
     }
 
     /// <summary>
-    /// The display form for any location. A generated URI carries an authority guid and a
+    /// The display form for any location, which is one of four things: a root-relative path,
+    /// <c>&lt;external&gt;/</c> for an ordinary file outside the root,
+    /// <c>&lt;metadata&gt;/</c> for a decompiled document and <c>&lt;generated&gt;/</c> for a
+    /// source-generated one. The order of the checks is load-bearing: a decompiled document
+    /// is a real file under the temp directory, so the external test would claim it first and
+    /// put a machine-absolute path in the label. A generated URI carries an authority guid and a
     /// documentId that are both regenerated on every workspace load, plus a machine-absolute
     /// assemblyPath, so the label is built only from the fields that are stable across runs
     /// and machines. The angle brackets keep it from being mistaken for a readable file.
@@ -173,7 +202,11 @@ internal static class PathUri
             return $"<metadata>/{assembly ?? "?"}/{MetadataTypeName(uri)}.cs";
         }
 
-        if (!IsGenerated(uri)) return Relative(root, ToPath(uri));
+        if (!IsGenerated(uri))
+        {
+            var path = ToPath(uri);
+            return IsUnder(root, path) ? Relative(root, path) : $"<external>/{Outside(root, path)}";
+        }
 
         var query = Query(uri);
         var generator = query.GetValueOrDefault("assemblyName", "?");
@@ -198,6 +231,18 @@ internal static class PathUri
         if (IsGenerated(uri)) return Display(root, uri, await documents.Project(uri));
         return Display(root, uri);
     }
+
+    /// <summary>
+    /// What follows <c>&lt;external&gt;/</c>: the path relative to the root, <c>..</c>
+    /// segments and all, so the label still says where the file is and a caller can open it.
+    /// A file on another volume has no relative form at all —
+    /// <see cref="Path.GetRelativePath(string, string)"/> answers with the absolute path —
+    /// and that is kept rather than replaced by something shorter and useless: there is
+    /// nothing else that names the file, and the label already says it is not in the
+    /// workspace.
+    /// </summary>
+    private static string Outside(string root, string path) =>
+        Path.GetRelativePath(root, path).Replace('\\', '/');
 
     private static Dictionary<string, string> Query(string uri)
     {

@@ -43,6 +43,13 @@ internal static class ServerArgs
     public static string[] Restore() => ["tool", "restore"];
 
     /// <summary>
+    /// Prints the SDK version that would be used in a directory, which is where a
+    /// <c>global.json</c> pinning an SDK nobody has installed is felt: the command exits 155
+    /// there. Asked only on the readiness failure path — see <see cref="Diagnosis"/>.
+    /// </summary>
+    public static string[] Version() => ["--version"];
+
+    /// <summary>
     /// Prints <c>global-packages: &lt;path&gt;</c>, the folder every restored pin lands in.
     /// Asked once, right after a restore, so the prune deletes from where NuGet actually
     /// extracted rather than from where <c>~/.nuget/packages</c> would be.
@@ -72,4 +79,13 @@ internal static class ServerArgs
     }
 }
 
-internal sealed class CslqException(string message) : Exception(message);
+internal class CslqException(string message) : Exception(message);
+
+/// <summary>
+/// The invocation itself could not be understood — an unknown command or option, an option
+/// with no value or a value outside the set it names, an argument the command does not take.
+/// Exit 2 rather than 1, and the usage block follows the message on stderr: the caller has to
+/// fix the command line, not the workspace. Everything the parser understands and the query
+/// then fails on is an ordinary <see cref="CslqException"/> at exit 1.
+/// </summary>
+internal sealed class UsageException(string message) : CslqException(message);

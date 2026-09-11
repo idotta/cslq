@@ -40,7 +40,7 @@
 {"name":"sym-truncates","args":"sym Area --root fixture --max 2","exit":"0","expect":"method  Area|... 1 more (use --max 3 to see all)"}
 {"name":"sym-truncates-by-relevance","args":"sym Volume --root fixture --max 1","exit":"0","expect":"Core/Volume.cs:9:21|... 1 more (use --max 2 to see all)"}
 {"name":"sym-no-match-fails","args":"sym NoSuchThing --root fixture","exit":"1","expect":"no results"}
-{"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"1","expect":"cslq: --max needs an integer"}
+{"name":"bad-max-reports","args":"refs Greet --root fixture --max nope","exit":"2","expect":"cslq: --max needs an integer|usage:"}
 {"name":"zero-position-reports","args":"refs Core/Greeter.cs:0:1 --root fixture","exit":"1","expect":"cslq: line is one-based: 0"}
 {"name":"overflow-position-reports","args":"refs Core/Greeter.cs:99999999999:1 --root fixture","exit":"1","expect":"cslq: line out of range"}
 {"name":"line-past-eof-fails","args":"refs App/Program.cs:99:1 --root fixture","exit":"1","expect":"line out of range: 99 (App/Program.cs has 13 lines)"}
@@ -54,7 +54,7 @@
 {"name":"non-project-file-outlines","args":"outline Ambient/Stray.cs --root fixture","exit":"0","expect":"public sealed class Stray"}
 {"name":"non-project-file-no-diagnostics","args":"diag --root fixture --errors-only --json","exit":"0","expect":"'count': 1|'path': 'App/TypeError.cs'"}
 {"name":"no-solution-root-reports","args":"ready --root skills --timeout 5","exit":"1","expect":"cslq: no .sln or .slnx at|--root must be the directory holding"}
-{"name":"unknown-command-reports","args":"bogus --root skills","exit":"1","expect":"cslq: unknown command|usage:"}
+{"name":"unknown-command-reports","args":"bogus --root skills","exit":"2","expect":"cslq: unknown command|usage:"}
 {"name":"self-hosted-ready","args":"ready --root . --timeout 120","exit":"0","expect":"ready"}
 {"name":"self-hosted-refs","args":"refs InferSentinels --root . --max 10","exit":"0","expect":"src/Cslq/Program.cs:|tests/Cslq.Tests/"}
 {"name":"generated-label-names-consuming-project","args":"sym Stamp --root fixture2","exit":"0","expect":"<generated>/Alpha/Gen2/Fixture2.Gen.StampGenerator/Stamp.g.cs:3|<generated>/Beta/Gen2/Fixture2.Gen.StampGenerator/Stamp.g.cs:3"}
@@ -110,3 +110,31 @@
 {"name":"multi-tfm-impl-answers-in-either-branch","args":"impl Only10 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:4:21|public sealed class Only10|merged from 2 contexts"}
 {"name":"multi-tfm-refs-folds-a-hit-both-contexts-report","args":"refs Both --root fixture2 --json","exit":"0","expect":"'count': 1|'path': 'Multi/Both.cs'|'line': 8|'contexts': 2"}
 {"name":"multi-tfm-dotted-target-reads-every-branch","args":"def Fixture2.Multi.Only9 --root fixture2","exit":"0","expect":"Multi/Conditional.cs:11:21|public sealed class Only9"}
+{"name":"json-error-is-an-object-and-a-stderr-line","args":"refs NoSuch --root fixture --json","exit":"1","expect":"'error': 'no symbol matched|cslq: no symbol matched"}
+{"name":"json-empty-answer-keeps-the-envelope","args":"def App/Program.cs:12:1 --root fixture --json","exit":"1","expect":"'count': 0|'results': []"}
+{"name":"options-before-the-command-are-accepted","args":"--root fixture --max 5 def Greet","exit":"0","expect":"Core/Greeter.cs:5|public static string Greet(string name)"}
+{"name":"options-around-the-positionals-are-accepted","args":"refs --root fixture Greet --json","exit":"0","expect":"'count': 2|'path': 'App/Program.cs'"}
+{"name":"ready-rejects-a-stray-positional","args":"ready Greet --root fixture","exit":"2","expect":"cslq: ready takes no argument; got |(did you mean --sentinel Greet?)|usage:"}
+{"name":"tfm-rejected-where-there-is-no-context-to-choose","args":"sym Only10 --root fixture2 --tfm net9.0","exit":"2","expect":"cslq: --tfm does not apply to sym|refs, def, impl, hover, outline, diag, project"}
+{"name":"unknown-log-level-is-rejected-client-side","args":"refs Greet --root fixture --log-level bogus","exit":"2","expect":"cslq: unknown --log-level |expected one of Trace, Debug, Information, Warning, Error, Critical, None|usage:"}
+{"name":"crowded-line-outlines-each-declarations-own-span","args":"outline Core/Kinds.cs --root fixture --max 6","exit":"0","expect":"13:13|13:22|13:27|13:34|Red|Green|Blue"}
+{"name":"uncrowded-outline-rows-keep-the-bare-line-number","args":"outline Core/Greeter.cs --root fixture","exit":"0","expect":"public static class Greeter|public static string Greet(string name)"}
+{"name":"outline-json-names-a-constructor","args":"outline Core/Widget.cs --root fixture --json","exit":"0","expect":"'kind': 'constructor'|'name': 'Widget()'|'name': 'Gadget(int)'"}
+{"name":"sym-names-a-constructor","args":"sym Gadget --root fixture","exit":"0","expect":"constructor  Gadget|Core/Widget.cs:22:12|class        Gadget"}
+{"name":"a-delegate-is-a-method-in-sym-as-it-is-in-outline","args":"sym Measure --root fixture --json","exit":"0","expect":"'name': 'Measure'|'kind': 'method'|'path': 'Core/Kinds.cs'"}
+{"name":"a-long-line-is-elided-around-the-hit-column","args":"refs Marker --root fixture --context 0","exit":"0","expect":"Core/Kinds.cs:52:439|…AAA|+ Marker() + 'ZZZZ';"}
+{"name":"a-long-line-is-kept-whole-under-json","args":"refs Marker --root fixture --json","exit":"0","expect":"'column': 439|public static string Use() =>"}
+{"name":"a-linked-file-outside-the-root-is-labelled","args":"sym OutsideLinked --root fixture","exit":"0","expect":"class  OutsideLinked|<external>/../fixture-linked/Outside.cs:12:21"}
+{"name":"an-external-row-says-so-under-json","args":"sym OutsideLinked --root fixture --json","exit":"0","expect":"'path': '<external>/../fixture-linked/Outside.cs'|'external': true|'generated': false"}
+{"name":"a-diagnostic-row-carries-external-and-no-source","args":"diag App/TypeError.cs --root fixture --json","exit":"0","expect":"'code': 'CS0029'|'external': false|'metadata': false"}
+{"name":"invalid-utf8-target-is-refused","args":"outline encoding/NotUtf8.cs --root fixture","exit":"1","expect":"is not valid UTF-8|first invalid byte on line 10|encoding/NotUtf8.cs"}
+{"name":"invalid-utf8-is-named-and-skipped-by-a-walk","args":"diag encoding --root fixture","exit":"0","expect":"cslq: skipped|is not valid UTF-8|no diagnostics"}
+{"name":"utf8-bom-is-still-read","args":"outline encoding/Utf8Bom.cs --root fixture","exit":"0","expect":"encoding/Utf8Bom.cs|class Utf8Bom"}
+{"name":"utf16-bom-is-still-read","args":"outline encoding/Utf16Bom.cs --root fixture","exit":"0","expect":"encoding/Utf16Bom.cs|class Utf16Bom"}
+{"name":"short-timeout-says-the-workspace-is-still-loading","args":"ready --root fixture --timeout 0","exit":"1","expect":"the workspace is still loading|Raise --timeout"}
+{"name":"non-csharp-projects-are-named-not-searched","args":"ready --root probes/roots/multilang","exit":"1","expect":"1 non-C# project(s) not searched: Vb.vbproj|lists no C# project"}
+{"name":"top-level-statements-only-says-what-resolves","args":"ready --root probes/roots/toplevel","exit":"1","expect":"no project declares a type|a type, a method, or a local function|compiler-generated and is not indexed|name a method or a local function in it instead"}
+{"name":"sym-matches-camel-humps","args":"sym AV --root fixture","exit":"0","expect":"AudioVolume|Core/Volume.cs:14:21"}
+{"name":"an-all-caps-sym-query-is-not-a-prefix","args":"sym VOL --root fixture","exit":"1","expect":"cslq: no results"}
+{"name":"missing-required-argument-is-a-usage-error","args":"refs --root fixture","exit":"2","expect":"cslq: refs needs a symbol or file:line:col|usage:"}
+{"name":"missing-required-argument-is-not-a-query-failure","args":"outline --root fixture","exit":"2","expect":"cslq: outline needs a file or symbol|usage:"}

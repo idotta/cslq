@@ -194,9 +194,13 @@ internal sealed record DocumentDiagnosticParams(TextDocumentIdentifier TextDocum
 internal sealed record DocumentDiagnosticReport(string? Kind, string? ResultId, Diagnostic[]? Items);
 
 // Code is string-or-int per the spec, and severity is absent for "as the client sees fit".
+// No `source`: the spec has one and this server never sends it. Measured 2026-09-10 over
+// fixture, fixture2 and this repository -- 53 findings, compiler CS, IDE analyzer and
+// Microsoft.CodeAnalysis.NetAnalyzers CA alike, every one of them null, matching the four
+// corpora the 0.1.0 testing pass covered. A key that could only ever be null is omitted
+// rather than emitted as null, and a field nothing reads is dead, so it is not parsed either.
 internal sealed record Diagnostic(
     Range Range,
     int? Severity,
     JsonElement Code,
-    string? Source,
     string Message);

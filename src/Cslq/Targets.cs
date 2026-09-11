@@ -9,20 +9,9 @@ namespace Cslq;
 /// </summary>
 internal static class Targets
 {
-    // LSP SymbolKind values for the things a dotted segment can name as a container, and the
-    // one kind a constructor arrives as (workspace/symbol reports it as a method, never as
-    // kind 9).
-    private const int Class = 5;
-    private const int Method = 6;
-
-    /// <summary>
-    /// The kind a constructor renders as. <c>workspace/symbol</c> never sends it, so a
-    /// candidate only earns it by <see cref="IsConstructor"/> agreeing off the chain.
-    /// </summary>
-    internal const int Constructor = 9;
-    private const int Enum = 10;
-    private const int Interface = 11;
-    private const int Struct = 23;
+    // The kinds live in Kinds, which is what sym and outline render through: a second copy
+    // here was how a constructor could be kind 9 to this file and "method" to the renderer.
+    private const int Method = Kinds.Method;
 
     /// <summary>
     /// A candidate reduced to what the two decisions need: the kind
@@ -118,26 +107,15 @@ internal static class Targets
         return type;
     }
 
-    private static bool IsType(int kind) =>
-        kind is Class or Interface or Struct or Enum;
+    internal static bool IsType(int kind) =>
+        kind is Kinds.Class or Kinds.Interface or Kinds.Struct or Kinds.Enum;
 
     // The constructor's chain minus its last element is the type's own chain.
     private static bool Declares(IReadOnlyList<string> type, IReadOnlyList<string> constructor) =>
         constructor.Count == type.Count + 1
         && type.SequenceEqual(constructor.Take(type.Count), StringComparer.Ordinal);
 
-    private static IEnumerable<string> Segments(string name) => Bare(name).Split('.');
-
-    /// <summary>
-    /// The identifier alone. <c>documentSymbol</c> renders a member's signature and return
-    /// type into its name (<c>Greet(string) : string</c>) and a generic's type parameters
-    /// (<c>Box&lt;T&gt;</c>), none of which a target segment carries.
-    /// </summary>
-    private static string Bare(string name)
-    {
-        var cut = name.IndexOfAny(['(', '<', ' ']);
-        return cut < 0 ? name : name[..cut];
-    }
+    private static IEnumerable<string> Segments(string name) => Kinds.Bare(name).Split('.');
 
     private static bool Contains(Range range, Position position) =>
         Before(range.Start, position) && Before(position, range.End);

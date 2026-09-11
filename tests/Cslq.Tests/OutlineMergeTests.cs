@@ -4,7 +4,7 @@ namespace Cslq.Tests;
 /// Unioning several contexts' views of one document. A multi-targeted file is parsed once per
 /// context with different preprocessor symbols, so each view holds only what that context
 /// compiles: a file whose whole body sits inside one <c>#if</c> answered <c>no symbols</c> at
-/// exit 0 in the other context, which is T-29. Every view parses the same text, which is what
+/// exit 0 in the other context. Every view parses the same text, which is what
 /// makes the merge a key comparison — of names, kinds and identifier positions, since a
 /// declaration's extent is the one thing that does differ between contexts.
 /// </summary>

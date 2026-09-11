@@ -27,13 +27,32 @@ internal static partial class Program
           --max N           cap results (default: 50)
           --context N       source lines either side of a hit (default: 1; unused by outline, sym, hover)
           --timeout N       seconds to wait for workspace load (default: 180)
-          --log-level L     server log level (default: Warning)
+          --log-level L     server log level: Trace, Debug, Information, Warning (default),
+                            Error, Critical, None. A daemon someone else started keeps the
+                            level it was launched with, so this is a no-op against one.
           --tfm T           answer in this target framework's context only
+                            (refs, def, impl, hover, outline, diag, project)
           --errors-only     diag: drop warnings and below
           --json            machine-readable output
           --no-daemon       start a dedicated server instead of the shared daemon
           --version         print the cslq version
           -h, --help        this message
+
+        Options may appear anywhere, before or after the command and its argument.
+
+        sym is a fuzzy search, not a lookup: it matches prefixes, substrings, camel
+        humps (AV finds AudioVolume) and near misses (Greter finds Greeter), ignores
+        case, and ranks what it returns. An ALL-CAPS query is the exception, read as
+        humps or as a whole name and never as a prefix. It indexes declared names
+        only, so namespaces, locals and parameters are never found, and neither a
+        bare * nor an empty query matches anything.
+
+        exit codes:
+          0    the query was answered
+          1    the query failed: no results, no such symbol, the workspace never loaded
+          2    the invocation could not be understood; this message goes to stderr
+          127  an unhandled internal failure
+          130  interrupted
         """;
 
     internal static readonly string[] Commands =
@@ -44,22 +63,70 @@ internal static partial class Program
     // position-shaped.
     private static readonly string[] TakesPosition = ["refs", "def", "impl", "hover", "outline"];
 
+    // `diag`'s path and `project`'s file are optional and required respectively; these two
+    // are the commands that take no positional at all.
+    private static readonly string[] NoArgument = ["ready", "restore"];
+
+    /// <summary>
+    /// Every command whose positional is required, and what the missing thing is called. The
+    /// check lives in <see cref="Options.Parse"/> rather than in the command, because the
+    /// thing that has to change is the command line: <c>cslq refs --root fixture</c> spent
+    /// ~1.1 s discovering the workspace and then exited <b>1</b>, which reads as a query that
+    /// found nothing. It is a usage error, so it is exit 2 on stderr before anything is
+    /// scanned. It catches an empty argument for free — <c>cslq refs ""</c> used to wait out
+    /// readiness and report <c>no symbol matched ''</c> — since a blank positional is a
+    /// misquoted shell variable, the same reading <c>Next</c> takes of a blank option value.
+    /// <c>diag</c> is deliberately absent: its path is optional and omitting it is the
+    /// whole-tree walk.
+    /// </summary>
+    private static readonly Dictionary<string, string> Required = new(StringComparer.Ordinal)
+    {
+        ["refs"] = "a symbol or file:line:col",
+        ["def"] = "a symbol or file:line:col",
+        ["impl"] = "a symbol or file:line:col",
+        ["hover"] = "a symbol or file:line:col",
+        ["sym"] = "a query",
+        ["outline"] = "a file or symbol",
+        ["project"] = "a file",
+    };
+
+    // Everything that resolves a document and can therefore be answered in one project
+    // context. `sym` goes through `workspace/symbol`, which is context-independent, and
+    // `ready` and `restore` name no document at all.
+    internal static readonly string[] TakesTfm =
+        ["refs", "def", "impl", "hover", "outline", "diag", "project"];
+
     private static async Task<int> Main(string[] argv)
     {
         try
         {
             return await RunAsync(argv);
         }
+        catch (UsageException ex)
+        {
+            // The usage block rides on stderr behind the same `cslq: ` line every other
+            // failure gets, and exit 2 says the command line is what has to change. Under
+            // `--json` the error object on stdout carries the message alone: the usage text
+            // is for a human reading the log, and folding it into the object would make one
+            // JSON string out of thirty lines.
+            Output.WriteError(ex.Message, WantsJson(argv));
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(Usage);
+            return 2;
+        }
         catch (CslqException ex)
         {
-            Console.Error.WriteLine("cslq: " + ex.Message);
+            // `--json` is read off argv rather than off Options: half the failures that reach
+            // here are thrown by Options.Parse itself, so there is nothing parsed to ask. An
+            // argument that is literally `--json` is not representable anyway.
+            Output.WriteError(ex.Message, WantsJson(argv));
             return 1;
         }
         catch (OperationCanceledException)
         {
             // Ctrl+C. Without this the cancellation escapes as an unhandled exception and the
             // interrupt is answered with a stack trace and exit 134.
-            Console.Error.WriteLine("cslq: interrupted.");
+            Output.WriteError("interrupted.", WantsJson(argv));
             return 130;
         }
     }
@@ -113,7 +180,10 @@ internal static partial class Program
     {
         switch (Preflight(argv))
         {
-            case Immediate.Usage: Console.WriteLine(Usage); return 2;
+            // No command at all is a usage error like any other, so it takes the same route:
+            // the line and the usage block on stderr, exit 2. It used to be the one message
+            // printed on stdout at a non-zero exit.
+            case Immediate.Usage: throw new UsageException("no command given");
             case Immediate.Help: Console.WriteLine(Usage); return 0;
             case Immediate.Version: Console.WriteLine(Build.Version); return 0;
         }
@@ -127,6 +197,14 @@ internal static partial class Program
         // the command: a Dockerfile or a CI job pre-warming the ~300 MB pin has no solution
         // to point at, and project discovery would fail it for the absence.
         if (opts.Command == "restore") return await RestoreAsync(opts, cts.Token);
+
+        // Before discovery rather than after it, so a solution listing nothing but non-C#
+        // projects says what it holds and then fails for holding no C# one, rather than
+        // reporting the absence with no hint that the projects sitting there were seen.
+        if (NonCsharpProjects(opts.Root) is { Count: > 0 } other)
+        {
+            Console.Error.WriteLine("cslq: " + NonCsharpNotice(other));
+        }
 
         // Before the server starts, like the argument checks in Options.Parse: this is a
         // filesystem scan, and a root with no project in it should say so instantly rather
@@ -150,6 +228,13 @@ internal static partial class Program
             }
         }
     }
+
+    /// <summary>
+    /// Whether the caller asked for JSON, answerable before <c>Options.Parse</c> and after it
+    /// has thrown. <c>--json</c> is a flag rather than a value, so a scan of <c>argv</c> is
+    /// exactly as accurate as the parse would be.
+    /// </summary>
+    internal static bool WantsJson(string[] argv) => argv.Contains("--json");
 
     internal enum Immediate { None, Usage, Help, Version }
 
@@ -225,7 +310,7 @@ internal static partial class Program
     private static async Task<int> RefsAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("refs needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
 
@@ -246,7 +331,7 @@ internal static partial class Program
     private static async Task<int> DefAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("def needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -270,7 +355,7 @@ internal static partial class Program
     private static async Task<int> ImplAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("impl needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -292,7 +377,7 @@ internal static partial class Program
     private static async Task<int> HoverAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("hover needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -349,7 +434,7 @@ internal static partial class Program
     private static async Task<int> ProjectAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("project needs a file");
+        var target = opts.Target;
         if (Directory.Exists(Path.GetFullPath(Path.Combine(opts.Root, target))))
         {
             throw new CslqException($"project needs a file, not a directory: {target}");
@@ -375,13 +460,14 @@ internal static partial class Program
     private static async Task<int> SymAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var query = opts.Argument ?? throw new CslqException("sym needs a query");
+        var query = opts.Target;
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
         var matches = Distinct(await client.SymbolsAsync(query, ct));
         await Output.WriteSymbolsAsync(
-            opts.Root, query, matches, opts.Max, opts.Json, Documents.Of(client, ct));
+            opts.Root, query, await ConstructorsAsync(client, matches, opts.Max, ct),
+            opts.Max, opts.Json, Documents.Of(client, ct));
         return matches.Count == 0 ? 1 : 0;
     }
 
@@ -393,13 +479,13 @@ internal static partial class Program
     /// <summary>
     /// Every declaration in one document, unioned over the contexts that compile it. A file
     /// whose whole body sits inside one <c>#if</c> answered <c>no symbols</c> at exit 0 in the
-    /// other context — T-29, and a wrong answer rather than a partial one, since the class is
+    /// other context — a wrong answer rather than a partial one, since the class is
     /// right there in the file.
     /// </summary>
     private static async Task<int> OutlineAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("outline needs a file or symbol");
+        var target = opts.Target;
         var file = OutlineFile(opts.Root, target, out var line);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -566,7 +652,7 @@ internal static partial class Program
     private static async Task<int> DiagAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var files = DiagFiles(opts);
+        var (files, walked) = DiagFiles(opts);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -576,11 +662,22 @@ internal static partial class Program
         ContextNote? note = null;
         foreach (var uri in files.Select(PathUri.FromPath))
         {
-            var (all, asked) = await ContextsAsync(client, opts, uri, ct);
-            if (files.Count == 1) note = Union(all, asked);
+            try
+            {
+                var (all, asked) = await ContextsAsync(client, opts, uri, ct);
+                if (files.Count == 1) note = Union(all, asked);
 
-            var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
-            findings.AddRange(Reports(uri, views));
+                var views = await client.DiagnosticsAsync(uri, asked, Names(all, asked), ct);
+                findings.AddRange(Reports(uri, views));
+            }
+            catch (InvalidTextException ex) when (walked)
+            {
+                // A walk names the file and carries on. Failing the whole tree because one
+                // file in it is not UTF-8 would hide every real diagnostic behind a file the
+                // caller never asked about; a file named as the target is the other case and
+                // is not caught here, so `diag Bad.cs` is an ordinary exit-1 failure.
+                Console.Error.WriteLine($"cslq: skipped — {ex.Message}");
+            }
         }
 
         if (opts.ErrorsOnly)
@@ -634,15 +731,21 @@ internal static partial class Program
     /// errors at exit 0. Per file, not <c>workspace/diagnostic</c>: that endpoint answers but
     /// returns zero reports, which is what <c>workspaceDiagnostics: false</c> in its dynamic
     /// registration means. Verified against 5.12.0-1.26426.8.
+    /// <para>
+    /// <c>Walked</c> says which of the two the caller got, because a file that cannot be
+    /// decoded is answered differently either side of that line: named as the target it is a
+    /// failure, found by a walk it is skipped with a line on stderr. A directory holding one
+    /// file is still a walk — what matters is whether the caller asked for that document.
+    /// </para>
     /// </summary>
-    private static IReadOnlyList<string> DiagFiles(Options opts)
+    private static (IReadOnlyList<string> Files, bool Walked) DiagFiles(Options opts)
     {
-        if (opts.Argument is not { } target) return SourceFiles(opts.Root).ToList();
+        if (opts.Argument is not { } target) return (SourceFiles(opts.Root).ToList(), true);
 
         var full = CheckUnderRoot(opts.Root, target);
-        if (Directory.Exists(full)) return SourceFiles(full).ToList();
+        if (Directory.Exists(full)) return (SourceFiles(full).ToList(), true);
         if (!File.Exists(full)) throw new CslqException($"no such file or directory: {target}");
-        return [CheckDocument(opts.Root, target)];
+        return ([CheckDocument(opts.Root, target)], false);
     }
 
     /// <summary>
@@ -707,6 +810,53 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// <c>sym</c>'s rows, with the constructors among them saying so.
+    /// <para>
+    /// <c>workspace/symbol</c> reports a constructor as a method and carries nothing else
+    /// that separates one — <c>containerName</c> is localised display text — so the only
+    /// exact answer is a declaration chain, and a chain costs a
+    /// <c>textDocument/documentSymbol</c> per document. A broad query must not pay one per
+    /// hit, so the request is made only where a constructor could be: a method-kind hit
+    /// whose name equals a type-kind hit's name <em>in the same document</em>. Nothing else
+    /// in C# has that shape except a method named after an unrelated type declared in the
+    /// same file, and the chain check then rejects it. The common broad query asks for
+    /// nothing at all.
+    /// </para>
+    /// </summary>
+    private static async Task<List<SymbolInformation>> ConstructorsAsync(
+        LspClient client, List<SymbolInformation> matches, int max, CancellationToken ct)
+    {
+        var types = matches
+            .Where(m => Targets.IsType(m.Kind))
+            .Select(m => (m.Location.Uri, m.Name))
+            .ToHashSet();
+        if (types.Count == 0) return matches;
+
+        var trees = new Dictionary<string, IReadOnlyList<DocumentSymbol>>(StringComparer.Ordinal);
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var symbol = matches[i];
+            var uri = symbol.Location.Uri;
+            if (symbol.Kind != Kinds.Method || !types.Contains((uri, symbol.Name))) continue;
+            if (!trees.ContainsKey(uri) && trees.Count >= max) continue;
+
+            if (!trees.TryGetValue(uri, out var tree))
+            {
+                var contexts = await client.ContextsAsync(uri, ct);
+                var views = await client.DocumentSymbolsAsync(
+                    uri, contexts, [.. contexts.Select(c => c.Name)], ct);
+                tree = Outline.Tree(Outline.Merge(views));
+                trees[uri] = tree;
+            }
+
+            var chain = new Targets.Candidate(symbol.Kind, Targets.Chain(tree, symbol.Location.Range.Start));
+            if (Targets.IsConstructor(chain)) matches[i] = symbol with { Kind = Kinds.Constructor };
+        }
+
+        return matches;
+    }
+
+    /// <summary>
     /// The two decisions of "Targeting a symbol by name" in <c>DESIGN.md</c>, applied to the
     /// candidates whose name already equals the target's last segment. Both read a candidate's
     /// declaration chain off the syntax tree, which costs one
@@ -749,7 +899,7 @@ internal static partial class Program
         // listing is the one place these rows are shown, so the kind travels out with them
         // rather than being recomputed from a request the renderer would have to make.
         var rows = named
-            .Select((s, i) => new SymbolRow(s, Targets.IsConstructor(chains[i]) ? Targets.Constructor : s.Kind))
+            .Select((s, i) => new SymbolRow(s, Targets.IsConstructor(chains[i]) ? Kinds.Constructor : s.Kind))
             .ToList();
 
         if (dotted)
@@ -943,8 +1093,24 @@ internal static partial class Program
 
         return sentinels.Any(s => s.Candidates.Count > 0)
             ? sentinels
-            : throw new CslqException($"could not infer a readiness sentinel under {root}; pass --sentinel");
+            : throw new CslqException(NoCandidate(root));
     }
+
+    /// <summary>
+    /// No project under the root declares a type the scan can read, which on a real workspace
+    /// means one project of top-level statements — <c>dotnet new console</c>'s default shape.
+    /// The message names what resolves, because the obvious guess does not: the <c>Program</c>
+    /// class a top-level file compiles to is generated by the compiler and
+    /// <c>workspace/symbol</c> does not index it, so <c>--sentinel Program</c> reads as correct
+    /// and burns the whole timeout (21.4 s against a 20 s deadline when testers tried it),
+    /// while any method or local function declared in that file resolves in about two seconds.
+    /// </summary>
+    internal static string NoCandidate(string root) =>
+        $"could not infer a readiness sentinel under {root}: no project declares a type. Pass "
+        + "--sentinel with a name workspace/symbol can resolve — a type, a method, or a local "
+        + "function declared in the workspace. A top-level-statements file has no type to name: "
+        + "its Program class is compiler-generated and is not indexed, so --sentinel Program "
+        + "waits out the whole timeout; name a method or a local function in it instead.";
 
     /// <summary>
     /// The type names declared in a project's own files, most-shallow-file-first. A project
@@ -1118,14 +1284,25 @@ internal static partial class Program
         + "cslq reads exactly one, so point --root at a directory holding one solution";
 
     /// <summary>
-    /// The C# projects a solution lists. <c>.slnx</c> is XML that nests projects under folder
-    /// elements, so every descendant is taken rather than the direct children; <c>.sln</c> is
-    /// the older line format, whose project entries also cover solution folders and non-C#
-    /// projects, which the extension filter drops. Paths are solution-relative, and <c>.sln</c>
+    /// The C# projects a solution lists — every entry <see cref="SolutionEntries"/> found whose
+    /// file is a <c>.csproj</c>. An entry that is not one is neither loaded nor an error:
+    /// <see cref="NonCsharpProjects"/> names those instead.
+    /// </summary>
+    private static IEnumerable<string> SolutionProjects(string solution) =>
+        SolutionEntries(solution)
+            .Where(p => p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The project files a solution lists, resolved against its directory and existing on disk.
+    /// <c>.slnx</c> is XML that nests projects under folder elements, so every descendant is
+    /// taken rather than the direct children; <c>.sln</c> is the older line format, whose
+    /// project entries also cover solution folders, which carry no project file and so fall out
+    /// of the extension tests in <see cref="SolutionProjects"/> and
+    /// <see cref="NonCsharpProjects"/> alike. Paths are solution-relative, and <c>.sln</c>
     /// writes them with a backslash, which off Windows is a filename character rather than a
     /// separator.
     /// </summary>
-    private static IEnumerable<string> SolutionProjects(string solution)
+    private static IEnumerable<string> SolutionEntries(string solution)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(solution))!;
         var listed = Path.GetExtension(solution).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
@@ -1136,7 +1313,58 @@ internal static partial class Program
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .Select(p => Path.GetFullPath(
                 Path.Combine(directory, p!.Replace('\\', Path.DirectorySeparatorChar))))
-            .Where(p => p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && File.Exists(p));
+            .Where(File.Exists);
+    }
+
+    /// <summary>
+    /// The non-C# projects the root's solution lists, by file name. The server is a C# one, so
+    /// a <c>.vbproj</c> or an <c>.fsproj</c> is not loaded and not searched — and, which is the
+    /// part a caller cannot see, a reference to a C# symbol from VB or F# source is then simply
+    /// absent from <c>refs</c> at exit 0. Naming them is the whole fix available here, and the
+    /// solution lists them, so it costs one file read discovery is making anyway.
+    /// <para>
+    /// Best effort by design. A root with no solution, or with two of them, is an error the
+    /// caller is about to be given properly, and a solution that no longer parses is one
+    /// <see cref="InferSentinels"/> reports; neither may be pre-empted by an advisory, so both
+    /// answer nothing here.
+    /// </para>
+    /// </summary>
+    internal static IReadOnlyList<string> NonCsharpProjects(string root)
+    {
+        var solutions = Solutions(root);
+        if (solutions.Count != 1) return [];
+
+        try
+        {
+            return
+            [
+                .. SolutionEntries(solutions[0])
+                    .Where(p => p.EndsWith("proj", StringComparison.OrdinalIgnoreCase)
+                        && !p.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                    .Select(p => Path.GetFileName(p))
+                    .Order(StringComparer.OrdinalIgnoreCase),
+            ];
+        }
+        catch (CslqException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// One stderr line, and not behind <c>--log-level</c> the way the not-probed line is: that
+    /// one reports a shortfall in readiness, which a later query failure exposes anyway, while
+    /// this one reports an answer that is complete as far as the caller can tell and incomplete
+    /// in fact. Capped, because a large polyglot solution would otherwise print a paragraph and
+    /// the count is the part that matters.
+    /// </summary>
+    internal static string NonCsharpNotice(IReadOnlyList<string> projects)
+    {
+        const int cap = 5;
+        var more = projects.Count > cap ? $", and {projects.Count - cap} more" : "";
+
+        return $"{projects.Count} non-C# project(s) not searched: "
+            + string.Join(", ", projects.Take(cap)) + more;
     }
 
     /// <summary>
@@ -1215,16 +1443,21 @@ internal static partial class Program
         /// </summary>
         public bool Verbose => LogLevel.ToLowerInvariant() is "trace" or "debug" or "information";
 
+        /// <summary>
+        /// The positional, for a command <see cref="Required"/> lists — which is every caller
+        /// of this. <see cref="Parse"/> has already refused a missing or blank one, so this is
+        /// an invariant rather than a check; it throws a <see cref="UsageException"/> anyway so
+        /// that a command added to the dispatch and forgotten in the table still exits 2 with
+        /// something a caller can act on.
+        /// </summary>
+        public string Target =>
+            string.IsNullOrWhiteSpace(Argument)
+                ? throw new UsageException($"{Command} needs an argument")
+                : Argument;
+
         public static Options Parse(string[] argv)
         {
-            // Here rather than in DispatchAsync's default branch, for the reason the numeric
-            // checks are here: everything between the two starts a server and scans the
-            // workspace, so a typo would be answered by whatever failed first. It was —
-            // `cslq bogus --root <dir with no .csproj>` reported the missing project.
-            string command = argv[0] is var c && Commands.Contains(c)
-                ? c
-                : throw new CslqException($"unknown command '{argv[0]}'\n\n{Usage}");
-            string? argument = null;
+            var positional = new List<string>();
             var root = Directory.GetCurrentDirectory();
             string? sentinel = null;
             var max = Output.DefaultMax;
@@ -1236,7 +1469,12 @@ internal static partial class Program
             var daemon = true;
             string? tfm = null;
 
-            for (var i = 1; i < argv.Length; i++)
+            // Options are extracted wherever they appear and the positionals are what is left,
+            // so `cslq --root . --timeout 600 def ContentItem` works like every other dotnet
+            // CLI. It is unambiguous rather than a guess: the option set is closed and every
+            // member is either a flag or takes exactly one value, so the scan knows at each
+            // index whether the next token is a value or a positional.
+            for (var i = 0; i < argv.Length; i++)
             {
                 switch (argv[i])
                 {
@@ -1248,17 +1486,52 @@ internal static partial class Program
                     // proves a query fired before load fails loudly rather than answering
                     // empty. Only a negative one is rejected.
                     case "--timeout": timeout = TimeSpan.FromSeconds(Int(argv, ref i, 0)); break;
-                    case "--log-level": logLevel = Next(argv, ref i); break;
+                    case "--log-level": logLevel = Level(argv, ref i); break;
                     case "--tfm": tfm = Next(argv, ref i); break;
                     case "--errors-only": errorsOnly = true; break;
                     case "--json": json = true; break;
                     case "--no-daemon": daemon = false; break;
                     default:
-                        if (argv[i].StartsWith('-')) throw new CslqException($"unknown option '{argv[i]}'");
-                        if (argument is not null) throw new CslqException($"unexpected argument '{argv[i]}'");
-                        argument = argv[i];
+                        if (argv[i].StartsWith('-')) throw new UsageException($"unknown option '{argv[i]}'");
+                        positional.Add(argv[i]);
                         break;
                 }
+            }
+
+            // Here rather than in DispatchAsync's default branch, for the reason the numeric
+            // checks are here: everything between the two starts a server and scans the
+            // workspace, so a typo would be answered by whatever failed first. It was —
+            // `cslq bogus --root <dir with no .csproj>` reported the missing project.
+            if (positional.Count == 0) throw new UsageException("no command given");
+            var command = positional[0];
+            if (!Commands.Contains(command)) throw new UsageException($"unknown command '{command}'");
+
+            var argument = positional.Count > 1 ? positional[1] : null;
+            if (positional.Count > 2) throw new UsageException($"unexpected argument '{positional[2]}'");
+
+            // A command that takes no argument used to differ by command: `restore` rejected
+            // one and `ready` ignored it, so `ready Greet` — an agent that meant
+            // `--sentinel Greet` — reported a workspace nothing had probed for it, at exit 0.
+            if (argument is not null && NoArgument.Contains(command))
+            {
+                throw new UsageException(command == "ready"
+                    ? $"ready takes no argument; got '{argument}' (did you mean --sentinel {argument}?)"
+                    : $"{command} takes no argument; got '{argument}'");
+            }
+
+            if (string.IsNullOrWhiteSpace(argument) && Required.TryGetValue(command, out var needs))
+            {
+                throw new UsageException($"{command} needs {needs}");
+            }
+
+            // `workspace/symbol` is context-independent and `ready` and `restore` resolve no
+            // document at all, so there is no project context for `--tfm` to choose: accepted
+            // there it filtered nothing, and the caller read an unfiltered answer as filtered.
+            if (tfm is not null && !TakesTfm.Contains(command))
+            {
+                throw new UsageException(
+                    $"--tfm does not apply to {command}; it is honoured by " +
+                    string.Join(", ", TakesTfm));
             }
 
             if (!Directory.Exists(root)) throw new CslqException($"no such directory: {root}");
@@ -1268,12 +1541,6 @@ internal static partial class Program
             // argument error. Only for the commands that accept a position: `sym Foo:1` is a
             // legitimate query and `diag nope:x` a path, and validating those rejected both.
             if (argument is not null && TakesPosition.Contains(command)) ValidatePosition(argument);
-
-            // `restore` names nothing: the manifest it restores is the one packed beside the
-            // running binary, found by walking up from it, and a path here would read as if
-            // it could be pointed somewhere else.
-            if (command == "restore" && argument is not null)
-                throw new CslqException($"restore takes no argument; got '{argument}'");
 
             return new Options(
                 command, argument, root, sentinel, max, context, timeout, logLevel, errorsOnly, json,
@@ -1292,8 +1559,32 @@ internal static partial class Program
         {
             var name = argv[i];
             if (++i >= argv.Length || string.IsNullOrWhiteSpace(argv[i]))
-                throw new CslqException($"option '{name}' needs a value");
+                throw new UsageException($"option '{name}' needs a value");
             return argv[i];
+        }
+
+        /// <summary>
+        /// The seven names the server's own <c>--logLevel</c> takes. Validated here because
+        /// the flag is forwarded rather than read: under <c>--no-daemon</c> a bad one came
+        /// back as the server's <c>Cannot parse argument 'bogus'</c>, and against a running
+        /// daemon it was accepted and did nothing at all — a daemon keeps the level whoever
+        /// launched it asked for. Case-insensitive, matching the server's own enum parse, and
+        /// the value is forwarded as written.
+        /// </summary>
+        internal static readonly string[] LogLevels =
+            ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"];
+
+        private static string Level(string[] argv, ref int i)
+        {
+            var name = argv[i];
+            var value = Next(argv, ref i);
+            if (!LogLevels.Contains(value, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new UsageException(
+                    $"unknown {name} '{value}'; expected one of " + string.Join(", ", LogLevels));
+            }
+
+            return value;
         }
 
         private static int Int(string[] argv, ref int i, int floor)
@@ -1305,12 +1596,12 @@ internal static partial class Program
                 // Overflow is not garbage: `--max 99999999999` is a number, just not one that
                 // fits, and "needs an integer" reads as a lie about the input.
                 var magnitude = text.StartsWith('-') ? text[1..] : text;
-                throw new CslqException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
+                throw new UsageException(magnitude.Length > 0 && magnitude.All(char.IsAsciiDigit)
                     ? $"{name} out of range: {text}"
                     : $"{name} needs an integer");
             }
 
-            if (value < floor) throw new CslqException($"{name} needs to be {floor} or more");
+            if (value < floor) throw new UsageException($"{name} needs to be {floor} or more");
             return value;
         }
     }

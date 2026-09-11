@@ -27,6 +27,13 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan PostLoadGrace = TimeSpan.FromSeconds(20);
 
+    /// <summary>
+    /// How long the <c>dotnet --version</c> of <see cref="SdkAsync"/> gets. It is a diagnostic
+    /// on a path that has already failed, so it is bounded well below anything a caller would
+    /// notice and the answer to overrunning it is to say nothing.
+    /// </summary>
+    private static readonly TimeSpan SdkBudget = TimeSpan.FromSeconds(10);
+
     private const int HandleFlagInherit = 0x1;
 
     public string Root { get; }
@@ -399,22 +406,107 @@ internal sealed class LspClient : IAsyncDisposable
             await Task.Delay(250, ct);
         }
 
-        var fired = _endpoints.ProjectInitialized.IsCompleted ? "fired" : "never fired";
-        var names = string.Join(", ", pending.Select(s => $"'{string.Join("' / '", s.Candidates)}'"));
-        // Projects nothing probed are named too: readiness says nothing about them either way,
-        // and leaving them out is the same quiet degradation the per-project set exists to end.
-        var skipped = string.Concat(
-            unprobed.Count == 0
-                ? string.Empty
-                : $" Not probed at all, for want of a type declaration: {Names(unprobed)}.",
-            linked.Count == 0
-                ? string.Empty
-                : $" Not probed at all, having no sources of their own: {Names(linked)}.");
-        throw new CslqException(
-            $"Workspace did not become ready within {timeout.TotalSeconds:0}s: sentinel query {names} " +
-            $"returned no symbols for project(s) {Names(pending)} " +
-            $"(projectInitializationComplete {fired}).{skipped}{StderrTail()}");
+        var fired = _endpoints.ProjectInitialized.IsCompleted;
+        var probed = sentinels.Count(s => s.Candidates.Count > 0);
+        // The whole load finished and not one project answered: that is what a failed
+        // design-time build looks like from here, and it is the only state worth a `dotnet`
+        // launch to explain. Anything less is an ordinary unresolvable candidate.
+        var cause = fired && Readiness.EveryProjectEmpty(pending.Count, probed)
+            ? Diagnosis.Cause(
+                await SdkAsync(ct),
+                Diagnosis.Unrestored(Root, sentinels.Where(s => !s.Explicit).Select(s => s.Directory)))
+            : null;
+
+        throw new CslqException(Readiness.Message(new Readiness.Failure(
+            timeout,
+            fired,
+            [.. pending.Select(s => new Readiness.Unresolved(Subject(s), s.Candidates))],
+            // Projects nothing probed are named too: readiness says nothing about them either
+            // way, and leaving them out is the same quiet degradation the per-project set
+            // exists to end.
+            [.. unprobed.Select(Name)],
+            [.. linked.Select(Name)],
+            cause,
+            StderrTail())));
     }
+
+    /// <summary>
+    /// <c>dotnet --version</c> with the working directory set to the root, which is where a
+    /// <c>global.json</c> pinning an absent SDK bites: it exits 155 with "A compatible .NET SDK
+    /// was not found", and nothing else cslq can see says so. Null when the launch itself could
+    /// not happen — <c>dotnet</c> off <c>PATH</c> has its own message and must not be reported
+    /// here as an SDK mismatch.
+    /// <para>
+    /// Bounded by <see cref="SdkBudget"/> on top of the caller's token, and the bound is the
+    /// point: this runs on the failure path, <em>after</em> the readiness loop has already
+    /// spent the whole <c>--timeout</c>, so a <c>dotnet</c> that never exits would hold the
+    /// process open past every deadline the caller thought it had. Disposing the process does
+    /// not end it, so the tree is killed on the way out. A diagnostic that times out is simply
+    /// no diagnosis — null, and the readiness message prints without a cause — while the
+    /// caller's own cancellation still propagates, because that is a different answer.
+    /// </para>
+    /// </summary>
+    private async Task<Diagnosis.Sdk?> SdkAsync(CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(SdkBudget);
+        try
+        {
+            var psi = new ProcessStartInfo(ServerArgs.Command)
+            {
+                WorkingDirectory = Root,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var a in ServerArgs.Version()) psi.ArgumentList.Add(a);
+            psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
+
+            using var proc = StartProcess(psi, "ask the SDK for its version");
+            try
+            {
+                proc.StandardInput.Close();
+                var stdout = proc.StandardOutput.ReadToEndAsync(budget.Token);
+                var stderr = proc.StandardError.ReadToEndAsync(budget.Token);
+                await proc.WaitForExitAsync(budget.Token);
+
+                var said = (await stderr).Trim();
+                if (said.Length == 0) said = (await stdout).Trim();
+                return new Diagnosis.Sdk(proc.ExitCode, Diagnosis.Summary(said));
+            }
+            finally
+            {
+                // Best effort, and on every path out: a child still running holds the pipes
+                // this method is reading, so leaving it is what turns a stalled `dotnet` into
+                // a stalled cslq.
+                try
+                {
+                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException
+                    or System.ComponentModel.Win32Exception)
+                {
+                }
+            }
+        }
+        // The diagnostic ran out of its own budget: no cause, rather than no answer at all.
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>One project, or the explicit probe, named for a message.</summary>
+    private static string Name(Sentinel sentinel) => Names([sentinel]);
+
+    /// <summary>The same, in the grammatical position the failure text puts it in.</summary>
+    private static string Subject(Sentinel sentinel) =>
+        sentinel.Explicit ? Name(sentinel) : $"project {Name(sentinel)}";
 
     /// <summary>
     /// Whether any of a project's candidate sentinels resolves to a hit the project accepts —
@@ -732,7 +824,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// One pull <em>per context</em>, though. A diagnostic can exist in one framework and not
-    /// another — the whole of T-28 — so a single pull reports one context's view of the file
+    /// another, and an unqualified pull reported one such error in 1 run of 4 — so a single pull reports one context's view of the file
     /// and silently drops the rest. <c>fixture2/Multi/TfmError.cs</c> holds a CS0029 that only
     /// <c>net9.0</c> has, and an unqualified pull reported it in 1 run of 4.
     /// </remarks>
@@ -756,8 +848,12 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     public async Task OpenAsync(string uri, CancellationToken ct)
     {
-        if (PathUri.IsGenerated(uri) || !_open.Add(uri)) return;
-        var text = await File.ReadAllTextAsync(PathUri.ToPath(uri), ct);
+        if (PathUri.IsGenerated(uri) || _open.Contains(uri)) return;
+        // Read before the set is marked, so a document refused for its encoding is not
+        // recorded as open: nothing was sent for it, and the next attempt should fail the
+        // same way rather than silently proceed as if the server had the text.
+        var text = await SourceText.ReadAsync(Root, PathUri.ToPath(uri), ct);
+        _open.Add(uri);
         await NotifyAsync(
             "textDocument/didOpen",
             new DidOpenTextDocumentParams(new TextDocumentItem(uri, "csharp", 1, text)));
@@ -786,11 +882,31 @@ internal sealed class LspClient : IAsyncDisposable
         else
         {
             var path = PathUri.ToPath(uri);
-            lines = File.Exists(path) ? await File.ReadAllLinesAsync(path, ct) : [];
+            lines = File.Exists(path) ? await TextLinesAsync(path, ct) : [];
         }
 
         _lines[uri] = lines;
         return lines;
+    }
+
+    /// <summary>
+    /// Context lines off disk, with the encoding failure answered the way this method answers
+    /// every other unreadable document: no lines, so the hit still prints with its position.
+    /// The difference is that this one is said out loud — a file decoded with substitutions
+    /// renders context rows whose columns no longer agree with the header above them, and a
+    /// silent wrong rendering is the whole of the defect.
+    /// </summary>
+    private async Task<string[]> TextLinesAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            return await SourceText.ReadLinesAsync(Root, path, ct);
+        }
+        catch (InvalidTextException ex)
+        {
+            Console.Error.WriteLine($"cslq: no context lines — {ex.Message}");
+            return [];
+        }
     }
 
     /// <summary>

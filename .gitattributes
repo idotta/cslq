@@ -2,3 +2,7 @@
 
 # Git Bash refuses a CRLF shebang.
 *.sh text eol=lf
+
+# Genuinely invalid UTF-8, on purpose. Normalising or re-encoding it on checkout would make
+# the encoding probes pass for the wrong reason on another platform.
+fixture/encoding/NotUtf8.cs -text

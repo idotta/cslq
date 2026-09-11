@@ -24,18 +24,117 @@ near-useless to a model.
 - Cap results by default so one call can't blow the context window.
 - Location rows are folded on their rendered label plus range, and ordered source, then
   generated, then metadata, before the cap.
-- `--json` for the probe harness to assert against. Every row carries `generated` and
-  `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
-  prefix back off `path`.
+- `--json` for the probe harness to assert against. Every row carries `generated`,
+  `metadata` and `external` booleans so a caller never has to parse the `<generated>/`,
+  `<metadata>/` or `<external>/` prefix back off `path`.
 - **An envelope key that could only ever be null is omitted, not emitted as null.** A field a
   caller has to interpret is worse than a field that is not there: `null` reads as "the answer
   is unknown" when the truth is "the question does not apply to this command". So `tfm` sits on
   an envelope only where a single context produced the answer — `hover` and `def` — and is
   absent from a union's, where `contexts` and the footer say what was merged. This is the same
-  rule T-77 asks for about `diag`'s always-null `source`, decided here first so that batch 8
-  inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
+  rule the always-null `source` on a `diag` row is answered by, decided here first so that the
+  rendering pass inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
   not an absence — it means that row is in every context asked, which is exactly the thing its
   marked neighbours are not — and row keys stay stable across the rows of one answer.
+- **In text mode stdout carries the answer and nothing else: every non-answer and every
+  failure is one `cslq: `-prefixed line on stderr.** `refs`' `no results` and `project`'s
+  `no project` used to print on stdout without the prefix, so a script treating stdout as data
+  stored `no results` as a hit while every other failure was already on stderr. They exit
+  non-zero, which is what makes them failures. `diag`'s `no diagnostics` and `outline`'s
+  `no symbols` stay on stdout because they exit **0** — a clean file and an empty document are
+  answers, and that is the whole distinction: the exit code says which stream carries the
+  message. An empty answer's context note rides on the same `cslq:` line, after a `; `, rather
+  than sitting under it as its own paragraph, because a failure is one line. Stderr is not
+  failures-only, and the rule does not make it so: `not probed —`, `daemon unreachable` and
+  the one-time restore notice are advisories that ride there at exit 0 beside a perfectly good
+  answer on stdout. What the rule fixes is where a command's **own** message goes, and the
+  exit code is the whole of the answer to that.
+- **`--json` is honoured on every path, including the ones that exit non-zero, and `error` is
+  the discriminator.** An empty answer keeps the ordinary `{ count, truncated, results }`
+  envelope with `count: 0`: a caller parsing JSON never meets a missing body. A failure prints
+  a single `{ "error": "<the same message>" }` object on stdout, and the human line still goes
+  to stderr so a log reads. An answer envelope never carries `error` and an error object never
+  carries `count`, so **one field** separates the two shapes a caller can be handed at the same
+  exit code — which was the complaint: `refs <a position with no hits> --json` answered with an
+  empty envelope and `refs NoSuch --json` with no stdout at all, both at exit 1, and readiness
+  timeouts, ambiguity and unresolved targets were plain text whatever was asked for. `--json`
+  is read off `argv` rather than off the parsed options, because half the failures are thrown
+  by the parse itself. Exit codes keep the meanings they had; only the channel and the `--json`
+  coverage move.
+- **The usage text is inside the rule too, and exit 2 is what it means.** A usage error — no
+  command, an unknown command or option, a missing or invalid option value, an argument the
+  command does not take, a required argument it was not given — is the `cslq: ` line followed by the usage block on **stderr**, at
+  exit **2**, with `{ "error": "<the same line>" }` on stdout under `--json` like every other
+  failure. The usage block stays out of the JSON: it is thirty lines of prose for a human
+  reading the log, and folding it in would make one JSON string of them. The two usage
+  failures used to disagree — no arguments printed usage on *stdout* at exit 2, an unknown
+  command printed it on stderr at exit 1 — and exit 2 was documented nowhere. It now says one
+  thing: the command line is what has to change, not the workspace. Exit 1 keeps everything
+  the parser understood and the query then failed on, `no such directory` and a malformed
+  position included. `UsageException` carries the distinction, so which exit code a check
+  produces is visible at the `throw` rather than at the catch. A **missing** required argument is in
+  that list and used to be outside it: every command threw its own `needs a symbol` from the
+  dispatch, which runs after discovery and the server start, so `cslq refs --root fixture`
+  spent ~1.1 s and then exited 1 — a query that found nothing, which is not what happened.
+  It is checked in `Options.Parse` against one table, and a blank argument (`cslq refs ""`,
+  a misquoted shell variable) is the same error rather than a query for the empty string.
+  `diag` is the one command whose positional is genuinely optional and it stays so. `--help` and `--version` are
+  answers rather than errors and stay exit 0 on stdout.
+- **A source line longer than 200 characters is elided in text mode, around the column the
+  row is about.** A hit on a 20,079-character line printed the whole line for one result —
+  the context window these rules exist to protect, spent on a line nobody was going to read.
+  The window is centred on the hit, the diagnostic's start or the declaration's identifier,
+  so the thing the caller asked about is always in it; a context line has no such column and
+  keeps its head instead, because the start of a statement is what says what it is. Each cut
+  end carries a horizontal ellipsis, so an elided row says it is one. **The `path:line:col`
+  header is untouched and is what round-trips** — it still names the real column in the real
+  line, and a column counted off the printed text means nothing. `--json` carries the line
+  whole for exactly that reason: a machine consumer has the column and can slice for itself,
+  and the one thing text mode cannot do is hand back what it dropped. 200 is wider than any
+  hand-written C# line, so the common case is untouched.
+- **An ordinary file outside the root is labelled `<external>/`, beside `<generated>/` and
+  `<metadata>/`.** A `<Compile Include="../../Elsewhere/File.cs" />` is indexed as fully as
+  any other document, so it turns up in `sym`, `refs` and `diag` — and printed a
+  machine-absolute path at exit 0, against the rule that paths are relative to the root. What
+  follows the label is still relative to the root, `..` segments and all, because the caller's
+  next move is to open the file and there is nothing else that says where it is; a file on
+  another volume has no relative form and keeps the absolute one, which the label at least
+  admits. Rows carry an `external` boolean beside `generated` and `metadata`, for the reason
+  those two exist: a caller never has to parse a prefix back off `path`. It is a label rather
+  than a target, exactly as the other two are: the argument guard rejects a path outside
+  `--root` before the server starts, so the `..` says where to open the file and not that it
+  can be handed back. That is worth writing down where the label is, because unlike
+  `<generated>/` and `<metadata>/` this one *looks* pasteable. The order of the
+  checks in `PathUri.Display` is load-bearing — a decompiled document is a real file under
+  the temp directory, so it is outside every ordinary root, and asking the external question
+  first would put the `MetadataAsSource` path inside the label.
+- **`diag`'s `source` is gone rather than always null.** LSP has the field and this server
+  never sends it. Measured 2026-09-10 over `fixture`, `fixture2` and this repository — 53
+  findings, compiler `CS`, IDE analyzer `IDE` and `Microsoft.CodeAnalysis.NetAnalyzers` `CA`
+  alike, every one of them null — which agrees with all four corpora of the 0.1.0 testing
+  pass. That is the always-null-everywhere case the envelope rule above names, and it is the
+  only one that gets dropped: had *any* diagnostic carried a `source`, the key would have
+  stayed and nulled beside it, because it is a **row** key and row keys stay stable across
+  the rows of one answer. Nothing parses it either — a field nothing reads is dead.
+- **One kind table, and two normalisations that make the commands agree.** A symbol's kind
+  used to be whatever the request that found it said, and the two requests disagree: measured
+  on `fixture/Core/Kinds.cs` on 2026-09-10, `workspace/symbol` answers a **delegate**
+  `function` and a local function `method`, while `documentSymbol` answers *both* `method`
+  and carries nothing else to separate them — a delegate's `name` and `detail` are a
+  method's, and one nested in a class is a sibling of that class's methods. So `function`
+  folds into `method` and a delegate reads the same from either command. That is a loss of
+  information in `sym`, taken deliberately: a kind that depends on which command you asked
+  is the bug, and `delegate` is not a kind LSP has or either request reports, so inventing
+  one would be worse than the loss. A **constructor** is the opposite case — LSP has
+  `SymbolKind.Constructor` and Roslyn never sends it — and it is *recoverable* rather than
+  invented, since a method whose name repeats its declaring type's is a constructor and
+  nothing else in C# is. `outline` recovers it from the parent it already has; `sym` has no
+  parent and asks for a declaration chain, but only for the documents that could hold one — a
+  method-kind hit sharing a name with a type-kind hit in the same document — so a broad query
+  pays nothing and the chain check rejects the one false positive that shape admits (a method
+  named after an unrelated type declared in the same file). Records and `extension` blocks
+  have no LSP kind at all and no recovery either: they render as `class`/`struct` and
+  `class`, and the README says so rather than a kind being made up for them.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.
@@ -44,7 +143,21 @@ near-useless to a model.
 **`outline` is the one deliberate exception.** It prints the document path once as a header
 and then one row per declaration — that declaration's own source line, indented by nesting —
 with no per-row `path:line:col`, no `>` marker and no surrounding context, and `--context` is
-inert for it. An outline *is* the summary the other rules exist to produce; repeating the path
+inert for it.
+
+**Except where several declarations share a line, where a row prints its own span and its own
+column.** `public enum Colour { Red, Green, Blue }` printed line 18 four times, and a
+multi-declarator field printed its line twice: "that declaration's own source line" is the
+right rule for the case an outline exists for and unreadable for the crowded one. So a line
+that more than one *shown* row starts on switches those rows to the declaration's own
+`range`, clipped to that line — the whole declaration where it fits on one line, the rest of
+the line where its body runs on — and their gutter grows the identifier's column, `18:21`
+beside a plain `18`. The column is the one `--json` already reported and the one every other
+command prints, so a crowded row is still a `line:col` a caller can paste back as a target.
+A document whose declarations each have a line to themselves is byte-for-byte what it was,
+which is the whole value of an outline; a document with one crowded line pays only the width
+of the widest gutter, since the column is padded like the number always was. `--json` is
+unchanged: it always carried each child with its own line and column. An outline *is* the summary the other rules exist to produce; repeating the path
 on every row and padding each with context lines would make a whole file unreadable and cost
 the context window the rules are meant to protect. Everything else still holds: one-based
 lines, root-relative paths, `--max` (over the pre-order flattening, so a truncated tree is
@@ -62,6 +175,12 @@ already carries the parameter types, which is why no `signatureHelp` command exi
 it only answers inside an argument list rather than at a symbol. The client declares
 `contentFormat: ["plaintext"]` for the same reason the rest of this section exists — markdown
 would mean fenced blocks and `&nbsp;` runs that the caller has to undo.
+
+What a hover does **not** carry is the `<param>` docs, and that is Roslyn's QuickInfo rather
+than a rendering choice here: the summary and `<remarks>` come through, the parameter *types*
+are in the signature, and the per-parameter prose is not in the response at all, so there is
+nothing to print. It is the half of a doc comment an agent most wants before writing a call, so
+the README says outright that `def` and the declaration are where to go for it.
 
 **`sym` breaks one narrower rule.** It prints no source line and no `>` marker, and
 `--context` is inert for it: a search result set is a list of places to go, not a place to
@@ -85,6 +204,18 @@ showed substring hits while 140 exact matches went unshown. Ranking here makes t
 same thing on every repository. The label projection stays *after* the cut, because resolving a
 generated document's label costs a request and a broad query drops most of its hits, so the
 tiebreak is on the raw URI rather than on what the row will render as.
+
+**What is *matched* stays Roslyn's, and is documented rather than narrowed.**
+`workspace/symbol` is the matcher behind an IDE's Ctrl+T, so `sym` is fuzzy in ways a caller
+reading a hit as "this name exists" gets wrong: measured on the fixture 2026-09-10, `eter`
+answers `Greeter` (substring), `AV` answers `AudioVolume` (camel humps) and `Greter` answers
+`Greeter`, `Greet` and `Green` (a dropped letter is still a match). An ALL-CAPS query is read
+as humps or as a whole name and never as a prefix, so `VOL` answers nothing where `Vol`
+answers two. Namespaces are not indexed, nor are locals and parameters; `*` and an empty query
+match nothing. Filtering that down client-side would be a second matcher disagreeing with the
+server's ranking, and the exact answer already has a command — `def`, whose dotted targets are
+matched segment by segment against the syntax tree. So the fix is a line in `--help` and a
+table in the README, not a narrower `sym`.
 
 Source-generated locations are labelled
 `<generated>/<consuming project directory>/<assemblyName>/<typeName>/<hintName>`, where
@@ -163,8 +294,8 @@ The contexts come from `textDocument/_vs_getProjectContexts`, one per `(.csproj,
 server sent and never `_vs_defaultIndex`.** Measured 2026-09-10 on `fixture2/Multi` against
 5.12.0-1.26426.8: `_vs_defaultIndex` was `0` in 6 of 6 runs while the array order around it
 varied per attach, and the unqualified answer followed `contexts[0]` in 6 of 6 — which is the
-whole of T-26 (`project` naming a different TFM each run) and T-27 (`hover`/`def` on a
-conditional type answering 4 times in 8). The index carries no information; the load order it
+whole of both symptoms testers measured: `project` naming a different TFM each run, and
+`hover`/`def` on a conditional type answering 4 times in 8. The index carries no information; the load order it
 reflects is not ours to control; an order of our own is the only thing that makes an answer
 repeatable.
 
@@ -201,7 +332,7 @@ a caller to skip it.
 **Nothing but a pinned deterministic answer can catch a server that drops
 `_vs_projectContext`.** `_vs_getProjectContexts` either answers or fails, and the failure is
 handled; an unrecognised *member of a request payload* is silently ignored, and the symptom is
-the intermittency of T-27 coming back — an answer that is right most of the time. So
+the intermittency coming back — an answer that is right most of the time. So
 `tfm-excludes-the-other-branch` in `cases.jsonl` asserts that `hover Only10 --tfm net9.0` finds
 **nothing**: it can only pass if the server honoured the context it was handed. Keep it, and
 keep it as an absence.
@@ -216,7 +347,7 @@ the set — all of them, or the `--tfm` subset — and union what comes back:
 - **`refs` and `impl`** concatenate, and the existing fold does the rest: rows are folded on
   their rendered label plus range, before `--max`, so a hit both contexts report is one row.
   That is the same fold that already collapsed a generated document's per-framework twins, and
-  it is why the union does not reintroduce the duplication T-30 was about.
+  it is why the union does not reintroduce the duplication that fold was added for.
 - **`outline`** unions by declaration, keyed on name, kind and identifier position — every
   context parses the same text, so those agree. A declaration's *extent* does not: on
   `fixture2/Multi/Conditional.cs` the namespace ends at line 6 in `net10.0` and line 13 in
@@ -227,7 +358,7 @@ the set — all of them, or the `--tfm` subset — and union what comes back:
   them — `public sealed class Only9  [net9.0]` — and the ones that are carry nothing, so an
   unconditional file renders exactly as it did before.
 - **`diag`** pulls every context, folds rows on what a reader sees (position, severity, code and
-  message) and labels a row only some contexts report. This is T-28: `net9.0`-only CS0029 in
+  message) and labels a row only some contexts report. This is the finding behind the rule: the `net9.0`-only CS0029 in
   `TfmError.cs` was reported by an unqualified pull in 1 run of 4 and silently absent in the
   other 3. The fold key includes the message because two contexts disagreeing about the *text*
   at one position are two findings — serilog answers `Substring can be simplified` in one
@@ -266,6 +397,23 @@ has it.
 `diag` takes a note only when it was given a single file. A note names one document's contexts
 and a walk spans documents with different context sets; the per-row labels are what carry the
 fact there.
+
+A source file that is not valid UTF-8 is refused rather than decoded with substitutions. The
+decoder is strict, with byte-order-mark detection left on, so a UTF-8 BOM and a UTF-16 BOM are
+read exactly as before and only a file claiming to be UTF-8 and failing to be one is an error.
+The reason is a wrong answer rather than a wrong rendering: substitution collapses invalid
+bytes to a single U+FFFD, so the text `cslq` sends in `didOpen` and the text Roslyn parses off
+disk stop agreeing, and every column after the bad bytes is short by the difference. Measured:
+CP1252 `E9 A0` rendered a hit at column 48 where the editor showed 49, and `def` at the
+position `cslq` itself printed answered `no results` — at exit 0.
+
+Which failure it is depends on how the file was reached, and that distinction is the rule. A
+document **named as the target** is an argument that cannot be used: one `cslq: ` line and
+exit 1, like `no such file`. A document found by `diag`'s **walk** is named on stderr and
+skipped, and the walk carries on at exit 0: the caller asked about a tree, and failing the
+whole tree over one file they never named would hide every real diagnostic behind it. A hit
+that merely *renders* in such a file loses its context lines and says so, because a location
+with a correct position is still worth printing.
 
 ## Targeting a symbol by name
 
@@ -363,10 +511,32 @@ load for the server any more than `dotnet restore` on the same tree succeeds —
 Two limits are known and deliberate. A project the scan can infer no sentinel for — one that is
 only top-level statements, or only Razor or resources — is **not** waited on: there is nothing
 to ask the server for, and failing on it would break those projects outright. It is named on the
-failure path instead, so its absence from readiness is visible rather than silent. And two
+failure path instead, so its absence from readiness is visible rather than silent. When it is
+the *only* project, there is nothing left to wait for and inference refuses outright, in about
+90 ms. The message has to name what does resolve, because the obvious repair is a trap: the
+`Program` class a top-level file compiles to is compiler-generated and `workspace/symbol` does
+not index it, so `--sentinel Program` reads as correct and burns the whole timeout, while any
+method or local function in the same file resolves in about two seconds. Letting the
+file-taking commands skip readiness for such a root would be the larger fix — the document pull
+blocks until the document is bound — and is deliberately not made here: readiness is one rule
+for every command, and carving out an exception for three of them trades a message for a class
+of silent partial answers. And two
 `.csproj` in one directory collapse to a single entry, because a hit under that directory cannot
 be attributed to one of them by path — no scan-based scoping can separate them, so the second
-project is covered only incidentally.
+project is covered only incidentally. Testers measured what that costs at the query layer, which
+is worse than the readiness wording suggests: on such a pair `sym BType` answered with a fuzzy
+`AType` row at exit 0, a wrong row rather than a missing one, while `hover` and `def` inside
+`BType.cs` answered `no results`.
+
+A solution's **non-C# projects** are a fourth class, and the only one answered with a line of
+output rather than a design. The server is a C# one, so a `.vbproj` or `.fsproj` is not loaded,
+not searched, and — the part a caller cannot otherwise see — a reference to a C# symbol from VB
+or F# source is absent from `refs` at exit 0. `cslq` cannot fix that, but the solution lists
+those projects, so it names them: one stderr line, before discovery rather than after it, so a
+solution holding nothing but non-C# projects says what it holds and then fails for holding no
+C# one. It is not behind `--log-level`, unlike the not-probed line, because that one reports a
+shortfall in readiness a later failure would expose anyway, while this one reports an answer
+that looks complete and is not.
 
 A third class cannot be probed even in principle, and is reported rather than waited on. A
 project whose sources are linked in from outside its own directory — a `*.projitems` import,
@@ -420,7 +590,15 @@ the `.csproj` scan that used to answer instead is over-inclusive, so a project n
 loads gets a sentinel that can never resolve and readiness burns its whole timeout — three runs
 out of three when testers hit it. A solution in a subdirectory describes that subtree rather
 than this root, and Roslyn would not open it for this root either, so a root holding only that
-is a root with no solution. A `.slnf` solution filter is not read. A project the solution lists
+is a root with no solution — **under the daemon**, which is the qualifier this whole paragraph
+carries. `--no-daemon` is more forgiving: measured 2026-09-10, a root whose solution sits one
+directory down is ready in 6 s with a dedicated server and times out at 45 s against the
+daemon, same tree and same `--sentinel`. The rules here are written for the default because
+the default is the daemon, and because a layout only one mode can load is a layout to fix; the
+alternative — discovery that depends on which server you got — is a worse contract than a
+fail-fast that is occasionally strict. (A bare `.csproj` root with no solution at all loads
+under neither on the current pin, though testers saw it load under `--no-daemon` on 0.1.0's.)
+A `.slnf` solution filter is not read. A project the solution lists
 but that is not on disk is dropped: waiting on one is the same unresolvable sentinel by another
 route. A root whose solution lists no C# project fails immediately instead of timing out,
 naming the solution, because "no .csproj under <root>" would be a lie about a root whose
@@ -447,6 +625,32 @@ v3.0.1 failed after 900s on fifteen projects, six of whose candidate lists were
 `'and' / 'and' / 'and'`. Stripping is regex-level, not syntax-aware — parsing would mean a
 Roslyn dependency the README rejects — so several candidates are still kept as a fallback chain
 against a type the regex reads out of an excluded `#if` branch or a file no project compiles.
+
+When the wait fails, the message is **one item per line**. Its content was already right — it
+is what exposed the linked-only project class — but on a 26-project repository it arrived as a
+single 1,050-character line. A headline, then the cause if one was found, then one line per
+project that never answered with what was asked for it, then the two not-probed classes.
+
+Two of its wordings carry a decision. The notification **not** having fired is reported as
+*the workspace is still loading*, with `Raise --timeout` named as the lever, rather than as
+`projectInitializationComplete never fired`: that is the ordinary state of every attach until
+the reload ends, so naming the protocol reports normality as a fault. A sentinel round is
+always issued before the conclusion — the wait polls first and checks the deadline second — so
+even `--timeout 0` fails on a query that was really asked.
+
+The notification having fired **with every probed project empty** is the opposite: it is not
+ordinary, and it is the signature of a design-time build that failed. The server loaded the
+solution, compiled nothing, and answered every query with an honest empty list; nothing else on
+the machine is in a position to say so, because a design-time build failure is reported to the
+server and never to us. So that state, and only that state, spends a `dotnet` launch on a
+diagnosis: `dotnet --version` with the working directory set to `--root`, which exits 155 with
+"A compatible .NET SDK was not found" when a `global.json` pins an SDK that is not installed,
+and then `obj/project.assets.json` per project, whose absence after a completed load means the
+restore the server ran did not succeed. The diagnosis is on the **failure path**, never as a
+pre-flight: the run has already spent its whole `--timeout` by then, while a pre-flight would
+cost a process start on every invocation for a state almost no invocation is in. Measured
+2026-09-10 on a root pinning an absent SDK: 23 s with the cause named, against the 181.7 s and
+no cause testers measured.
 
 `diag`'s file enumeration is **not** scoped to project directories, and that is deliberate.
 Measured 2026-09-05 against 5.12.0-1.26426.8: a `.cs` file no project compiles is invisible to

@@ -20,7 +20,7 @@ internal sealed record OutlineNode(
 /// A multi-targeted document is parsed once per context with different preprocessor symbols,
 /// so each answer holds only the declarations that context compiles: a file whose whole body
 /// sits inside one <c>#if</c> answers <c>no symbols</c> in the other context, at exit 0, which
-/// is T-29's wrong answer. The union is the only true outline of the file, and the contexts a
+/// is a wrong answer rather than a partial one. The union is the only true outline of the file, and the contexts a
 /// declaration is missing from are the interesting fact about it.
 /// </para>
 /// <para>

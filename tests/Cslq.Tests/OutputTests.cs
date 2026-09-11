@@ -52,6 +52,35 @@ public class OutputTests
     }
 
     /// <summary>
+    /// Both streams, because the channel is the thing under test for a non-answer: in text
+    /// mode stdout carries the answer and nothing else, so an empty answer has to leave it
+    /// empty. A capture of the two folded together cannot see that.
+    /// </summary>
+    private static async Task<(string Out, string Error)> CaptureBothAsync(Func<Task> action)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        Console.SetOut(stdout);
+        Console.SetError(stderr);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+
+        return (stdout.ToString(), stderr.ToString());
+    }
+
+    private static string[] Lines(string text) =>
+        text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>
     /// The cap keeps the best matches, not an alphabetical prefix of them and not an arrival
     /// prefix either: answered AbcZed / ZedHelper / Zed, a cap of two keeps the exact match
     /// and the prefix match, and displays them alphabetically.
@@ -88,9 +117,11 @@ public class OutputTests
     [Fact]
     public async Task An_empty_answer_says_so_rather_than_printing_nothing()
     {
-        var text = await CaptureAsync(() => Output.WriteSymbolsAsync(Root, "A", [], 50, json: false, Plain));
+        var (stdout, stderr) = await CaptureBothAsync(
+            () => Output.WriteSymbolsAsync(Root, "A", [], 50, json: false, Plain));
 
-        Assert.Equal("no results", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no results", stderr.Trim());
     }
 
     /// <summary>
@@ -324,10 +355,11 @@ public class OutputTests
         Assert.Equal(0, json.GetProperty("count").GetInt32());
         Assert.Empty(json.GetProperty("results").EnumerateArray().ToList());
 
-        var text = await CaptureAsync(() => Output.WriteHoverAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteHoverAsync(
             Root, Uri("App/Program.cs"), new Position(11, 0), null, 50, json: false, Plain));
 
-        Assert.Equal("no results", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no results", stderr.Trim());
     }
 
     /// <summary>
@@ -424,7 +456,7 @@ public class OutputTests
     /// <summary>
     /// A multi-targeted document is compiled several times, so <c>project</c> prints one row
     /// per context in <see cref="Contexts.Order"/>'s order and counts them all. Printing one
-    /// of them with <c>count: 1</c> is T-26: it said the file had a single home, and which one
+    /// of them with <c>count: 1</c> was the bug: it said the file had a single home, and which one
     /// it named changed between runs.
     /// </summary>
     [Fact]
@@ -519,18 +551,18 @@ public class OutputTests
 
     /// <summary>
     /// An empty answer says every context was tried: a caller who cannot tell that from
-    /// "asked the wrong one" is back where T-27 left them.
+    /// "asked the wrong one" are indistinguishable again.
     /// </summary>
     [Fact]
     public async Task An_empty_answer_says_how_many_contexts_were_tried()
     {
-        var text = await CaptureAsync(() => Output.WriteHoverAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteHoverAsync(
             Root, Uri("Multi/Conditional.cs"), new Position(1, 0), null,
             50, json: false, Plain, Note(0)));
 
-        Assert.Equal(
-            ["no results", "tried all 2 contexts: net10.0, net9.0"],
-            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        // One line, not a paragraph: the note rides on the `cslq:` line rather than under it.
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal(["cslq: no results; tried all 2 contexts: net10.0, net9.0"], Lines(stderr));
     }
 
     /// <summary>
@@ -543,12 +575,12 @@ public class OutputTests
         var csproj = Path.Combine(Root, "Multi", "Multi.csproj");
         DocumentContext[] all = [Context(csproj, "net10.0"), Context(csproj, "net9.0")];
 
-        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+        var (stdout, stderr) = await CaptureBothAsync(() => Output.WriteLocationsAsync(
             Root, [], 50, 1, json: false, Plain, new ContextNote(all, [all[1]], all[1])));
 
+        Assert.Equal(string.Empty, stdout);
         Assert.Equal(
-            ["no results", "tried net9.0 of 2 contexts: net10.0, net9.0"],
-            text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            ["cslq: no results; tried net9.0 of 2 contexts: net10.0, net9.0"], Lines(stderr));
     }
 
     /// <summary>
@@ -587,7 +619,7 @@ public class OutputTests
     /// An outline of a multi-targeted document is the union of its contexts, and the
     /// declarations that are not in every one of them carry the contexts they are in. A file
     /// whose whole body sat inside one <c>#if</c> answered <c>no symbols</c> at exit 0 before
-    /// this — T-29, a wrong answer rather than a partial one.
+    /// this — a wrong answer rather than a partial one.
     /// </summary>
     [Fact]
     public async Task An_outline_marks_the_declarations_that_are_not_in_every_context()
@@ -614,6 +646,135 @@ public class OutputTests
                 "merged from 2 contexts: net10.0, net9.0",
             ],
             text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// A hit on a 20,079-character line printed the whole line -- for one result -- which is
+    /// the context window the output rules exist to protect. Text mode keeps a window around
+    /// the column the row is about, marks each cut end, and leaves the header column alone:
+    /// that is what still pastes back as a target.
+    /// </summary>
+    [Fact]
+    public void A_long_line_is_elided_around_the_column_the_row_is_about()
+    {
+        var line = new string('a', 500) + "NEEDLE" + new string('b', 500);
+
+        var elided = Output.Elide(line, column: 501, budget: 20);
+
+        // Centred: the column sits half a budget in, so the window opens ten characters
+        // before the hit and the rest of it runs on past.
+        Assert.Equal("…aaaaaaaaaaNEEDLEbbbb…", elided);
+        Assert.Equal(22, elided.Length);
+    }
+
+    /// <summary>
+    /// A context line has no column of its own, so it keeps its head: the start of a
+    /// statement is what says what it is.
+    /// </summary>
+    [Fact]
+    public void A_line_with_no_column_keeps_its_head()
+    {
+        Assert.Equal("aaaaa…", Output.Elide(new string('a', 40), column: null, budget: 5));
+    }
+
+    /// <summary>
+    /// A window at either end of the line is a whole window, not half of one, and only the
+    /// cut end is marked -- so the marker is a reliable "there is more this way".
+    /// </summary>
+    [Fact]
+    public void A_hit_near_an_end_still_gets_a_whole_window()
+    {
+        var line = new string('a', 100);
+
+        Assert.Equal(new string('a', 10) + "…", Output.Elide(line, column: 1, budget: 10));
+        Assert.Equal("…" + new string('a', 10), Output.Elide(line, column: 100, budget: 10));
+    }
+
+    /// <summary>
+    /// And a line inside the budget is untouched -- no marker, no trim -- which is every line
+    /// of hand-written C# and the reason the common case reads exactly as it did.
+    /// </summary>
+    [Fact]
+    public void A_line_inside_the_budget_is_untouched()
+    {
+        Assert.Equal("short", Output.Elide("short", column: 3));
+        Assert.Equal(
+            new string('a', Output.LineBudget),
+            Output.Elide(new string('a', Output.LineBudget), column: 1));
+    }
+
+    /// <summary>
+    /// A line several declarations start on used to print once per declaration:
+    /// <c>public enum Colour { Red, Green, Blue }</c> came out four times, and a
+    /// multi-declarator field twice. Each crowded row prints its own span instead, and its
+    /// gutter grows the identifier column — the same column <c>--json</c> reports, so the row
+    /// is still a <c>line:col</c> a caller can paste back.
+    /// </summary>
+    [Fact]
+    public async Task Declarations_sharing_a_line_print_their_own_span_and_column()
+    {
+        const string Source = "public enum Colour { Red, Green, Blue }";
+        var text = await CaptureAsync(() => Output.WriteOutlineAsync(
+            Root,
+            Uri("Core/Kinds.cs"),
+            Outline.Merge(
+            [
+                new OutlineView(string.Empty,
+                [
+                    Spanning("Colour", 1, 12, 0, Source.Length,
+                        Spanning("Red", 1, 21, 21, 24),
+                        Spanning("Green", 1, 26, 26, 31),
+                        Spanning("Blue", 1, 33, 33, 37)),
+                ]),
+            ]),
+            contexts: 1,
+            50,
+            json: false,
+            new Documents(
+                _ => Task.FromResult<string[]>([Source]),
+                _ => Task.FromResult<string?>(null),
+                _ => Task.FromResult<string?>(null))));
+
+        Assert.Equal(
+            [
+                "Core/Kinds.cs",
+                "  1:13 | public enum Colour { Red, Green, Blue }",
+                "  1:22 |   Red",
+                "  1:27 |   Green",
+                "  1:34 |   Blue",
+            ],
+            Lines(text));
+    }
+
+    /// <summary>
+    /// And a document where every declaration has its line to itself keeps the bare line
+    /// number and the whole source line, which is the common case and the whole value of an
+    /// outline.
+    /// </summary>
+    [Fact]
+    public async Task A_declaration_alone_on_its_line_still_prints_that_whole_line()
+    {
+        var text = await CaptureAsync(() => Output.WriteOutlineAsync(
+            Root,
+            Uri("Core/Kinds.cs"),
+            Outline.Merge(
+            [
+                new OutlineView(string.Empty,
+                [
+                    Spanning("Colour", 2, 12, 0, 39),
+                ]),
+            ]),
+            contexts: 1,
+            50,
+            json: false,
+            new Documents(
+                _ => Task.FromResult<string[]>(["namespace Fixture.Core;", "    public enum Colour { Red }"]),
+                _ => Task.FromResult<string?>(null),
+                _ => Task.FromResult<string?>(null))));
+
+        Assert.Equal(
+            ["Core/Kinds.cs", "  2 | public enum Colour { Red }"],
+            Lines(text));
     }
 
     /// <summary>
@@ -662,7 +823,7 @@ public class OutputTests
     }
 
     /// <summary>
-    /// A diagnostic only one context reports carries that context — T-28's <c>net9.0</c>-only
+    /// A diagnostic only one context reports carries that context — the <c>net9.0</c>-only
     /// CS0029, which an unqualified pull reported in 1 run of 4 and otherwise not at all — and
     /// one every context reports carries nothing.
     /// </summary>
@@ -699,7 +860,7 @@ public class OutputTests
 
         Assert.Equal(2, json.GetProperty("contexts").GetInt32());
         // Not tfm: null. A union has no answering context, and a null field an agent has to
-        // interpret is T-77's complaint about `source`; the envelope omits the key instead.
+        // interpret is the complaint against an always-null `source`; the envelope omits the key instead.
         Assert.False(json.TryGetProperty("tfm", out _));
         var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
         Assert.Equal("net9.0", only.GetProperty("tfm").GetString());
@@ -744,10 +905,10 @@ public class OutputTests
     [Fact]
     public async Task An_empty_union_still_says_it_tried()
     {
-        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+        var (_, stderr) = await CaptureBothAsync(() => Output.WriteLocationsAsync(
             Root, [], 50, 0, json: false, Plain, UnionNote()));
 
-        Assert.Contains("tried all 2 contexts: net10.0, net9.0", text, StringComparison.Ordinal);
+        Assert.Contains("tried all 2 contexts: net10.0, net9.0", stderr, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -782,12 +943,26 @@ public class OutputTests
             new Range(new Position(line - 1, 20), new Position(line - 1, 26)),
             []);
 
+    /// <summary>
+    /// A declaration whose extent is given explicitly, on one line: what a crowded row
+    /// slices its own text out of. <paramref name="column"/> and the two offsets are
+    /// zero-based, like the wire.
+    /// </summary>
+    private static DocumentSymbol Spanning(
+        string name, int line, int column, int from, int to, params DocumentSymbol[] children) =>
+        new(
+            name,
+            name,
+            5,
+            new Range(new Position(line - 1, from), new Position(line - 1, to)),
+            new Range(new Position(line - 1, column), new Position(line - 1, column + name.Length)),
+            children);
+
     private static Diagnostic Error(string code, int line) =>
         new(
             new Range(new Position(line - 1, 0), new Position(line - 1, 4)),
             1,
             JsonDocument.Parse($"\"{code}\"").RootElement,
-            null,
             "boom");
 
     private static Location Location(string file, int line) =>
@@ -821,13 +996,68 @@ public class OutputTests
     [Fact]
     public async Task A_file_no_project_compiles_says_no_project()
     {
-        var text = await CaptureAsync(() =>
+        var (stdout, stderr) = await CaptureBothAsync(() =>
         {
             Output.WriteProject(Root, Path.Combine(Root, "Ambient", "Stray.cs"), [], 50, json: false);
             return Task.CompletedTask;
         });
 
-        Assert.Equal("no project", text.Trim());
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no project", stderr.Trim());
+    }
+
+    /// <summary>
+    /// The other half of the rule: <c>--json</c> is honoured on the empty answer too, and the
+    /// envelope stays the ordinary one — <c>count: 0</c> is how a machine reads "no results",
+    /// so there is nothing for stderr to add. A caller parsing JSON therefore never has to
+    /// handle a body that is missing.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_answer_under_json_keeps_the_envelope_and_says_nothing_on_stderr()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(
+            () => Output.WriteLocationsAsync(Root, [], 50, 1, json: true, Plain));
+
+        var json = JsonDocument.Parse(stdout).RootElement;
+        Assert.Equal(0, json.GetProperty("count").GetInt32());
+        Assert.False(json.GetProperty("truncated").GetBoolean());
+        Assert.Empty(json.GetProperty("results").EnumerateArray().ToList());
+        Assert.False(json.TryGetProperty("error", out _));
+        Assert.Equal(string.Empty, stderr);
+    }
+
+    /// <summary>
+    /// A failure under <c>--json</c> is a single object on stdout carrying the same message,
+    /// and the human line still goes to stderr so a log reads. <c>error</c> is the
+    /// discriminator: an answer envelope never carries it, so one field separates the two
+    /// shapes a caller sees at the same exit code.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_under_json_is_an_error_object_on_stdout_and_a_line_on_stderr()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(() =>
+        {
+            Output.WriteError("no symbol matched 'NoSuch'", json: true);
+            return Task.CompletedTask;
+        });
+
+        var json = JsonDocument.Parse(stdout).RootElement;
+        Assert.Equal("no symbol matched 'NoSuch'", json.GetProperty("error").GetString());
+        Assert.False(json.TryGetProperty("count", out _));
+        Assert.Equal("cslq: no symbol matched 'NoSuch'", stderr.Trim());
+    }
+
+    [Fact]
+    public async Task A_failure_without_json_leaves_stdout_empty()
+    {
+        var (stdout, stderr) = await CaptureBothAsync(() =>
+        {
+            Output.WriteError("no such file: nope.cs", json: false);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal("cslq: no such file: nope.cs", stderr.Trim());
     }
 
     /// <summary>
