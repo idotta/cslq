@@ -113,6 +113,7 @@ internal static class Output
                     endColumn = hit.Range.End.Character + 1,
                     generated = PathUri.IsGenerated(hit.Uri),
                     metadata = PathUri.IsDecompiled(hit.Uri),
+                    external = PathUri.IsExternal(root, hit.Uri),
                     text = At(await documents.Lines(hit.Uri), hit.Range.Start.Line)?.TrimEnd(),
                 });
             }
@@ -143,7 +144,9 @@ internal static class Output
             for (var i = Math.Max(0, line - context); i <= Math.Min(lines.Length - 1, line + context); i++)
             {
                 var marker = i == line ? ">" : " ";
-                Console.WriteLine($"{marker} {(i + 1).ToString().PadLeft(width)} | {lines[i].TrimEnd()}");
+                var column = i == line ? hit.Range.Start.Character + 1 : (int?)null;
+                Console.WriteLine(
+                    $"{marker} {(i + 1).ToString().PadLeft(width)} | {Body(lines[i], column)}");
             }
         }
 
@@ -300,10 +303,10 @@ internal static class Output
                     endColumn = range.End.Character + 1,
                     severity = Severity(hit.Diagnostic.Severity),
                     code = Code(hit.Diagnostic.Code),
-                    source = hit.Diagnostic.Source,
                     message = hit.Diagnostic.Message,
                     generated = PathUri.IsGenerated(hit.Uri),
                     metadata = PathUri.IsDecompiled(hit.Uri),
+                    external = PathUri.IsExternal(root, hit.Uri),
                     tfm = hit.Only,
                     text = At(await documents.Lines(hit.Uri), range.Start.Line)?.TrimEnd(),
                 });
@@ -340,7 +343,9 @@ internal static class Output
             for (var i = Math.Max(0, start.Line - context); i <= Math.Min(lines.Length - 1, start.Line + context); i++)
             {
                 var marker = i == start.Line ? ">" : " ";
-                Console.WriteLine($"{marker} {(i + 1).ToString().PadLeft(width)} | {lines[i].TrimEnd()}");
+                var column = i == start.Line ? start.Character + 1 : (int?)null;
+                Console.WriteLine(
+                    $"{marker} {(i + 1).ToString().PadLeft(width)} | {Body(lines[i], column)}");
             }
         }
 
@@ -401,6 +406,7 @@ internal static class Output
                 column = h.Row.Symbol.Location.Range.Start.Character + 1,
                 generated = PathUri.IsGenerated(h.Row.Symbol.Location.Uri),
                 metadata = PathUri.IsDecompiled(h.Row.Symbol.Location.Uri),
+                external = PathUri.IsExternal(root, h.Row.Symbol.Location.Uri),
             });
 
             Console.WriteLine(JsonSerializer.Serialize(
@@ -545,6 +551,7 @@ internal static class Output
                     path = display,
                     generated = PathUri.IsGenerated(uri),
                     metadata = PathUri.IsDecompiled(uri),
+                    external = PathUri.IsExternal(root, uri),
                     // No envelope-level tfm here, unlike the other context-bound commands:
                     // an outline is a union, and every row carries its own.
                     contexts = note?.All.Count,
@@ -563,16 +570,24 @@ internal static class Output
         }
 
         var rows = Flatten(symbols).Take(kept).ToList();
-        var width = rows.Max(r => r.Node.Symbol.SelectionRange.Start.Line + 1).ToString().Length;
-        foreach (var row in rows)
+        // A line several shown declarations start on: every one of them used to print that
+        // whole line, so `public enum Colour { Red, Green, Blue }` came out four times over.
+        var crowded = rows
+            .GroupBy(r => r.Node.Symbol.SelectionRange.Start.Line)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToHashSet();
+        var gutters = rows.Select(r => Gutter(r.Node.Symbol, crowded)).ToList();
+        var width = gutters.Max(g => g.Length);
+        foreach (var (row, gutter) in rows.Zip(gutters))
         {
             var line = row.Node.Symbol.SelectionRange.Start.Line;
-            var text = At(lines, line)?.Trim() ?? row.Node.Symbol.Name;
+            var text = Declaration(lines, row.Node.Symbol, crowded.Contains(line));
             // The mark goes after the source line, so a declaration every context compiles
             // renders exactly as it did before contexts existed.
             var mark = Outline.Mark(row.Node, contexts) is { } tfms ? $"  [{tfms}]" : string.Empty;
             Console.WriteLine(
-                $"  {(line + 1).ToString().PadLeft(width)} | {new string(' ', row.Depth * 2)}{text}{mark}");
+                $"  {gutter.PadLeft(width)} | {new string(' ', row.Depth * 2)}{text}{mark}");
         }
 
         if (total > kept)
@@ -629,6 +644,7 @@ internal static class Output
                         documentation = string.Join('\n', kept),
                         generated = PathUri.IsGenerated(uri),
                         metadata = PathUri.IsDecompiled(uri),
+                        external = PathUri.IsExternal(root, uri),
                     },
                 ];
 
@@ -786,6 +802,7 @@ internal static class Output
         string root, string path, IReadOnlyList<DocumentContext> contexts, int max, bool json)
     {
         var display = PathUri.Display(root, PathUri.FromPath(path));
+        var external = PathUri.IsExternal(root, PathUri.FromPath(path));
         var rows = contexts
             .Select(c => (Project: PathUri.Display(root, PathUri.FromPath(c.File)), c.Tfm))
             .ToList();
@@ -801,6 +818,7 @@ internal static class Output
                     tfm = r.Tfm,
                     generated = false,
                     metadata = false,
+                    external = external,
                 })
                 .ToList();
             Console.WriteLine(JsonSerializer.Serialize(
@@ -827,6 +845,65 @@ internal static class Output
         }
     }
 
+    /// <summary>
+    /// An outline row's gutter: the declaration's line, and its column too when it shares
+    /// that line with another shown declaration. The column is the identifier's, the same
+    /// one <c>--json</c> reports and the same one every other command prints, so a crowded
+    /// row is still a <c>line:col</c> a caller can paste back. An uncrowded document never
+    /// grows the column and renders exactly as it always did, which is the whole value of an
+    /// outline.
+    /// </summary>
+    internal static string Gutter(DocumentSymbol symbol, IReadOnlySet<int> crowded)
+    {
+        var start = symbol.SelectionRange.Start;
+        return crowded.Contains(start.Line)
+            ? $"{start.Line + 1}:{start.Character + 1}"
+            : (start.Line + 1).ToString();
+    }
+
+    /// <summary>
+    /// What an outline row prints for a declaration: its own source line when it has that
+    /// line to itself, and its own <em>span</em> of the line when it does not.
+    /// <para>
+    /// The span is the declaration's <c>range</c> clipped to the identifier's line -- the
+    /// whole extent where it fits, the rest of the line where the body runs on -- so
+    /// <c>public enum Colour { Red, Green, Blue }</c> outlines as itself followed by
+    /// <c>Red</c>, <c>Green</c> and <c>Blue</c> rather than as itself four times. A
+    /// multi-declarator field is the same shape: <c>First</c> and <c>Second</c> print their
+    /// own declarators.
+    /// </para>
+    /// <para>
+    /// Elided the same way every other source line is, and around the identifier column,
+    /// since a declaration can also be the long line -- see <see cref="Elide"/>.
+    /// </para>
+    /// </summary>
+    internal static string Declaration(string[] lines, DocumentSymbol symbol, bool crowded)
+    {
+        var identifier = symbol.SelectionRange.Start;
+        if (At(lines, identifier.Line) is not { } line) return symbol.Name;
+
+        // The declaration's own extent, clipped to this line: it starts where the
+        // declaration does when that is on this line and at the margin otherwise, and ends
+        // where the declaration does when that is on this line and at the end of it
+        // otherwise. An uncrowded row takes the whole line, as it always did.
+        var start = crowded && symbol.Range.Start.Line == identifier.Line
+            ? Math.Clamp(symbol.Range.Start.Character, 0, line.Length)
+            : 0;
+        var end = crowded && symbol.Range.End.Line == identifier.Line
+            ? Math.Clamp(symbol.Range.End.Character, start, line.Length)
+            : line.Length;
+
+        var trimmed = line[start..end].TrimEnd();
+        var lead = trimmed.Length - trimmed.TrimStart().Length;
+        var body = trimmed.TrimStart();
+        if (body.Length == 0) return symbol.Name;
+
+        // The identifier's column inside the text actually printed, so the elision window
+        // lands on it rather than on a column counted from a different origin.
+        var column = identifier.Character + 1 - start - lead;
+        return Elide(body, column > 0 ? column : null);
+    }
+
     private static int Count(IReadOnlyList<OutlineNode> symbols) =>
         symbols.Sum(s => 1 + Count(s.Children));
 
@@ -843,7 +920,8 @@ internal static class Output
     // Pruned against the same pre-order budget the text form uses, so --max means the same
     // thing in both and a JSON case and a text case stay cases about the same output.
     private static List<object> Nodes(
-        IReadOnlyList<OutlineNode> symbols, int contexts, string[] lines, ref int budget)
+        IReadOnlyList<OutlineNode> symbols, int contexts, string[] lines, ref int budget,
+        string? parent = null)
     {
         var nodes = new List<object>();
         foreach (var node in symbols)
@@ -857,7 +935,7 @@ internal static class Output
             nodes.Add(new
             {
                 name = symbol.Name,
-                kind = Kind(symbol.Kind),
+                kind = Kinds.Name(Kinds.Of(symbol.Kind, symbol.Name, parent)),
                 detail = symbol.Detail,
                 line = start.Line + 1,
                 column = start.Character + 1,
@@ -865,45 +943,16 @@ internal static class Output
                 endColumn = end.Character + 1,
                 tfm = Outline.Mark(node, contexts),
                 text = At(lines, start.Line)?.TrimEnd(),
-                children = Nodes(node.Children, contexts, lines, ref budget),
+                children = Nodes(node.Children, contexts, lines, ref budget, symbol.Name),
             });
         }
 
         return nodes;
     }
 
-    // LSP SymbolKind. An unmapped value renders as its integer rather than "unknown": the
-    // server is free to add kinds, and dropping the one fact we have helps nobody.
-    private static string Kind(int kind) => kind switch
-    {
-        1 => "file",
-        2 => "module",
-        3 => "namespace",
-        4 => "package",
-        5 => "class",
-        6 => "method",
-        7 => "property",
-        8 => "field",
-        9 => "constructor",
-        10 => "enum",
-        11 => "interface",
-        12 => "function",
-        13 => "variable",
-        14 => "constant",
-        15 => "string",
-        16 => "number",
-        17 => "boolean",
-        18 => "array",
-        19 => "object",
-        20 => "key",
-        21 => "null",
-        22 => "enumMember",
-        23 => "struct",
-        24 => "event",
-        25 => "operator",
-        26 => "typeParameter",
-        _ => kind.ToString(),
-    };
+    // One table for every command -- see Kinds, which is also where the two normalisations
+    // that make sym and outline agree about a delegate and a constructor live.
+    private static string Kind(int kind) => Kinds.Name(Kinds.Normalise(kind));
 
     public static string Severity(int? severity) => severity switch
     {
@@ -939,6 +988,51 @@ internal static class Output
 
     private static string? At(string[] lines, int zeroBased) =>
         zeroBased >= 0 && zeroBased < lines.Length ? lines[zeroBased] : null;
+
+    /// <summary>
+    /// How much of one source line text mode will print. A hit on a 20,079-character line put
+    /// the whole line in the answer -- for one result -- which is the context window the
+    /// output rules exist to protect, spent on a line no reader was going to read. 200 is
+    /// wider than any hand-written C# line and narrow enough that a generated or minified one
+    /// cannot dominate.
+    /// </summary>
+    internal const int LineBudget = 200;
+
+    /// <summary>
+    /// One source line, cut to <see cref="LineBudget"/> around the interesting column.
+    /// <para>
+    /// <paramref name="column"/> is the one-based column the row is *about* -- a hit, a
+    /// diagnostic's start, a declaration's identifier -- and the window is centred on it, so
+    /// the thing the caller asked about is always in view. A context line has no such column
+    /// and keeps its head instead: the start of a statement is what says what it is.
+    /// </para>
+    /// <para>
+    /// The elision is display only, and this is the part a caller has to know: the
+    /// <c>path:line:col</c> above the row is untouched and still refers to the real line, so
+    /// it pastes back as a target unchanged, while a column counted off the printed text is
+    /// meaningless. <c>--json</c> carries the line whole for exactly that reason. Each cut
+    /// end is marked with a horizontal ellipsis, so a row that was elided says so.
+    /// </para>
+    /// </summary>
+    internal static string Elide(string text, int? column, int budget = LineBudget)
+    {
+        if (text.Length <= budget) return text;
+        if (column is not { } col) return text[..budget] + "…";
+
+        var hit = Math.Clamp(col - 1, 0, text.Length);
+        var start = Math.Clamp(hit - (budget / 2), 0, text.Length - budget);
+        var end = start + budget;
+        return (start > 0 ? "…" : string.Empty)
+            + text[start..end]
+            + (end < text.Length ? "…" : string.Empty);
+    }
+
+    /// <summary>
+    /// A source line as a location row prints it: trailing whitespace gone, then elided
+    /// around <paramref name="column"/>. Trailing only -- trimming the indentation off would
+    /// move every column and the window is placed by column.
+    /// </summary>
+    private static string Body(string text, int? column) => Elide(text.TrimEnd(), column);
 
     private sealed record Hit(string Uri, string Display, Range Range);
 

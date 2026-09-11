@@ -108,7 +108,9 @@ says so**. Plain `cslq ready` still prints the single word `ready`, and names bo
 stderr at `--log-level Information`.
 
 `outline` is the exception: the path once as a header, then one row per declaration indented by
-nesting, no per-row position and no context.
+nesting, no per-row position and no context. Where several declarations share a line — an enum
+and its members, a multi-declarator field — each of those rows prints its own span and grows
+its gutter to `line:col`, which is still a target you can paste back.
 
 `hover` is the narrowest exception: the position as a header, then the signature and the
 doc-comment summary as plain text — no fences, no source line, no `>` marker. `--context` does
@@ -125,6 +127,24 @@ document Roslyn decompiled. That is a real answer. The path is a label, not a fi
 back to `cslq`: `outline System.Console` exits 1, because the document only exists once a `def`
 at a use site has made Roslyn write it. Use `cslq hover` at a use of the symbol instead — it
 answers with no document at all.
+
+A file compiled by a project but living outside `--root` — a `<Compile Include="../..">` —
+prints as `<external>/<path relative to the root>`. It is a real file; the label says only that
+it is not in the workspace you pointed at. Like `<generated>/` and `<metadata>/`, it is **not a
+target**: the `..` tells you where to open the file, but every file-taking command rejects a
+path outside `--root`. Reach its declarations by name with `sym` and `def` instead, or widen
+`--root`.
+
+A source line longer than 200 characters is cut in text mode, around the column the row is
+about, with a `…` at each cut end. The `path:line:col` above the row is untouched and is
+what round-trips; a column counted off the printed text does not. `--json` keeps the line
+whole.
+
+Kinds are one table across commands, and three shapes it cannot express: a **delegate** reads
+as `method` — `cslq` levelling `sym` down to what `documentSymbol` can say, not Roslyn's
+answer, so a `method` row may be a delegate — a **record** as `class` or `struct`, and a C# 14
+**`extension` block** as `class`. A constructor reads as `constructor`, which LSP does have
+and Roslyn does not send.
 
 Source-generated locations print as
 `<generated>/<project>/<assembly>/<generator type name>/<hintName>` and have no
@@ -210,7 +230,9 @@ get one view instead of the union. A framework the document has no context for i
 naming the ones it has. Under `--json`: `contexts` on the envelope is how many contexts the
 document has; `tfm` on the envelope is the one that answered, and is **absent** rather than
 null where no single context did — which is every union. `outline` and `diag` rows carry a
-per-row `tfm` that is null when every context asked has that row.
+per-row `tfm` that is null when every context asked has that row. Every location row carries
+`generated`, `metadata` and `external` booleans, so the label prefix never has to be parsed
+off `path`. `diag` rows carry no `source`: this server never sends one.
 
 `--sentinel` does not speed a run up. By default `cslq` waits for every project under the root
 to load, one probe per project the root's solution lists; a root holding no solution, or two of

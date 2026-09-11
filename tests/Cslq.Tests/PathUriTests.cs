@@ -320,19 +320,58 @@ public class PathUriTests
     }
 
     /// <summary>
-    /// A hit outside the root — a linked file, or a symbol resolved from elsewhere on disk —
-    /// stays absolute rather than becoming a `../../..` chain that reads as noise.
+    /// A hit outside the root — the file a
+    /// <c>&lt;Compile Include="../../Elsewhere/File.cs" /&gt;</c> links in, which Roslyn
+    /// indexes as fully as any other — used to print the machine-absolute path at exit 0,
+    /// against an output rule that promises root-relative ones. It gets a label of its own,
+    /// beside <c>&lt;generated&gt;/</c> and <c>&lt;metadata&gt;/</c>, and the path inside it
+    /// is still relative to the root, so it says where the file actually is.
     /// </summary>
     [Fact]
-    public void A_path_outside_the_root_stays_absolute()
+    public void A_path_outside_the_root_is_labelled_rather_than_printed_absolute()
     {
         var root = Path.Combine(Path.GetTempPath(), "repo");
         var outside = Path.Combine(Path.GetTempPath(), "elsewhere", "Stray.cs");
+        var uri = PathUri.FromPath(outside);
 
-        var display = PathUri.Display(root, PathUri.FromPath(outside));
+        var display = PathUri.Display(root, uri);
 
-        Assert.Equal(outside.Replace(Path.DirectorySeparatorChar, '/'), display);
-        Assert.DoesNotContain("..", display, StringComparison.Ordinal);
+        Assert.Equal("<external>/../elsewhere/Stray.cs", display);
+        Assert.True(PathUri.IsExternal(root, uri));
+        Assert.DoesNotContain("elsewhere/Stray.cs:", display, StringComparison.Ordinal);
+        Assert.False(Path.IsPathRooted(display));
+    }
+
+    /// <summary>
+    /// The check order is the load-bearing part, and the decompiled document is the trap: it
+    /// is a real file under the temp directory, so it is outside every ordinary root and the
+    /// external test would claim it first — putting the machine-absolute
+    /// <c>MetadataAsSource</c> path inside the label instead of keeping it out of the answer.
+    /// </summary>
+    [Fact]
+    public void A_decompiled_or_generated_location_is_never_external()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+
+        Assert.False(PathUri.IsExternal(root, Decompiled("Console.cs")));
+        Assert.False(PathUri.IsExternal(root, Generated));
+        Assert.StartsWith(
+            "<metadata>/", PathUri.Display(root, Decompiled("Console.cs")), StringComparison.Ordinal);
+        Assert.StartsWith("<generated>/", PathUri.Display(root, Generated), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And a file inside the root is untouched: no label, no <c>..</c>, exactly the
+    /// root-relative path it always was.
+    /// </summary>
+    [Fact]
+    public void A_path_inside_the_root_carries_no_label()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "repo");
+        var uri = PathUri.FromPath(Path.Combine(root, "Core", "Greeter.cs"));
+
+        Assert.False(PathUri.IsExternal(root, uri));
+        Assert.Equal("Core/Greeter.cs", PathUri.Display(root, uri));
     }
 
     private static string Decompiled(string file) => PathUri.FromPath(Path.Combine(

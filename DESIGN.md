@@ -24,9 +24,9 @@ near-useless to a model.
 - Cap results by default so one call can't blow the context window.
 - Location rows are folded on their rendered label plus range, and ordered source, then
   generated, then metadata, before the cap.
-- `--json` for the probe harness to assert against. Every row carries `generated` and
-  `metadata` booleans so a caller never has to parse the `<generated>/` or `<metadata>/`
-  prefix back off `path`.
+- `--json` for the probe harness to assert against. Every row carries `generated`,
+  `metadata` and `external` booleans so a caller never has to parse the `<generated>/`,
+  `<metadata>/` or `<external>/` prefix back off `path`.
 - **An envelope key that could only ever be null is omitted, not emitted as null.** A field a
   caller has to interpret is worse than a field that is not there: `null` reads as "the answer
   is unknown" when the truth is "the question does not apply to this command". So `tfm` sits on
@@ -74,6 +74,61 @@ near-useless to a model.
   position included. `UsageException` carries the distinction, so which exit code a check
   produces is visible at the `throw` rather than at the catch. `--help` and `--version` are
   answers rather than errors and stay exit 0 on stdout.
+- **A source line longer than 200 characters is elided in text mode, around the column the
+  row is about.** A hit on a 20,079-character line printed the whole line for one result —
+  the context window these rules exist to protect, spent on a line nobody was going to read.
+  The window is centred on the hit, the diagnostic's start or the declaration's identifier,
+  so the thing the caller asked about is always in it; a context line has no such column and
+  keeps its head instead, because the start of a statement is what says what it is. Each cut
+  end carries a horizontal ellipsis, so an elided row says it is one. **The `path:line:col`
+  header is untouched and is what round-trips** — it still names the real column in the real
+  line, and a column counted off the printed text means nothing. `--json` carries the line
+  whole for exactly that reason: a machine consumer has the column and can slice for itself,
+  and the one thing text mode cannot do is hand back what it dropped. 200 is wider than any
+  hand-written C# line, so the common case is untouched.
+- **An ordinary file outside the root is labelled `<external>/`, beside `<generated>/` and
+  `<metadata>/`.** A `<Compile Include="../../Elsewhere/File.cs" />` is indexed as fully as
+  any other document, so it turns up in `sym`, `refs` and `diag` — and printed a
+  machine-absolute path at exit 0, against the rule that paths are relative to the root. What
+  follows the label is still relative to the root, `..` segments and all, because the caller's
+  next move is to open the file and there is nothing else that says where it is; a file on
+  another volume has no relative form and keeps the absolute one, which the label at least
+  admits. Rows carry an `external` boolean beside `generated` and `metadata`, for the reason
+  those two exist: a caller never has to parse a prefix back off `path`. It is a label rather
+  than a target, exactly as the other two are: the argument guard rejects a path outside
+  `--root` before the server starts, so the `..` says where to open the file and not that it
+  can be handed back. That is worth writing down where the label is, because unlike
+  `<generated>/` and `<metadata>/` this one *looks* pasteable. The order of the
+  checks in `PathUri.Display` is load-bearing — a decompiled document is a real file under
+  the temp directory, so it is outside every ordinary root, and asking the external question
+  first would put the `MetadataAsSource` path inside the label.
+- **`diag`'s `source` is gone rather than always null.** LSP has the field and this server
+  never sends it. Measured 2026-09-10 over `fixture`, `fixture2` and this repository — 53
+  findings, compiler `CS`, IDE analyzer `IDE` and `Microsoft.CodeAnalysis.NetAnalyzers` `CA`
+  alike, every one of them null — which agrees with all four corpora of the 0.1.0 testing
+  pass. That is the always-null-everywhere case the envelope rule above names, and it is the
+  only one that gets dropped: had *any* diagnostic carried a `source`, the key would have
+  stayed and nulled beside it, because it is a **row** key and row keys stay stable across
+  the rows of one answer. Nothing parses it either — a field nothing reads is dead.
+- **One kind table, and two normalisations that make the commands agree.** A symbol's kind
+  used to be whatever the request that found it said, and the two requests disagree: measured
+  on `fixture/Core/Kinds.cs` on 2026-09-10, `workspace/symbol` answers a **delegate**
+  `function` and a local function `method`, while `documentSymbol` answers *both* `method`
+  and carries nothing else to separate them — a delegate's `name` and `detail` are a
+  method's, and one nested in a class is a sibling of that class's methods. So `function`
+  folds into `method` and a delegate reads the same from either command. That is a loss of
+  information in `sym`, taken deliberately: a kind that depends on which command you asked
+  is the bug, and `delegate` is not a kind LSP has or either request reports, so inventing
+  one would be worse than the loss. A **constructor** is the opposite case — LSP has
+  `SymbolKind.Constructor` and Roslyn never sends it — and it is *recoverable* rather than
+  invented, since a method whose name repeats its declaring type's is a constructor and
+  nothing else in C# is. `outline` recovers it from the parent it already has; `sym` has no
+  parent and asks for a declaration chain, but only for the documents that could hold one — a
+  method-kind hit sharing a name with a type-kind hit in the same document — so a broad query
+  pays nothing and the chain check rejects the one false positive that shape admits (a method
+  named after an unrelated type declared in the same file). Records and `extension` blocks
+  have no LSP kind at all and no recovery either: they render as `class`/`struct` and
+  `class`, and the README says so rather than a kind being made up for them.
 - A candidate listing — an ambiguous target's, `outline`'s per-document one, the
   `candidates:` dump of a target that matched nothing — is `sym`'s shape and `sym`'s order,
   so every row it prints is a `path:line:col` the caller can paste straight back as a target.
@@ -82,7 +137,21 @@ near-useless to a model.
 **`outline` is the one deliberate exception.** It prints the document path once as a header
 and then one row per declaration — that declaration's own source line, indented by nesting —
 with no per-row `path:line:col`, no `>` marker and no surrounding context, and `--context` is
-inert for it. An outline *is* the summary the other rules exist to produce; repeating the path
+inert for it.
+
+**Except where several declarations share a line, where a row prints its own span and its own
+column.** `public enum Colour { Red, Green, Blue }` printed line 18 four times, and a
+multi-declarator field printed its line twice: "that declaration's own source line" is the
+right rule for the case an outline exists for and unreadable for the crowded one. So a line
+that more than one *shown* row starts on switches those rows to the declaration's own
+`range`, clipped to that line — the whole declaration where it fits on one line, the rest of
+the line where its body runs on — and their gutter grows the identifier's column, `18:21`
+beside a plain `18`. The column is the one `--json` already reported and the one every other
+command prints, so a crowded row is still a `line:col` a caller can paste back as a target.
+A document whose declarations each have a line to themselves is byte-for-byte what it was,
+which is the whole value of an outline; a document with one crowded line pays only the width
+of the widest gutter, since the column is padded like the number always was. `--json` is
+unchanged: it always carried each child with its own line and column. An outline *is* the summary the other rules exist to produce; repeating the path
 on every row and padding each with context lines would make a whole file unreadable and cost
 the context window the rules are meant to protect. Everything else still holds: one-based
 lines, root-relative paths, `--max` (over the pre-order flattening, so a truncated tree is

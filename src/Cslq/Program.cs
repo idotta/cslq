@@ -428,7 +428,8 @@ internal static partial class Program
 
         var matches = Distinct(await client.SymbolsAsync(query, ct));
         await Output.WriteSymbolsAsync(
-            opts.Root, query, matches, opts.Max, opts.Json, Documents.Of(client, ct));
+            opts.Root, query, await ConstructorsAsync(client, matches, opts.Max, ct),
+            opts.Max, opts.Json, Documents.Of(client, ct));
         return matches.Count == 0 ? 1 : 0;
     }
 
@@ -754,6 +755,53 @@ internal static partial class Program
     }
 
     /// <summary>
+    /// <c>sym</c>'s rows, with the constructors among them saying so.
+    /// <para>
+    /// <c>workspace/symbol</c> reports a constructor as a method and carries nothing else
+    /// that separates one — <c>containerName</c> is localised display text — so the only
+    /// exact answer is a declaration chain, and a chain costs a
+    /// <c>textDocument/documentSymbol</c> per document. A broad query must not pay one per
+    /// hit, so the request is made only where a constructor could be: a method-kind hit
+    /// whose name equals a type-kind hit's name <em>in the same document</em>. Nothing else
+    /// in C# has that shape except a method named after an unrelated type declared in the
+    /// same file, and the chain check then rejects it. The common broad query asks for
+    /// nothing at all.
+    /// </para>
+    /// </summary>
+    private static async Task<List<SymbolInformation>> ConstructorsAsync(
+        LspClient client, List<SymbolInformation> matches, int max, CancellationToken ct)
+    {
+        var types = matches
+            .Where(m => Targets.IsType(m.Kind))
+            .Select(m => (m.Location.Uri, m.Name))
+            .ToHashSet();
+        if (types.Count == 0) return matches;
+
+        var trees = new Dictionary<string, IReadOnlyList<DocumentSymbol>>(StringComparer.Ordinal);
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var symbol = matches[i];
+            var uri = symbol.Location.Uri;
+            if (symbol.Kind != Kinds.Method || !types.Contains((uri, symbol.Name))) continue;
+            if (!trees.ContainsKey(uri) && trees.Count >= max) continue;
+
+            if (!trees.TryGetValue(uri, out var tree))
+            {
+                var contexts = await client.ContextsAsync(uri, ct);
+                var views = await client.DocumentSymbolsAsync(
+                    uri, contexts, [.. contexts.Select(c => c.Name)], ct);
+                tree = Outline.Tree(Outline.Merge(views));
+                trees[uri] = tree;
+            }
+
+            var chain = new Targets.Candidate(symbol.Kind, Targets.Chain(tree, symbol.Location.Range.Start));
+            if (Targets.IsConstructor(chain)) matches[i] = symbol with { Kind = Kinds.Constructor };
+        }
+
+        return matches;
+    }
+
+    /// <summary>
     /// The two decisions of "Targeting a symbol by name" in <c>DESIGN.md</c>, applied to the
     /// candidates whose name already equals the target's last segment. Both read a candidate's
     /// declaration chain off the syntax tree, which costs one
@@ -796,7 +844,7 @@ internal static partial class Program
         // listing is the one place these rows are shown, so the kind travels out with them
         // rather than being recomputed from a request the renderer would have to make.
         var rows = named
-            .Select((s, i) => new SymbolRow(s, Targets.IsConstructor(chains[i]) ? Targets.Constructor : s.Kind))
+            .Select((s, i) => new SymbolRow(s, Targets.IsConstructor(chains[i]) ? Kinds.Constructor : s.Kind))
             .ToList();
 
         if (dotted)

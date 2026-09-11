@@ -87,6 +87,28 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   implements without advertising a `textDocumentContentProvider` and answers whether or not
   the client declares the matching capability (verified both ways). The older
   `sourceGeneratedDocument/_roslyn_getText` no longer exists.
+- **`PathUri.Display`'s branch order is load-bearing in one more place, and `<external>/` is
+  the newest trap.** An ordinary file outside `--root` — the `<Compile Include="../..">`
+  shape, which Roslyn indexes fully — now renders `<external>/<path relative to the root>`
+  instead of the machine-absolute path it used to print at exit 0. But a *decompiled*
+  document is also a real file outside every ordinary root, so `IsDecompiled` has to be
+  asked **before** `IsExternal` or a framework `def` gets the `MetadataAsSource` temp path
+  inside an `<external>/` label — the same ordering bug as the one below, one branch further
+  on. `fixture-linked/Outside.cs` is the fixture: it is linked into `fixture/Core` from
+  outside `fixture/`, and `Cslq.slnx` compiles nothing there, so `--root .` never sees it.
+  Never assert a machine-absolute path in a probe row; assert the label.
+- **A delegate has no kind either request can report, and `sym`'s `function` was the
+  misleading half.** Measured 2026-09-10 on `fixture/Core/Kinds.cs`: `workspace/symbol`
+  answers a delegate `function` (12) and a *local function* `method` (6), while
+  `documentSymbol` answers both `method` and carries nothing else to separate them — the
+  `name` and `detail` of a delegate are a method's (`Inner(int) : int`), and one nested in a
+  class is a sibling of that class's methods. So `Kinds.Normalise` folds `function` into
+  `method` and both commands say `method`. Do not "restore" the distinction in `sym`: it
+  cannot be matched in `outline`, and a kind that depends on which command you asked is what
+  T-74 was. A constructor is the opposite and *is* recoverable — `Kinds.Of` reads it off the
+  parent in an outline, and `Program.ConstructorsAsync` asks for a declaration chain in
+  `sym`, but only for a document holding a method-kind hit that shares a name with a
+  type-kind hit, so a broad query costs nothing.
 - **A decompiled metadata location is a *file* URI, so every path helper answers it happily
   with a machine-absolute temp path.** `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/Console.cs`
   is a real file that really exists, which is why this is worse than the generated-URI trap:

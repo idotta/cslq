@@ -207,7 +207,25 @@ Core/Greeter.cs
 
 `outline` is the one command that does not print `path:line` and context per row — an outline
 is already the summary, so the document path is a header and each row carries that
-declaration's own source line, indented by nesting. `--context` does not apply to it. Its
+declaration's own source line, indented by nesting. `--context` does not apply to it. Where
+several declarations start on one line — `public enum Colour { Red, Green, Blue }`, or a
+multi-declarator field — printing "that declaration's own source line" printed the line once
+per declaration, so those rows print the declaration's **own span** instead and their gutter
+grows the identifier's column:
+
+```
+$ cslq outline Core/Kinds.cs --root fixture --max 5
+Core/Kinds.cs
+      1 | namespace Fixture.Core;
+  13:13 |   public enum Colour { Red, Green, Blue }
+  13:22 |     Red
+  13:27 |     Green
+  13:34 |     Blue
+```
+
+The column is the one `--json` already reported, so a crowded row is still a `line:col` you
+can paste straight back as a target. A document whose declarations each have a line to
+themselves renders exactly as it always did. Its
 target is a file path, a `file:line:col` spec (the document it names is outlined, so a position
 copied out of a `def` result works), or a symbol whose declaring document is outlined — the
 last being the only way to reach a source-generated document, which has no path on disk.
@@ -281,6 +299,37 @@ method  Area  in IShape (project Core (net10.0))  Core/Shape.cs:11:9
 method  Area  in Unit (project Core (net10.0))    Core/Shape.cs:16:16
 ```
 
+Kinds are one table across `sym` and `outline`, and two of them are worth knowing. A
+**constructor** renders as `constructor`: LSP has the kind and Roslyn reports one as a method
+from both requests, so `cslq` recovers it from the declaring type's name.
+
+**A delegate renders as `method`, and that is `cslq` levelling the two commands rather than
+Roslyn's answer.** `workspace/symbol` does say `function` for one — but
+`textDocument/documentSymbol` says `method`, and carries nothing else to tell a delegate from
+a method, so `outline` cannot be raised to match. The kind is levelled down instead: a kind
+that depends on which command you asked was the bug, and LSP has no `delegate` kind to invent.
+So a `method` row may be a delegate, and `sym` no longer distinguishes one. Three shapes in
+all that the kind table cannot express and nothing is invented for: a **delegate** reads as
+`method`, a **record** as `class` or `struct`, and a C# 14 **`extension` block** as `class`.
+
+A source line longer than 200 characters is elided in text mode, around the column the row is
+about, with a `…` at each cut end — a hit on a 20,079-character line used to print the whole
+line. The `path:line:col` above the row is untouched and is what round-trips; a column counted
+off the printed text does not. `--json` keeps the line whole, so a machine consumer can slice
+it for itself.
+
+A file a project compiles from outside `--root` — a `<Compile Include="../../Elsewhere/File.cs" />`
+— is indexed as fully as any other, and prints as `<external>/<path relative to the root>`
+rather than as the machine-absolute path it used to. Every JSON row carries `external` beside
+`generated` and `metadata`, so no label prefix has to be parsed back off `path`.
+
+**Like `<generated>/` and `<metadata>/`, it is a label and not a target.** The `..` in it says
+where the file is so you can open it, not that you can hand it back: every file-taking command
+rejects a path outside `--root` before it starts the server, so `cslq outline
+<external>/../Elsewhere/File.cs` exits 1. Point `--root` at a directory containing both trees
+if you need to query one of these files, or reach its declarations by name with `sym` and
+`def`, which answer for it perfectly well.
+
 `sym` is a search, so the query goes to the server as written and every answer is a result —
 no ambiguity error, no candidate dump. It is the second command that bends the output rules,
 more narrowly than `outline`: it keeps `path:line:col` on every row but prints no source line
@@ -294,6 +343,11 @@ App/TypeError.cs:18:36 error CS0029: Cannot implicitly convert type 'string' to 
 > 18 |     internal static int Wrong() => Greeter.Farewell("x");
   19 | }
 ```
+
+`diag` rows carry no `source`. LSP has the field and this server never sends one: measured
+2026-09-10 over `fixture`, `fixture2` and this repository, 53 findings — compiler `CS`, IDE
+analyzer `IDE` and `Microsoft.CodeAnalysis.NetAnalyzers` `CA` alike — every one of them null.
+A key that could only ever be null is dropped rather than emitted.
 
 `diag` takes a C# file (`.cs`, `.razor`, `.cshtml`), a directory, or nothing at all — with no
 argument it walks every `.cs` file under `--root`, skipping `bin` and `obj`. Anything else, a

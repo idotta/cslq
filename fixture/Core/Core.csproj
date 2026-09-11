@@ -14,4 +14,9 @@
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Outside the workspace root on purpose: the `<external>/` label fixture. -->
+    <Compile Include="../../fixture-linked/Outside.cs" />
+  </ItemGroup>
+
 </Project>

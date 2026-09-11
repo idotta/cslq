@@ -117,3 +117,13 @@
 {"name":"ready-rejects-a-stray-positional","args":"ready Greet --root fixture","exit":"2","expect":"cslq: ready takes no argument; got |(did you mean --sentinel Greet?)|usage:"}
 {"name":"tfm-rejected-where-there-is-no-context-to-choose","args":"sym Only10 --root fixture2 --tfm net9.0","exit":"2","expect":"cslq: --tfm does not apply to sym|refs, def, impl, hover, outline, diag, project"}
 {"name":"unknown-log-level-is-rejected-client-side","args":"refs Greet --root fixture --log-level bogus","exit":"2","expect":"cslq: unknown --log-level |expected one of Trace, Debug, Information, Warning, Error, Critical, None|usage:"}
+{"name":"crowded-line-outlines-each-declarations-own-span","args":"outline Core/Kinds.cs --root fixture --max 6","exit":"0","expect":"13:13|13:22|13:27|13:34|Red|Green|Blue"}
+{"name":"uncrowded-outline-rows-keep-the-bare-line-number","args":"outline Core/Greeter.cs --root fixture","exit":"0","expect":"public static class Greeter|public static string Greet(string name)"}
+{"name":"outline-json-names-a-constructor","args":"outline Core/Widget.cs --root fixture --json","exit":"0","expect":"'kind': 'constructor'|'name': 'Widget()'|'name': 'Gadget(int)'"}
+{"name":"sym-names-a-constructor","args":"sym Gadget --root fixture","exit":"0","expect":"constructor  Gadget|Core/Widget.cs:22:12|class        Gadget"}
+{"name":"a-delegate-is-a-method-in-sym-as-it-is-in-outline","args":"sym Measure --root fixture --json","exit":"0","expect":"'name': 'Measure'|'kind': 'method'|'path': 'Core/Kinds.cs'"}
+{"name":"a-long-line-is-elided-around-the-hit-column","args":"refs Marker --root fixture --context 0","exit":"0","expect":"Core/Kinds.cs:52:439|…AAA|+ Marker() + 'ZZZZ';"}
+{"name":"a-long-line-is-kept-whole-under-json","args":"refs Marker --root fixture --json","exit":"0","expect":"'column': 439|public static string Use() =>"}
+{"name":"a-linked-file-outside-the-root-is-labelled","args":"sym OutsideLinked --root fixture","exit":"0","expect":"class  OutsideLinked|<external>/../fixture-linked/Outside.cs:12:21"}
+{"name":"an-external-row-says-so-under-json","args":"sym OutsideLinked --root fixture --json","exit":"0","expect":"'path': '<external>/../fixture-linked/Outside.cs'|'external': true|'generated': false"}
+{"name":"a-diagnostic-row-carries-external-and-no-source","args":"diag App/TypeError.cs --root fixture --json","exit":"0","expect":"'code': 'CS0029'|'external': false|'metadata': false"}

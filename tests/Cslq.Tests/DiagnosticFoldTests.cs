@@ -18,7 +18,6 @@ public class DiagnosticFoldTests
             new Range(new Position(line - 1, 16), new Position(line - 1, 28)),
             1,
             JsonDocument.Parse($"\"{code}\"").RootElement,
-            null,
             message);
 
     [Fact]
