@@ -456,7 +456,7 @@ public class OutputTests
     /// <summary>
     /// A multi-targeted document is compiled several times, so <c>project</c> prints one row
     /// per context in <see cref="Contexts.Order"/>'s order and counts them all. Printing one
-    /// of them with <c>count: 1</c> is T-26: it said the file had a single home, and which one
+    /// of them with <c>count: 1</c> was the bug: it said the file had a single home, and which one
     /// it named changed between runs.
     /// </summary>
     [Fact]
@@ -551,7 +551,7 @@ public class OutputTests
 
     /// <summary>
     /// An empty answer says every context was tried: a caller who cannot tell that from
-    /// "asked the wrong one" is back where T-27 left them.
+    /// "asked the wrong one" are indistinguishable again.
     /// </summary>
     [Fact]
     public async Task An_empty_answer_says_how_many_contexts_were_tried()
@@ -619,7 +619,7 @@ public class OutputTests
     /// An outline of a multi-targeted document is the union of its contexts, and the
     /// declarations that are not in every one of them carry the contexts they are in. A file
     /// whose whole body sat inside one <c>#if</c> answered <c>no symbols</c> at exit 0 before
-    /// this — T-29, a wrong answer rather than a partial one.
+    /// this — a wrong answer rather than a partial one.
     /// </summary>
     [Fact]
     public async Task An_outline_marks_the_declarations_that_are_not_in_every_context()
@@ -823,7 +823,7 @@ public class OutputTests
     }
 
     /// <summary>
-    /// A diagnostic only one context reports carries that context — T-28's <c>net9.0</c>-only
+    /// A diagnostic only one context reports carries that context — the <c>net9.0</c>-only
     /// CS0029, which an unqualified pull reported in 1 run of 4 and otherwise not at all — and
     /// one every context reports carries nothing.
     /// </summary>
@@ -860,7 +860,7 @@ public class OutputTests
 
         Assert.Equal(2, json.GetProperty("contexts").GetInt32());
         // Not tfm: null. A union has no answering context, and a null field an agent has to
-        // interpret is T-77's complaint about `source`; the envelope omits the key instead.
+        // interpret is the complaint against an always-null `source`; the envelope omits the key instead.
         Assert.False(json.TryGetProperty("tfm", out _));
         var only = Assert.Single(json.GetProperty("results").EnumerateArray().ToList());
         Assert.Equal("net9.0", only.GetProperty("tfm").GetString());

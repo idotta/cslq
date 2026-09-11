@@ -139,7 +139,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   class is a sibling of that class's methods. So `Kinds.Normalise` folds `function` into
   `method` and both commands say `method`. Do not "restore" the distinction in `sym`: it
   cannot be matched in `outline`, and a kind that depends on which command you asked is what
-  T-74 was. A constructor is the opposite and *is* recoverable — `Kinds.Of` reads it off the
+  the bug was. A constructor is the opposite and *is* recoverable — `Kinds.Of` reads it off the
   parent in an outline, and `Program.ConstructorsAsync` asks for a declaration chain in
   `sym`, but only for a document holding a method-kind hit that shares a name with a
   type-kind hit, so a broad query costs nothing.
@@ -207,7 +207,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     bullet exists to prevent.
   - **A server that stops honouring the field fails silently.** An unrecognised member of a
     request payload is ignored — unlike `_vs_getProjectContexts`, which answers or fails — so
-    the symptom is T-27's intermittency returning, an answer that is right most of the time.
+    the symptom is the old intermittency returning, an answer that is right most of the time.
     `tfm-excludes-the-other-branch` is the only guard: it asserts `hover Only10 --tfm net9.0`
     finds **nothing**, which can only hold if the context was honoured. It is an absence, so
     do not "fix" it into an assertion about output.
@@ -236,7 +236,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     by `--tfm` would hand that bug back.
   - **The folds are what keep the union from duplicating.** `refs`/`impl` rely on
     `Output.WriteLocationsAsync`'s existing fold on rendered label plus range, before `--max` —
-    the same fold that closed T-30 — and `Program.Reports` folds diagnostics on position,
+    the same fold that closed the per-framework duplicate rows — and `Program.Reports` folds diagnostics on position,
     severity, code **and message**, the message included because serilog answers
     `Substring can be simplified` in one context and `Slice can be simplified` in another at
     one position, and those are two findings rather than one.
@@ -244,7 +244,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `tried all N contexts: ...`: "tried" printed above a correct answer reads as a failure the
   caller has to rule out, and that cost is paid on every successful call. Its `--json` envelope
   carries `contexts` and **no `tfm`** — an envelope key that could only ever be null is omitted
-  rather than emitted as null, which is the rule T-77 asks for about `source` and is written in
+  rather than emitted as null, which is the rule the always-null `source` is answered by and is written in
   DESIGN.md beside the other envelope rules. Row-level nulls stay: a row's null `tfm` means
   "in every context asked", which is a value rather than a missing one.
   The cost was measured before the rule was adopted, not after: a whole-tree `diag` walk on
@@ -359,7 +359,17 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   directory down does not count — which is what keeps `fixture/Fixture.slnx` from narrowing a
   root above it, and what makes `--root fixture` and `--root .` two different workspaces rather
   than one. `.slnf` is not read. Two `.csproj` in one directory are still indistinguishable, and
-  still a documented limit. It is *half* the fix for the OrchardCore template failure above —
+  still a documented limit — and worse at the query layer than at readiness: testers measured
+  `sym BType` answering a *fuzzy* `AType` row at exit 0 on such a pair while `hover`/`def`
+  inside `BType.cs` answered `no results`.
+  **Every claim in this bullet is about the daemon, which is the default, and `--no-daemon`
+  discovers more.** Measured 2026-09-10 on a staged tree: a root whose solution sits one
+  directory down is ready in 6 s under `--no-daemon` and times out at 45 s under the daemon,
+  same tree, same explicit `--sentinel`. A bare `.csproj` root loads under neither on the
+  current pin, although testers saw it load under `--no-daemon` on 0.1.0's, so do not quote
+  "`--autoLoadProjects` never discovers a bare `.csproj`" as a flat fact — it is the daemon's
+  behaviour, it is what the fail-fast is written for, and the fail-fast is deliberately not
+  being loosened to match the other mode. It is *half* the fix for the OrchardCore template failure above —
   see the next bullet for the other half — and scoping `--root` below the templates was only
   the workaround.
   Parse failures go through `CslqException`: `Main` catches that and nothing else, so a
@@ -416,7 +426,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   with `Lib/obj/project.assets.json` on disk only afterwards. So the old flat claim — still
   quoted in README, PACKAGE.md and SKILL.md until this batch — was wrong. Restore first
   anyway: an unresolvable `PackageReference` makes the design-time build fail, every project
-  then loads empty, and all `cslq` can say is that it happened (the T-35 diagnosis below);
+  then loads empty, and all `cslq` can say is that it happened (the design-time-build diagnosis below);
   `dotnet restore` is what names the package.
 - **The daemon is the default, and it changes what "ready" means.** `cslq` connects to the
   shared multi-client daemon unless `--no-daemon` is passed. One daemon serves every
@@ -496,6 +506,17 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   over files on Linux — but it **passed on `ubuntu-latest`** in PR #5, so the file-backed
   implementation contends the same way. Both halves are now watched: the `windows-latest` leg
   of `probe.yml` runs it against the real Win32 named mutex the code was written for.
+- **`probes/roots/` holds workspace *shapes*, and each one is answered before the server
+  starts.** `multilang/` is a solution listing a `.vbproj` and no C# project, and `toplevel/`
+  is one project of top-level statements — the two cases added in batch 8, costing a probe row
+  milliseconds each because both fail in `Sentinels` rather than in a load. Nothing there is
+  ever built or restored and no `.csproj` in it is listed by `Cslq.slnx`; its `.csproj` files
+  are visible to `--root .` only as nesting boundaries, which changes no candidate. Put a
+  `.cs` file that *does* declare a type under `toplevel/` and the case stops testing anything.
+- **The non-C# notice prints before discovery, deliberately.** A solution listing only
+  `.vbproj`/`.fsproj` would otherwise fail with "lists no C# project" and no hint that the
+  projects sitting right there had been seen. It is also not behind `--log-level`, unlike the
+  not-probed line: a missing VB reference is an answer that looks complete at exit 0.
 - **`probes/hold-mutex.cs` is a .NET 10 file-based app, not a project, and that is deliberate.**
   `dotnet run probes/hold-mutex.cs` compiles a bare `.cs` in under a second with no `.csproj`.
   Reach for that before adding a project to the tree for a probe.

@@ -132,3 +132,7 @@
 {"name":"utf8-bom-is-still-read","args":"outline encoding/Utf8Bom.cs --root fixture","exit":"0","expect":"encoding/Utf8Bom.cs|class Utf8Bom"}
 {"name":"utf16-bom-is-still-read","args":"outline encoding/Utf16Bom.cs --root fixture","exit":"0","expect":"encoding/Utf16Bom.cs|class Utf16Bom"}
 {"name":"short-timeout-says-the-workspace-is-still-loading","args":"ready --root fixture --timeout 0","exit":"1","expect":"the workspace is still loading|Raise --timeout"}
+{"name":"non-csharp-projects-are-named-not-searched","args":"ready --root probes/roots/multilang","exit":"1","expect":"1 non-C# project(s) not searched: Vb.vbproj|lists no C# project"}
+{"name":"top-level-statements-only-says-what-resolves","args":"ready --root probes/roots/toplevel","exit":"1","expect":"no project declares a type|a type, a method, or a local function|compiler-generated and is not indexed|name a method or a local function in it instead"}
+{"name":"sym-matches-camel-humps","args":"sym AV --root fixture","exit":"0","expect":"AudioVolume|Core/Volume.cs:14:21"}
+{"name":"an-all-caps-sym-query-is-not-a-prefix","args":"sym VOL --root fixture","exit":"1","expect":"cslq: no results"}

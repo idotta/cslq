@@ -73,7 +73,7 @@ internal static class Readiness
 
         if (!f.Fired)
         {
-            // T-42: a short --timeout used to be reported as "projectInitializationComplete
+            // A short --timeout used to be reported as "projectInitializationComplete
             // never fired", which reads as a fault and is the ordinary state of every attach
             // until the reload ends. What the caller needs is the deadline, not the protocol.
             return $"{within}: the workspace is still loading — projectInitializationComplete "

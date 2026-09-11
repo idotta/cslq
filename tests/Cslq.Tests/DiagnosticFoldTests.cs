@@ -6,7 +6,7 @@ namespace Cslq.Tests;
 /// Folding one document's diagnostics across the contexts that compile it. Both halves matter:
 /// a finding every context reports must appear <em>once</em> — no per-framework duplication,
 /// which testers confirmed <c>diag</c> never had and this must not introduce — and a finding
-/// only one context reports must survive at all, which is T-28: a CS0029 that exists in
+/// only one context reports must survive at all: a CS0029 that exists in
 /// <c>net9.0</c> alone was reported in 1 unqualified pull of 4 and otherwise silently absent.
 /// </summary>
 public class DiagnosticFoldTests

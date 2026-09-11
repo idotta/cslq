@@ -278,4 +278,116 @@ public class ProjectDiscoveryTests
 
         Assert.Contains("Only.slnx lists no C# project", ex.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The server is a C# one, so a VB or F# project in the solution is not loaded and not
+    /// searched — and a reference to a C# symbol from its source is then missing from
+    /// <c>refs</c> at exit 0, which is the part no caller can see. The solution lists them, so
+    /// naming them costs a read discovery is making anyway.
+    /// </summary>
+    [Fact]
+    public void The_non_csharp_projects_a_solution_lists_are_named()
+    {
+        using var ws = new Workspace(solution: false);
+        ws.Project("App");
+        ws.Write("App/Real.cs", "internal class Real;");
+        ws.Write("Legacy/Legacy.vbproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        ws.Write("Calc/Calc.fsproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        ws.Write("Mixed.slnx", """
+            <Solution>
+              <Project Path="App/App.csproj" />
+              <Project Path="Legacy/Legacy.vbproj" />
+              <Project Path="Calc/Calc.fsproj" />
+            </Solution>
+            """);
+
+        Assert.Equal(["Calc.fsproj", "Legacy.vbproj"], Program.NonCsharpProjects(ws.Root));
+
+        // And the C# project is still the only one waited on.
+        Assert.Equal("App", Path.GetFileName(Assert.Single(Program.InferSentinels(ws.Root)).Directory));
+    }
+
+    /// <summary>
+    /// A project file the solution lists but the disk does not hold is dropped for C# already,
+    /// so reporting it as an unsearched VB project would name a file the reader cannot open.
+    /// A <c>.sln</c> solution folder has no project file at all and falls out the same way.
+    /// </summary>
+    [Fact]
+    public void A_listed_project_absent_from_disk_is_not_named()
+    {
+        using var ws = new Workspace(solution: false);
+        ws.Project("App");
+        ws.Write("App/Real.cs", "internal class Real;");
+        ws.Write("Gone.slnx", """
+            <Solution>
+              <Project Path="App/App.csproj" />
+              <Project Path="Legacy/Legacy.vbproj" />
+            </Solution>
+            """);
+
+        Assert.Empty(Program.NonCsharpProjects(ws.Root));
+    }
+
+    /// <summary>
+    /// The advisory may not pre-empt the error the caller is about to be given properly: a root
+    /// with no solution, or with two, is a failure that names itself, and this is silent there.
+    /// </summary>
+    [Fact]
+    public void A_root_that_is_not_one_solution_is_not_advised_about()
+    {
+        using var ws = new Workspace(solution: false);
+        ws.Write("Legacy/Legacy.vbproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        var listing = """
+            <Solution>
+              <Project Path="Legacy/Legacy.vbproj" />
+            </Solution>
+            """;
+
+        Assert.Empty(Program.NonCsharpProjects(ws.Root));
+
+        ws.Write("One.slnx", listing);
+        Assert.Equal(["Legacy.vbproj"], Program.NonCsharpProjects(ws.Root));
+
+        ws.Write("Two.slnx", listing);
+        Assert.Empty(Program.NonCsharpProjects(ws.Root));
+    }
+
+    [Fact]
+    public void The_notice_counts_every_project_and_names_the_first_five()
+    {
+        string[] many = ["a.vbproj", "b.vbproj", "c.vbproj", "d.fsproj", "e.fsproj", "f.fsproj"];
+
+        Assert.Equal(
+            "6 non-C# project(s) not searched: a.vbproj, b.vbproj, c.vbproj, d.fsproj, e.fsproj, and 1 more",
+            Program.NonCsharpNotice(many));
+        Assert.Equal(
+            "1 non-C# project(s) not searched: a.vbproj",
+            Program.NonCsharpNotice(["a.vbproj"]));
+    }
+
+    /// <summary>
+    /// <c>dotnet new console</c>'s default shape. Inference cannot read a type out of it and
+    /// refuses in 90 ms, which is right — but the obvious repair is a trap: the <c>Program</c>
+    /// class such a file compiles to is compiler-generated and <c>workspace/symbol</c> does not
+    /// index it, so <c>--sentinel Program</c> reads as correct and waits out the whole timeout,
+    /// where a method or local function in the same file resolves in about two seconds. The
+    /// message is what has to say so.
+    /// </summary>
+    [Fact]
+    public void A_workspace_of_only_top_level_statements_says_what_does_resolve()
+    {
+        using var ws = new Workspace();
+        ws.Project("Tls");
+        ws.Write("Tls/Program.cs", """
+            Console.WriteLine(Greet("world"));
+
+            static string Greet(string name) => $"Hello, {name}";
+            """);
+
+        var ex = Assert.Throws<CslqException>(() => Program.InferSentinels(ws.Root));
+
+        Assert.Contains("no project declares a type", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("a type, a method, or a local function", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("--sentinel Program waits out the whole timeout", ex.Message, StringComparison.Ordinal);
+    }
 }

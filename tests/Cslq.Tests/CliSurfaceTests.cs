@@ -114,4 +114,18 @@ public class CliSurfaceTests
             Assert.Contains("cslq " + command, Program.Usage, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// <c>sym</c> is Roslyn's fuzzy matcher and looked like a lookup: measured on the fixture,
+    /// <c>AV</c> answers <c>AudioVolume</c> and <c>Greter</c> answers <c>Greeter</c>, so a
+    /// caller who reads a hit as "this name exists" is reading it wrong. The usage text is
+    /// where that has to be said, because it is the one page every caller sees.
+    /// </summary>
+    [Fact]
+    public void The_usage_text_says_sym_is_fuzzy()
+    {
+        Assert.Contains("sym is a fuzzy search", Program.Usage, StringComparison.Ordinal);
+        Assert.Contains("AV finds AudioVolume", Program.Usage, StringComparison.Ordinal);
+        Assert.Contains("ALL-CAPS", Program.Usage, StringComparison.Ordinal);
+    }
 }

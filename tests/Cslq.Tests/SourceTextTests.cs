@@ -6,7 +6,7 @@ namespace Cslq.Tests;
 /// The decoder, pinned in a temp tree: a file that is not valid UTF-8 has to be refused and
 /// the three encodings that are legitimately not plain UTF-8 — a UTF-8 BOM, a UTF-16 LE BOM
 /// and a UTF-16 BE BOM — have to keep working. Both halves matter equally. Substitution is
-/// what T-75 measured (one U+FFFD for two CP1252 bytes, every later column off by one, and
+/// what was measured (one U+FFFD for two CP1252 bytes, every later column off by one, and
 /// <c>def</c> at the position cslq itself printed answering <c>no results</c>), and the
 /// obvious fix for it — reading bytes as UTF-8 and nothing else — silently breaks every
 /// BOM'd file in a repository.

@@ -63,7 +63,7 @@ internal static class Contexts
     /// both ordinal. <b>Never the order the server sent and never <c>_vs_defaultIndex</c>.</b>
     /// Measured 2026-09-10 on <c>fixture2/Multi</c>: <c>_vs_defaultIndex</c> was 0 in 6 of 6
     /// runs while the array order itself varied per attach, and the unqualified answer
-    /// followed the array — which is the whole of T-26 and T-27. So the index carries no
+    /// followed the array — which is the whole of both symptoms. So the index carries no
     /// information, and an order of our own is the only thing that makes an answer repeatable.
     /// </summary>
     internal static List<DocumentContext> Order(IEnumerable<DocumentContext> contexts) =>

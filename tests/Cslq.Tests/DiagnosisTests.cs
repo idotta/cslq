@@ -1,7 +1,7 @@
 namespace Cslq.Tests;
 
 /// <summary>
-/// T-35's interpretation. The real repro needs an SDK that is not installed, which
+/// The interpretation of a failed design-time build. The real repro needs an SDK that is not installed, which
 /// <c>probes/run.sh</c> stages in a throwaway tree with a <c>global.json</c> pinning 9.9.900;
 /// what is pinned here is the reading of what that probe finds, because the branch order is
 /// the part that can go quietly wrong — an absent restore reported as an SDK mismatch sends

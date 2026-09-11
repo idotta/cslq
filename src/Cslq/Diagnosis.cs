@@ -84,7 +84,7 @@ internal static class Diagnosis
 
     /// <summary>
     /// Projects with no <c>obj/project.assets.json</c>. A file check, so it costs nothing and
-    /// cannot fail the run; a restore that never happened is the other half of T-35's class,
+    /// cannot fail the run; a restore that never happened is the other half of the same class,
     /// and it is the half <c>dotnet --version</c> cannot see. Note this is a *failed* restore
     /// talking: the server does restore on its own, measured, so the absence of the file after
     /// a full load is evidence that the restore it ran did not succeed.

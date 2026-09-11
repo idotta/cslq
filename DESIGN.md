@@ -32,8 +32,8 @@ near-useless to a model.
   is unknown" when the truth is "the question does not apply to this command". So `tfm` sits on
   an envelope only where a single context produced the answer — `hover` and `def` — and is
   absent from a union's, where `contexts` and the footer say what was merged. This is the same
-  rule T-77 asks for about `diag`'s always-null `source`, decided here first so that batch 8
-  inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
+  rule the always-null `source` on a `diag` row is answered by, decided here first so that the
+  rendering pass inherits it. It applies to envelope keys, not to row keys: a **row**'s null `tfm` is a value,
   not an absence — it means that row is in every context asked, which is exactly the thing its
   marked neighbours are not — and row keys stay stable across the rows of one answer.
 - **In text mode stdout carries the answer and nothing else: every non-answer and every
@@ -170,6 +170,12 @@ it only answers inside an argument list rather than at a symbol. The client decl
 `contentFormat: ["plaintext"]` for the same reason the rest of this section exists — markdown
 would mean fenced blocks and `&nbsp;` runs that the caller has to undo.
 
+What a hover does **not** carry is the `<param>` docs, and that is Roslyn's QuickInfo rather
+than a rendering choice here: the summary and `<remarks>` come through, the parameter *types*
+are in the signature, and the per-parameter prose is not in the response at all, so there is
+nothing to print. It is the half of a doc comment an agent most wants before writing a call, so
+the README says outright that `def` and the declaration are where to go for it.
+
 **`sym` breaks one narrower rule.** It prints no source line and no `>` marker, and
 `--context` is inert for it: a search result set is a list of places to go, not a place to
 read, and padding every hit of a broad query with context is the exact cost the cap exists to
@@ -192,6 +198,18 @@ showed substring hits while 140 exact matches went unshown. Ranking here makes t
 same thing on every repository. The label projection stays *after* the cut, because resolving a
 generated document's label costs a request and a broad query drops most of its hits, so the
 tiebreak is on the raw URI rather than on what the row will render as.
+
+**What is *matched* stays Roslyn's, and is documented rather than narrowed.**
+`workspace/symbol` is the matcher behind an IDE's Ctrl+T, so `sym` is fuzzy in ways a caller
+reading a hit as "this name exists" gets wrong: measured on the fixture 2026-09-10, `eter`
+answers `Greeter` (substring), `AV` answers `AudioVolume` (camel humps) and `Greter` answers
+`Greeter`, `Greet` and `Green` (a dropped letter is still a match). An ALL-CAPS query is read
+as humps or as a whole name and never as a prefix, so `VOL` answers nothing where `Vol`
+answers two. Namespaces are not indexed, nor are locals and parameters; `*` and an empty query
+match nothing. Filtering that down client-side would be a second matcher disagreeing with the
+server's ranking, and the exact answer already has a command — `def`, whose dotted targets are
+matched segment by segment against the syntax tree. So the fix is a line in `--help` and a
+table in the README, not a narrower `sym`.
 
 Source-generated locations are labelled
 `<generated>/<consuming project directory>/<assemblyName>/<typeName>/<hintName>`, where
@@ -270,8 +288,8 @@ The contexts come from `textDocument/_vs_getProjectContexts`, one per `(.csproj,
 server sent and never `_vs_defaultIndex`.** Measured 2026-09-10 on `fixture2/Multi` against
 5.12.0-1.26426.8: `_vs_defaultIndex` was `0` in 6 of 6 runs while the array order around it
 varied per attach, and the unqualified answer followed `contexts[0]` in 6 of 6 — which is the
-whole of T-26 (`project` naming a different TFM each run) and T-27 (`hover`/`def` on a
-conditional type answering 4 times in 8). The index carries no information; the load order it
+whole of both symptoms testers measured: `project` naming a different TFM each run, and
+`hover`/`def` on a conditional type answering 4 times in 8. The index carries no information; the load order it
 reflects is not ours to control; an order of our own is the only thing that makes an answer
 repeatable.
 
@@ -308,7 +326,7 @@ a caller to skip it.
 **Nothing but a pinned deterministic answer can catch a server that drops
 `_vs_projectContext`.** `_vs_getProjectContexts` either answers or fails, and the failure is
 handled; an unrecognised *member of a request payload* is silently ignored, and the symptom is
-the intermittency of T-27 coming back — an answer that is right most of the time. So
+the intermittency coming back — an answer that is right most of the time. So
 `tfm-excludes-the-other-branch` in `cases.jsonl` asserts that `hover Only10 --tfm net9.0` finds
 **nothing**: it can only pass if the server honoured the context it was handed. Keep it, and
 keep it as an absence.
@@ -323,7 +341,7 @@ the set — all of them, or the `--tfm` subset — and union what comes back:
 - **`refs` and `impl`** concatenate, and the existing fold does the rest: rows are folded on
   their rendered label plus range, before `--max`, so a hit both contexts report is one row.
   That is the same fold that already collapsed a generated document's per-framework twins, and
-  it is why the union does not reintroduce the duplication T-30 was about.
+  it is why the union does not reintroduce the duplication that fold was added for.
 - **`outline`** unions by declaration, keyed on name, kind and identifier position — every
   context parses the same text, so those agree. A declaration's *extent* does not: on
   `fixture2/Multi/Conditional.cs` the namespace ends at line 6 in `net10.0` and line 13 in
@@ -334,7 +352,7 @@ the set — all of them, or the `--tfm` subset — and union what comes back:
   them — `public sealed class Only9  [net9.0]` — and the ones that are carry nothing, so an
   unconditional file renders exactly as it did before.
 - **`diag`** pulls every context, folds rows on what a reader sees (position, severity, code and
-  message) and labels a row only some contexts report. This is T-28: `net9.0`-only CS0029 in
+  message) and labels a row only some contexts report. This is the finding behind the rule: the `net9.0`-only CS0029 in
   `TfmError.cs` was reported by an unqualified pull in 1 run of 4 and silently absent in the
   other 3. The fold key includes the message because two contexts disagreeing about the *text*
   at one position are two findings — serilog answers `Substring can be simplified` in one
@@ -487,10 +505,32 @@ load for the server any more than `dotnet restore` on the same tree succeeds —
 Two limits are known and deliberate. A project the scan can infer no sentinel for — one that is
 only top-level statements, or only Razor or resources — is **not** waited on: there is nothing
 to ask the server for, and failing on it would break those projects outright. It is named on the
-failure path instead, so its absence from readiness is visible rather than silent. And two
+failure path instead, so its absence from readiness is visible rather than silent. When it is
+the *only* project, there is nothing left to wait for and inference refuses outright, in about
+90 ms. The message has to name what does resolve, because the obvious repair is a trap: the
+`Program` class a top-level file compiles to is compiler-generated and `workspace/symbol` does
+not index it, so `--sentinel Program` reads as correct and burns the whole timeout, while any
+method or local function in the same file resolves in about two seconds. Letting the
+file-taking commands skip readiness for such a root would be the larger fix — the document pull
+blocks until the document is bound — and is deliberately not made here: readiness is one rule
+for every command, and carving out an exception for three of them trades a message for a class
+of silent partial answers. And two
 `.csproj` in one directory collapse to a single entry, because a hit under that directory cannot
 be attributed to one of them by path — no scan-based scoping can separate them, so the second
-project is covered only incidentally.
+project is covered only incidentally. Testers measured what that costs at the query layer, which
+is worse than the readiness wording suggests: on such a pair `sym BType` answered with a fuzzy
+`AType` row at exit 0, a wrong row rather than a missing one, while `hover` and `def` inside
+`BType.cs` answered `no results`.
+
+A solution's **non-C# projects** are a fourth class, and the only one answered with a line of
+output rather than a design. The server is a C# one, so a `.vbproj` or `.fsproj` is not loaded,
+not searched, and — the part a caller cannot otherwise see — a reference to a C# symbol from VB
+or F# source is absent from `refs` at exit 0. `cslq` cannot fix that, but the solution lists
+those projects, so it names them: one stderr line, before discovery rather than after it, so a
+solution holding nothing but non-C# projects says what it holds and then fails for holding no
+C# one. It is not behind `--log-level`, unlike the not-probed line, because that one reports a
+shortfall in readiness a later failure would expose anyway, while this one reports an answer
+that looks complete and is not.
 
 A third class cannot be probed even in principle, and is reported rather than waited on. A
 project whose sources are linked in from outside its own directory — a `*.projitems` import,
@@ -544,7 +584,15 @@ the `.csproj` scan that used to answer instead is over-inclusive, so a project n
 loads gets a sentinel that can never resolve and readiness burns its whole timeout — three runs
 out of three when testers hit it. A solution in a subdirectory describes that subtree rather
 than this root, and Roslyn would not open it for this root either, so a root holding only that
-is a root with no solution. A `.slnf` solution filter is not read. A project the solution lists
+is a root with no solution — **under the daemon**, which is the qualifier this whole paragraph
+carries. `--no-daemon` is more forgiving: measured 2026-09-10, a root whose solution sits one
+directory down is ready in 6 s with a dedicated server and times out at 45 s against the
+daemon, same tree and same `--sentinel`. The rules here are written for the default because
+the default is the daemon, and because a layout only one mode can load is a layout to fix; the
+alternative — discovery that depends on which server you got — is a worse contract than a
+fail-fast that is occasionally strict. (A bare `.csproj` root with no solution at all loads
+under neither on the current pin, though testers saw it load under `--no-daemon` on 0.1.0's.)
+A `.slnf` solution filter is not read. A project the solution lists
 but that is not on disk is dropped: waiting on one is the same unresolvable sentinel by another
 route. A root whose solution lists no C# project fails immediately instead of timing out,
 naming the solution, because "no .csproj under <root>" would be a lie about a root whose

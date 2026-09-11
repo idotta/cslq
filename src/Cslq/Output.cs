@@ -164,7 +164,7 @@ internal static class Output
     /// adds: <c>contexts</c> is how many the document has, and <c>tfm</c> is the one that
     /// answered — <b>present only when there is one</b>. A union has no answering context, and
     /// emitting <c>tfm: null</c> there would hand a caller a field to interpret when the answer
-    /// is that the question does not apply; that is T-77's complaint about <c>source</c>, and
+    /// is that the question does not apply; that is the complaint against an always-null <c>source</c>, and
     /// the rule is the same. Both keys are absent for the commands that do not choose a
     /// context at all.
     /// </summary>
@@ -361,7 +361,7 @@ internal static class Output
     /// <summary>
     /// The contexts a finding is <em>only</em> in, or null when every context asked reports it
     /// — which is every finding in a single-context document, so an ordinary <c>diag</c> row
-    /// is unchanged. A row carrying a framework is the answer to T-28: a CS0029 that exists in
+    /// is unchanged. A row carrying a framework is what makes a conditional finding visible: a CS0029 that exists in
     /// <c>net9.0</c> and nowhere else used never to be reported at all.
     /// </summary>
     private static string? Only(Report report) =>

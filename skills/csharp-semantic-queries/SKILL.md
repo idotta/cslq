@@ -55,6 +55,7 @@ command should be an unredirected `cslq ready`, or pass `--no-daemon`.
 | Where something is declared | `cslq def <symbol>` | grep `class X` — misses `partial`, generated and cross-project |
 | What implements an interface or overrides a member | `cslq impl <symbol>` | grep `: IThing` — misses indirect and cross-project implementers |
 | What something *is* — its type, signature, parameters, docs | `cslq hover <symbol \| file:line:col>` | read the declaration and infer — hover gives the resolved type and the doc summary in one line |
+| What a parameter *means* (the `<param>` docs) | `cslq def <symbol>` and read the doc comment | expect `hover` to carry it — Roslyn's QuickInfo drops every `<param>`, so hover gives the parameter types and never their prose |
 | Which project compiles a file, and for which framework | `cslq project <file>` | guess from the directory — a linked file is compiled by a project it does not sit under |
 | Find a symbol when you only know part of the name | `cslq sym <query>` | grep the tree — matches comments, strings and unrelated languages |
 | What a file declares, and its nesting | `cslq outline <file>` | read the whole file into context |
@@ -86,6 +87,16 @@ treated as a file, never as a symbol.
 `sym` takes neither: its argument is a **search query**, matched by the server against every
 symbol name in the workspace, so a partial name works and several hits are normal rather than
 an error. Use it when you do not know the exact name; use `def` when you do.
+
+**`sym` is fuzzy, so a hit does not mean the name exists.** It is the matcher behind an IDE's
+Ctrl+T. Measured: `eter` finds `Greeter` (substring), `Vol` finds `Volume` and `AudioVolume`
+(prefix and substring), `AV` finds `AudioVolume` (camel humps), and `Greter` finds `Greeter`,
+`Greet` and `Green` — a dropped letter still matches. Case is ignored, except that an ALL-CAPS
+query is read as humps or as a whole name and never as a prefix, so `VOL` finds nothing where
+`Vol` finds two. Namespaces are not indexed, and neither are locals or parameters; `*` and an
+empty query match nothing. Results are ranked before `--max` cuts them, so a truncated list is
+the useful end. **Never report a `sym` row as confirmation that a symbol exists** — confirm
+with `def`, whose targets are matched exactly, segment by segment.
 
 `diag` is the exception: it takes a **file or directory path, or nothing at all** — never a
 symbol or a position. With no argument it walks every `.cs` file under `--root`. `project` takes
@@ -254,8 +265,9 @@ query to several narrow ones.
 1. **A root with no solution at its top is now an error, not a hang.** `cslq` exits 1 in about
    a second with a message saying it loads the projects the root's solution lists, so `--root`
    must be the directory holding the `.sln`/`.slnx`. A solution one directory down does not
-   count. This is the most common cause by far, and it announces itself — you will not see it
-   as an empty answer.
+   count — and `--no-daemon` will sometimes load such a root anyway, which is not a fix but a
+   difference between the two servers: point `--root` at the solution. This is the most common
+   cause by far, and it announces itself — you will not see it as an empty answer.
 2. **A solution at the root is also what scopes readiness.** `cslq` waits for every project the
    root's `.sln`/`.slnx` lists. A root holding *several* of them gives no basis for choosing
    one and is an error too, naming both files: point `--root` at a directory holding the one
@@ -273,13 +285,18 @@ query to several narrow ones.
    other one: the solution loaded and compiled nothing, which is a failed design-time build,
    and the `cause:` line under it names what `cslq` found — an SDK a `global.json` pins but
    nobody has installed, or a restore that did not succeed. Fix that, not the query.
-7. **A file that is not valid UTF-8 is refused, not guessed at.** `cslq` reads sources as
+7. **A non-Latin identifier may not be findable by name.** A CJK name was measured answering
+   nothing to `refs` and `sym` while the same declaration answered correctly by
+   `file:line:col`; accented Latin and ligatures were fine, and Cyrillic and Greek were never
+   tried. The cause is unsettled — the server's matcher, or the argument never arriving intact.
+   Query by position, which never goes through the matcher, and say that is why.
+8. **A file that is not valid UTF-8 is refused, not guessed at.** `cslq` reads sources as
    UTF-8 (a UTF-8 or UTF-16 BOM is honoured), and a file that is neither is an error when you
    name it and a skipped line on stderr when `diag` walks over it. Decoding it anyway would
    move every column after the bad bytes, which is a wrong answer rather than a wrong-looking
    one. Re-save the file as UTF-8.
 
-## Two readiness limits that are `cslq`'s, not the user's
+## Limits that are `cslq`'s, not the user's
 
 `cslq ready` covers every project it can infer a readiness probe for. Two shapes fall outside
 that, and in both of them a query can answer at exit 0 with a project's hits missing. Neither is
@@ -290,7 +307,22 @@ misconfiguration, so do not send the user off to fix their setup over one:
   It is named on the readiness failure path, so its absence is at least visible.
 - **Two `.csproj` in one directory** collapse to a single probe: a hit under that directory
   cannot be attributed to one of them by path, so the second project is covered only
-  incidentally.
+  incidentally. This one is worse than "covered incidentally" suggests: measured on such a
+  pair, `sym BType` answered with a fuzzy `AType` row at exit 0 — a wrong row, not a missing
+  one — while `hover` and `def` inside `BType.cs` answered `no results`. Giving each project
+  its own directory is the only fix; no flag helps.
 
 If a result looks like it is missing a project's hits in either shape, re-run the query — the
 second one is against a fully loaded workspace.
+
+Two more, neither of them about readiness:
+
+- **A `.vbproj` or `.fsproj` is not searched.** The server is a C# one. `cslq` prints
+  `N non-C# project(s) not searched: ...` on stderr when the root's solution lists any, and the
+  part to carry into an answer is that a reference to a C# symbol *from* VB or F# source is
+  absent from `refs` at exit 0. Say so rather than reporting the C# hits as the whole picture.
+- **A workspace of nothing but top-level statements cannot infer a sentinel** — `dotnet new
+  console` declares no type — and `cslq` refuses in about 90 ms saying so. Do not reach for
+  `--sentinel Program`: that class is compiler-generated, `workspace/symbol` does not index it,
+  and the run waits out the entire timeout. Pass a method or a local function declared in that
+  file instead; it resolves in about two seconds.

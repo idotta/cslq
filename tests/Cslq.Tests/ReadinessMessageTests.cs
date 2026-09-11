@@ -1,8 +1,8 @@
 namespace Cslq.Tests;
 
 /// <summary>
-/// The readiness failure text. Two findings live here and neither can be staged live: T-43,
-/// the 1,050-character single line a 26-project repository produced, and T-42, the short
+/// The readiness failure text. Two findings live here and neither can be staged live:
+/// the 1,050-character single line a 26-project repository produced, and the short
 /// <c>--timeout</c> reported as <c>projectInitializationComplete never fired</c> — a state
 /// that is ordinary on every attach until the reload ends, and so reads as a fault that is
 /// not one. Both are layout and wording over inputs a temp tree and a string can supply.
@@ -43,7 +43,7 @@ public class ReadinessMessageTests
     }
 
     /// <summary>
-    /// T-42. The notification not having fired means the load this client asked for is still
+    /// The notification not having fired means the load this client asked for is still
     /// running — which is a sentence, not a protocol detail — and the lever is the timeout.
     /// </summary>
     [Fact]
@@ -58,7 +58,7 @@ public class ReadinessMessageTests
     }
 
     /// <summary>
-    /// T-35's headline half: the interpretation is stated where the reader is, not left to be
+    /// The headline half: the interpretation is stated where the reader is, not left to be
     /// inferred from a notification name and an empty list.
     /// </summary>
     [Fact]

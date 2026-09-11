@@ -159,9 +159,31 @@ that solution lists. A root with no solution at its top is an error, reported in
 rather than after the timeout, and a solution one directory down does not count. A checkout
 whose path contains a `%XX` sequence (`.../pct%20x`) never loads at all — MSBuild unescapes it,
 so `dotnet restore` on such a tree fails too — and nothing in `cslq` can fix that: rename or
-move the checkout. Two `.csproj` in one directory are indistinguishable to readiness, since a
-hit under that directory cannot be attributed to one of them; the second is covered only
-incidentally.
+move the checkout.
+
+Two `.csproj` in one directory are indistinguishable to readiness, since a hit under that
+directory cannot be attributed to one of them; the second is covered only incidentally. That
+limit is worse in practice than it sounds, and it does not announce itself: on such a pair,
+testers measured `sym BType` answering with a fuzzy `AType` row at exit 0 — a *wrong* row
+rather than a missing one, because `sym` matches approximately — while `hover` and `def` at a
+position inside `BType.cs` answered `no results`. `--no-daemon` answered both correctly. Give
+each project its own directory; there is no flag that fixes this one.
+
+The discovery above — read the root's solution, fail fast when there is none — is written for
+the **daemon**, which is the default, and `--no-daemon` is measurably more forgiving. Measured
+2026-09-10 on a staged tree: a root whose solution sits one directory down is ready in 6 s
+under `--no-daemon` and times out at 45 s under the daemon, with the same `--sentinel`. A root
+holding a bare `.csproj` and no solution at all loads under neither on the current server pin,
+though testers saw it load under `--no-daemon` on 0.1.0's; a `.slnf`-only root was theirs to
+measure and has not been re-checked here. So the rule to work to is the one the fail-fast
+states, and a layout that only `--no-daemon` can load is a layout to fix rather than a mode to
+switch to.
+
+A solution listing VB.NET or F# projects gets one stderr line — `cslq: 2 non-C# project(s) not
+searched: Legacy.vbproj, Calc.fsproj` — and then answers for its C# projects as usual. The
+server is a C# one, so those projects are not loaded, and the part that would otherwise be
+invisible is that a reference to a C# symbol *from* VB or F# source is simply absent from
+`refs` at exit 0.
 
 ## Use
 
@@ -272,6 +294,12 @@ there is no `>` marker, `--context` is inert, and `--max` caps the documentation
 There is no `signatureHelp` command; hover already carries the parameters, and
 `textDocument/signatureHelp` only answers inside an argument list.
 
+**`hover` drops every `<param>` doc.** The signature carries the parameter *types*, and the
+summary and `<remarks>` come through, but the per-parameter prose does not: Roslyn's QuickInfo
+does not put it in the hover response, so there is nothing for `cslq` to print. It is the part
+of a doc comment an agent most wants before writing a call, so when it matters, `def` the
+symbol and read the doc comment at the declaration.
+
 ```
 $ cslq def App/Program.cs:9:17 --root fixture
 <metadata>/System.Console/Console.cs:825:24
@@ -341,6 +369,27 @@ no ambiguity error, no candidate dump. It is the second command that bends the o
 more narrowly than `outline`: it keeps `path:line:col` on every row but prints no source line
 and no `>` marker, so `--context` is inert for it. The container column is Roslyn's localised
 display text, not a namespace path, and is there to separate two symbols that share a name.
+
+**And the search is fuzzy, which is the thing to know about it.** `workspace/symbol` is the
+matcher behind Ctrl+T in an IDE, so a row means "this is close to what you typed", never "this
+name exists". Measured on the fixture 2026-09-10:
+
+| Query | Matches | Because |
+|---|---|---|
+| `Vol` | `Volume`, `AudioVolume` | prefix, and substring — `AudioVolume` has no such prefix |
+| `eter` | `Greeter` | substring |
+| `AV` | `AudioVolume` | camel humps |
+| `Greter` | `Greeter`, `Greet`, `Green` | a dropped letter is still a match, and so is a near miss |
+| `VOL` | nothing | an ALL-CAPS query is read as humps or as a whole name, never as a prefix |
+| `VOLUME`, `AUDIOVOLUME` | `Volume`, `AudioVolume` | a whole name still matches, case ignored |
+| `Fixture`, `Core` | nothing | namespaces are not indexed |
+| `*`, or nothing | nothing | neither is a pattern; there is no "list everything" |
+
+Case is ignored otherwise. Declarations are what is indexed — types, members and local
+functions, but never locals or parameters — and matches are ranked before `--max` cuts them,
+most relevant to the name you typed first, so a truncated list is the useful end of the list.
+When you need an exact answer rather than a close one, use `def`, whose dotted targets are
+matched segment by segment against the syntax tree.
 
 ```
 $ cslq diag App/TypeError.cs --root fixture
@@ -450,6 +499,16 @@ against 331, at exit 0. The explicit probe stands alone only where inference fin
 all — no solution, two solutions, no C# project, no candidate anywhere — which is the layout it
 is the escape hatch for. It is not a project: `ready --json` neither counts nor lists it.
 
+**A workspace of nothing but top-level statements is the shape that needs it, and the obvious
+`--sentinel` for it is a trap.** `dotnet new console` declares no type at all, so inference has
+nothing to read and refuses in about 90 ms — correctly, but the repair anyone reaches for,
+`--sentinel Program`, waits out the entire timeout: the `Program` class such a file compiles to
+is generated by the compiler and `workspace/symbol` does not index it. Any method or local
+function declared in that file does resolve, in about two seconds, and the refusal now says so.
+The same shape as one project among many is the documented limit above it: nothing probes it,
+it is named on the readiness failure path, and a query against it can answer at exit 0 while
+that project is still loading.
+
 `refs` exits 1 with `cslq: no results` when a symbol resolves but has no references, and 1 with a
 diagnostic when the symbol does not resolve or the workspace never loaded. `def`, `impl`, `sym`
 and `hover` follow the same rule.
@@ -496,6 +555,17 @@ output — a broad ambiguous target on a real repository is hundreds of rows oth
 
 `cslq` pins `DOTNET_CLI_UI_LANGUAGE=en` on the server so those display strings do not change with
 the developer's machine locale.
+
+**A CJK identifier may not be findable by name, and this one is an open question rather than a
+documented limit.** Testers measured, from PowerShell where the argv arrives intact, `refs 名前`
+and `sym 名前` answering nothing while the same declaration answered correctly by
+`file:line:col`; `Größe` and `ﬁle` (U+FB01, which folds to `fi`) were both found by name in the
+same run. It has not been reproduced here, Cyrillic and Greek were never tried, and there are
+two candidate causes nobody has separated — `workspace/symbol`'s matcher on a script with no
+case, or the argv itself. From Git Bash the same command is certainly argv: MSYS hands a native
+.NET process its arguments through the ANSI code page and `cslq` sees `??`, which nothing
+`cslq` does can undo. If you hit it, query by position; a `file:line:col` target never goes
+through the matcher.
 
 ## Latency
 
@@ -750,6 +820,12 @@ fixture/                    deliberately tricky solution
   Core/Split*.cs            one type in two documents, plus an overload in one of them
   Core/Empty.cs             a compilable document that declares nothing
   Core/Shape.cs             an interface whose implementers straddle two projects, for `impl`
+  Core/Kinds.cs             crowded declaration lines, a delegate, a record, an `extension`
+  encoding/                 three files no project compiles, one of them not valid UTF-8
+fixture2/                   two consumers of one generator, and the only multi-targeted project
+fixture-linked/Outside.cs   linked into fixture/Core from outside fixture/, for `<external>/`
 tests/Cslq.Tests/            unit tests for the pure logic below the transport
 probes/                     cases.jsonl + run.sh (runs tests/Cslq.Tests first)
+  roots/                    workspace shapes answered before the server starts: a solution
+                            listing only a .vbproj, and a top-level-statements-only project
 ```

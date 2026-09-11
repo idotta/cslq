@@ -784,7 +784,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// One pull <em>per context</em>, though. A diagnostic can exist in one framework and not
-    /// another — the whole of T-28 — so a single pull reports one context's view of the file
+    /// another, and an unqualified pull reported one such error in 1 run of 4 — so a single pull reports one context's view of the file
     /// and silently drops the rest. <c>fixture2/Multi/TfmError.cs</c> holds a CS0029 that only
     /// <c>net9.0</c> has, and an unqualified pull reported it in 1 run of 4.
     /// </remarks>
@@ -854,7 +854,7 @@ internal sealed class LspClient : IAsyncDisposable
     /// every other unreadable document: no lines, so the hit still prints with its position.
     /// The difference is that this one is said out loud — a file decoded with substitutions
     /// renders context rows whose columns no longer agree with the header above them, and a
-    /// silent wrong rendering is the whole of T-75.
+    /// silent wrong rendering is the whole of the defect.
     /// </summary>
     private async Task<string[]> TextLinesAsync(string path, CancellationToken ct)
     {
