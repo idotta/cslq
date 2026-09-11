@@ -106,8 +106,13 @@ CSLQ_WIN="${CSLQ/#$root/$root_abs}"
 # every single invocation, which is how a gate that passes on Windows in six minutes was
 # still running on ubuntu and macos after twenty-eight. Seconds here instead of half an hour
 # there. Its own pipe name under SESSION_PREFIX so the trap's glob covers anything it leaves.
+# The two roots are absolute for the same reason $CSLQ_WIN is: `dotnet run` on a file-based app
+# sets the working directory to the .cs file's own folder on some SDKs (10.0.105) and to the
+# caller's on others (10.0.301), so a relative root names probes/fixture on one machine and
+# fixture on the next -- and here that is silent, because parts 2 and 3 compare two runs that
+# fail identically on a root that does not exist.
 log "session pipe smoke"
-if dotnet run probes/pipe-smoke.cs -- "$SESSION_PREFIX-smoke" 3 "$CSLQ_WIN" fixture probes/roots/toplevel; then
+if dotnet run probes/pipe-smoke.cs -- "$SESSION_PREFIX-smoke" 3 "$CSLQ_WIN" "$root_abs/fixture" "$root_abs/probes/roots/toplevel"; then
   echo 'PASS  session-pipe-smoke'
 else
   echo 'FAIL  session-pipe-smoke (this platform cannot hold a session; every call would fall back)'
@@ -801,7 +806,7 @@ fi
 # is testing.
 log "captured stdout"
 sc_log=$(mktemp)
-CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-capture"   dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" > "$sc_log" 2>&1
+CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-capture"   dotnet run probes/stdout-capture.cs -- "$CSLQ_WIN" "$root_abs/fixture" > "$sc_log" 2>&1
 rc=$?
 out=$(cat "$sc_log")
 rm -f "$sc_log"

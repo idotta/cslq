@@ -684,6 +684,13 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   Native-AOT-able and turning reflection back on is the direction away from that. The context
   needs at least one `[JsonSerializable]` or it does not compile; `typeof(object)` is enough for
   a probe whose payloads are all empty.
+  **And its working directory is the SDK's choice, so never pass one a relative path.**
+  Measured 2026-09-11 with a two-line app printing `Environment.CurrentDirectory`: SDK 10.0.301
+  reports the caller's directory and 10.0.105 reports the `.cs` file's own, so `--root fixture`
+  meant `probes/fixture` under WSL and turned `captured-stdout-does-not-stall` red for a reason
+  unrelated to the code — and in `pipe-smoke.cs` it was worse than red, since parts 2 and 3
+  compare two runs that fail identically on a root that does not exist. `run.sh` passes
+  `$root_abs/...` to both.
 - **The unrestored-tool message is localised; the command inside it is not.** `dotnet tool run`
   against a manifest whose tool is missing exits 1 with `Run "dotnet tool restore" to make the
   "<tool>" command available.` — in Portuguese on this machine, since

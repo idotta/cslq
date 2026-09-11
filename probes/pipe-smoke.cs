@@ -15,8 +15,19 @@
 // constructor binds the path, WaitForConnectionAsync accepts on it, and disposing it closes the
 // listening socket and unlinks the path. So an accepted instance disposed *after* the loop has
 // bound the next one may unlink a path that now belongs to its successor. Part 1 tests that
-// directly by running three loop shapes side by side; on Windows, where a pipe name is a
-// reference-counted kernel object, all three are expected to pass and say nothing.
+// directly by running four loop shapes side by side; on Windows, where a pipe name is a
+// reference-counted kernel object, all four are expected to pass and say nothing.
+//
+// Only two of those four are gated, and that is the point of the split. `successor` is
+// Session.AcceptAsync's own ordering and `single` never unlinks at all; `overlap` and `serial`
+// are the two shapes Session deliberately does not use, so their failures are the platform
+// property being demonstrated rather than a regression. Adding every shape's failures to the
+// exit code made the leg red on Unix roughly one gate run in six, on a diagnostic. Measured
+// 2026-09-11 under CPU contention (WSL Ubuntu, .NET 10.0.105, eight processes pinned to two
+// cores, 300 connections each): overlap 11 of 2400 failed, serial 7 of 2400, single 0 of 2400,
+// successor 0 of 2400 -- the failures all `IOException: Broken pipe` or `Connection reset by
+// peer`. Uncontended the same run is clean for all four, which is why a low round count only
+// flakes on a loaded runner. On Windows, 600 connections per shape: 0 failures anywhere.
 //
 // A file-based app rather than a project, like probes/hold-mutex.cs and probes/hangup.cs.
 // A file-based app is AOT-shaped by default, which turns reflection-based System.Text.Json off
@@ -47,10 +58,12 @@ var hammerRoot = args.Length > 4 ? Path.GetFullPath(args[4]) : serveRoot;
 var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 var failures = 0;
 
-// Part 1. Three accept-loop shapes, one after another, each on a name of its own.
-failures += await ShapeAsync("overlap", Shape.Overlap);
-failures += await ShapeAsync("serial", Shape.Serial);
-failures += await ShapeAsync("single", Shape.Single);
+// Part 1. Four accept-loop shapes, one after another, each on a name of its own. Two of them
+// are run for contrast and cannot fail the leg: see the header.
+await ShapeAsync("overlap", Shape.Overlap, gated: false);
+await ShapeAsync("serial", Shape.Serial, gated: false);
+failures += await ShapeAsync("single", Shape.Single, gated: true);
+failures += await ShapeAsync("successor", Shape.Successor, gated: true);
 
 if (cslq is not null)
 {
@@ -63,9 +76,12 @@ return failures == 0 ? 0 : 1;
 // One shape, run for `rounds` rounds of the two connections a real call makes:
 // Session.ListeningAsync probes and hangs up, then Session.SendAsync asks. The socket file is
 // reported before each round -- off Windows that line is the diagnosis when it flickers.
-async Task<int> ShapeAsync(string label, Shape shape)
+async Task<int> ShapeAsync(string label, Shape shape, bool gated)
 {
     var name = $"{pipe}-{label}";
+    // A shape nothing gates on has to say so on every line it writes, not only on its summary:
+    // a `Broken pipe` on stderr is the first thing anyone greps a red-looking gate log for.
+    var what = gated ? label : $"{label}, diagnostic";
     var socket = OperatingSystem.IsWindows()
         ? null
         : Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + name);
@@ -79,11 +95,11 @@ async Task<int> ShapeAsync(string label, Shape shape)
         if (socket is not null)
         {
             Console.WriteLine(
-                $"{label} round {round}: socket file {(File.Exists(socket) ? "present" : "MISSING")}");
+                $"{what} round {round}: socket file {(File.Exists(socket) ? "present" : "MISSING")}");
         }
 
-        bad += await RoundTripAsync(name, label, round, "ping") ? 0 : 1;
-        bad += await RoundTripAsync(name, label, round, "request") ? 0 : 1;
+        bad += await RoundTripAsync(name, what, round, "ping") ? 0 : 1;
+        bad += await RoundTripAsync(name, what, round, "request") ? 0 : 1;
     }
 
     await stopping.CancelAsync();
@@ -96,10 +112,11 @@ async Task<int> ShapeAsync(string label, Shape shape)
     }
 
     var of = rounds * 2;
+    var why = gated ? string.Empty : " -- expected off Windows, not gated";
     Console.WriteLine(
         bad == 0
-            ? $"pipe smoke [{label}]: {of} of {of} connections answered"
-            : $"pipe smoke [{label}]: {bad} of {of} connections failed");
+            ? $"pipe smoke [{what}]: {of} of {of} connections answered"
+            : $"pipe smoke [{what}]: {bad} of {of} connections failed{why}");
     return bad;
 }
 
@@ -143,15 +160,15 @@ async Task<bool> RoundTripAsync(string name, string label, int round, string kin
 
 async Task AcceptAsync(string name, Shape shape, CancellationToken ct)
 {
-    NamedPipeServerStream? held = null;
+    // Single and Successor both keep an instance listening for the life of the loop; the other
+    // two bind one per iteration.
+    var alwaysBound = shape is Shape.Single or Shape.Successor;
+    var held = alwaysBound ? Bind(name) : null;
     try
     {
         while (!ct.IsCancellationRequested)
         {
-            var accepted = held ?? new NamedPipeServerStream(
-                name, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-            if (shape == Shape.Single) held = accepted;
+            var accepted = held ?? Bind(name);
 
             try
             {
@@ -164,7 +181,17 @@ async Task AcceptAsync(string name, Shape shape, CancellationToken ct)
             }
             catch (Exception ex)
             {
-                if (held is null) await accepted.DisposeAsync();
+                if (shape == Shape.Successor)
+                {
+                    // Session.RebindAsync: a failed instance is replaced successor-first too.
+                    held = Bind(name);
+                    await accepted.DisposeAsync();
+                }
+                else if (held is null)
+                {
+                    await accepted.DisposeAsync();
+                }
+
                 Console.Error.WriteLine($"accept failed: {ex.GetType().Name}: {ex.Message}");
                 await Task.Delay(25, CancellationToken.None);
                 continue;
@@ -179,6 +206,14 @@ async Task AcceptAsync(string name, Shape shape, CancellationToken ct)
                 case Shape.Serial:
                     await ServeOneAsync(accepted, dispose: true, ct);
                     break;
+                case Shape.Successor:
+                    // Session.AcceptAsync's two lines, in its order: the successor is bound
+                    // before the accepted instance is handed to the task that disposes it, so
+                    // the reference count never reaches zero and the path is never unlinked
+                    // under a client that is connecting to it.
+                    held = Bind(name);
+                    _ = ServeOneAsync(accepted, dispose: true, ct);
+                    break;
                 default:
                     await ServeOneAsync(accepted, dispose: false, ct);
                     if (accepted.IsConnected) accepted.Disconnect();
@@ -191,6 +226,10 @@ async Task AcceptAsync(string name, Shape shape, CancellationToken ct)
         if (held is not null) await held.DisposeAsync();
     }
 }
+
+NamedPipeServerStream Bind(string name) => new(
+    name, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
+    PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
 async Task ServeOneAsync(NamedPipeServerStream accepted, bool dispose, CancellationToken ct)
 {
@@ -417,18 +456,24 @@ static void Dump(string log)
 // How the loop treats the object that owns the socket path.
 enum Shape
 {
-    // Session.AcceptAsync as it stands: a fresh instance per iteration, the accepted one
-    // answered on a task of its own and disposed there -- after the loop has bound the next.
+    // A fresh instance per iteration, the accepted one answered on a task of its own and
+    // disposed there -- after the loop has bound the next. Diagnostic only: see the header.
     Overlap,
 
     // The same, minus the overlap: the accepted instance is answered and disposed before the
     // next one is created. Isolates "two instances alive at once" from "disposal at all".
+    // Diagnostic only.
     Serial,
 
     // One instance for the life of the loop: Disconnect() after each request and wait again on
     // the same object, so the path is never unlinked while the server lives. The trade is one
     // connection at a time.
     Single,
+
+    // Session.AcceptAsync as it stands, and the only shape whose failure is a regression: an
+    // instance is always listening, and the successor is bound before the accepted one is
+    // handed off to be served and disposed.
+    Successor,
 }
 
 // `ping` and `stop` take nothing and return nothing, so the whole wire here is the empty result
