@@ -143,6 +143,12 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   parent in an outline, and `Program.ConstructorsAsync` asks for a declaration chain in
   `sym`, but only for a document holding a method-kind hit that shares a name with a
   type-kind hit, so a broad query costs nothing.
+  **Constructor inference needs the parent's *kind*, not just its name.** An outline row's
+  parent is whatever node encloses it, and a namespace is one of them, so matching on the
+  name alone rendered the delegate in `namespace Widget { delegate void Widget(int n); }` as
+  `constructor` (staged root, 2026-09-10). `Kinds.Constructible` is the gate: class, struct
+  and interface — the last for its static constructor, the one member C# lets repeat its
+  declaring type's name — and nothing else.
 - **A decompiled metadata location is a *file* URI, so every path helper answers it happily
   with a machine-absolute temp path.** `<temp>/MetadataAsSource/<guid>/DecompilationMetadataAsSourceFileProvider/<guid>/Console.cs`
   is a real file that really exists, which is why this is worse than the generated-URI trap:

@@ -67,6 +67,29 @@ internal static partial class Program
     // are the commands that take no positional at all.
     private static readonly string[] NoArgument = ["ready", "restore"];
 
+    /// <summary>
+    /// Every command whose positional is required, and what the missing thing is called. The
+    /// check lives in <see cref="Options.Parse"/> rather than in the command, because the
+    /// thing that has to change is the command line: <c>cslq refs --root fixture</c> spent
+    /// ~1.1 s discovering the workspace and then exited <b>1</b>, which reads as a query that
+    /// found nothing. It is a usage error, so it is exit 2 on stderr before anything is
+    /// scanned. It catches an empty argument for free — <c>cslq refs ""</c> used to wait out
+    /// readiness and report <c>no symbol matched ''</c> — since a blank positional is a
+    /// misquoted shell variable, the same reading <c>Next</c> takes of a blank option value.
+    /// <c>diag</c> is deliberately absent: its path is optional and omitting it is the
+    /// whole-tree walk.
+    /// </summary>
+    private static readonly Dictionary<string, string> Required = new(StringComparer.Ordinal)
+    {
+        ["refs"] = "a symbol or file:line:col",
+        ["def"] = "a symbol or file:line:col",
+        ["impl"] = "a symbol or file:line:col",
+        ["hover"] = "a symbol or file:line:col",
+        ["sym"] = "a query",
+        ["outline"] = "a file or symbol",
+        ["project"] = "a file",
+    };
+
     // Everything that resolves a document and can therefore be answered in one project
     // context. `sym` goes through `workspace/symbol`, which is context-independent, and
     // `ready` and `restore` name no document at all.
@@ -287,7 +310,7 @@ internal static partial class Program
     private static async Task<int> RefsAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("refs needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
 
@@ -308,7 +331,7 @@ internal static partial class Program
     private static async Task<int> DefAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("def needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -332,7 +355,7 @@ internal static partial class Program
     private static async Task<int> ImplAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("impl needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -354,7 +377,7 @@ internal static partial class Program
     private static async Task<int> HoverAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("hover needs a symbol or file:line:col");
+        var target = opts.Target;
 
         CheckTarget(opts.Root, target);
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -411,7 +434,7 @@ internal static partial class Program
     private static async Task<int> ProjectAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("project needs a file");
+        var target = opts.Target;
         if (Directory.Exists(Path.GetFullPath(Path.Combine(opts.Root, target))))
         {
             throw new CslqException($"project needs a file, not a directory: {target}");
@@ -437,7 +460,7 @@ internal static partial class Program
     private static async Task<int> SymAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var query = opts.Argument ?? throw new CslqException("sym needs a query");
+        var query = opts.Target;
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
 
@@ -462,7 +485,7 @@ internal static partial class Program
     private static async Task<int> OutlineAsync(
         LspClient client, Options opts, IReadOnlyList<Sentinel> sentinels, CancellationToken ct)
     {
-        var target = opts.Argument ?? throw new CslqException("outline needs a file or symbol");
+        var target = opts.Target;
         var file = OutlineFile(opts.Root, target, out var line);
 
         await client.WaitReadyAsync(sentinels, opts.Timeout, ct);
@@ -1420,6 +1443,18 @@ internal static partial class Program
         /// </summary>
         public bool Verbose => LogLevel.ToLowerInvariant() is "trace" or "debug" or "information";
 
+        /// <summary>
+        /// The positional, for a command <see cref="Required"/> lists — which is every caller
+        /// of this. <see cref="Parse"/> has already refused a missing or blank one, so this is
+        /// an invariant rather than a check; it throws a <see cref="UsageException"/> anyway so
+        /// that a command added to the dispatch and forgotten in the table still exits 2 with
+        /// something a caller can act on.
+        /// </summary>
+        public string Target =>
+            string.IsNullOrWhiteSpace(Argument)
+                ? throw new UsageException($"{Command} needs an argument")
+                : Argument;
+
         public static Options Parse(string[] argv)
         {
             var positional = new List<string>();
@@ -1482,6 +1517,11 @@ internal static partial class Program
                 throw new UsageException(command == "ready"
                     ? $"ready takes no argument; got '{argument}' (did you mean --sentinel {argument}?)"
                     : $"{command} takes no argument; got '{argument}'");
+            }
+
+            if (string.IsNullOrWhiteSpace(argument) && Required.TryGetValue(command, out var needs))
+            {
+                throw new UsageException($"{command} needs {needs}");
             }
 
             // `workspace/symbol` is context-independent and `ready` and `restore` resolve no

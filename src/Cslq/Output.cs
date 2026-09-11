@@ -921,7 +921,7 @@ internal static class Output
     // thing in both and a JSON case and a text case stay cases about the same output.
     private static List<object> Nodes(
         IReadOnlyList<OutlineNode> symbols, int contexts, string[] lines, ref int budget,
-        string? parent = null)
+        string? parent = null, int parentKind = 0)
     {
         var nodes = new List<object>();
         foreach (var node in symbols)
@@ -935,7 +935,7 @@ internal static class Output
             nodes.Add(new
             {
                 name = symbol.Name,
-                kind = Kinds.Name(Kinds.Of(symbol.Kind, symbol.Name, parent)),
+                kind = Kinds.Name(Kinds.Of(symbol.Kind, symbol.Name, parent, parentKind)),
                 detail = symbol.Detail,
                 line = start.Line + 1,
                 column = start.Character + 1,
@@ -943,7 +943,8 @@ internal static class Output
                 endColumn = end.Character + 1,
                 tfm = Outline.Mark(node, contexts),
                 text = At(lines, start.Line)?.TrimEnd(),
-                children = Nodes(node.Children, contexts, lines, ref budget, symbol.Name),
+                children = Nodes(
+                    node.Children, contexts, lines, ref budget, symbol.Name, symbol.Kind),
             });
         }
 

@@ -136,3 +136,5 @@
 {"name":"top-level-statements-only-says-what-resolves","args":"ready --root probes/roots/toplevel","exit":"1","expect":"no project declares a type|a type, a method, or a local function|compiler-generated and is not indexed|name a method or a local function in it instead"}
 {"name":"sym-matches-camel-humps","args":"sym AV --root fixture","exit":"0","expect":"AudioVolume|Core/Volume.cs:14:21"}
 {"name":"an-all-caps-sym-query-is-not-a-prefix","args":"sym VOL --root fixture","exit":"1","expect":"cslq: no results"}
+{"name":"missing-required-argument-is-a-usage-error","args":"refs --root fixture","exit":"2","expect":"cslq: refs needs a symbol or file:line:col|usage:"}
+{"name":"missing-required-argument-is-not-a-query-failure","args":"outline --root fixture","exit":"2","expect":"cslq: outline needs a file or symbol|usage:"}

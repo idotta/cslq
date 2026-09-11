@@ -397,4 +397,40 @@ public class OptionsTests
             Assert.Throws<UsageException>(() => Program.Options.Parse(argv));
         }
     }
+
+    /// <summary>
+    /// A missing positional is a usage error, not a query failure. `cslq refs --root fixture`
+    /// spent ~1.1 s discovering the workspace and starting a server before the command threw,
+    /// and the CslqException handler exits 1 — which reads as "the query found nothing". The
+    /// thing that has to change is the command line, so it is exit 2 before anything is
+    /// scanned. A blank one goes the same way for the same reason `Next` refuses a blank
+    /// option value: `cslq refs ""` used to wait out readiness and report `no symbol matched`.
+    /// </summary>
+    [Theory]
+    [InlineData("refs", "a symbol or file:line:col")]
+    [InlineData("def", "a symbol or file:line:col")]
+    [InlineData("impl", "a symbol or file:line:col")]
+    [InlineData("hover", "a symbol or file:line:col")]
+    [InlineData("sym", "a query")]
+    [InlineData("outline", "a file or symbol")]
+    [InlineData("project", "a file")]
+    public void A_command_that_needs_an_argument_says_so_at_parse_time(string command, string needs)
+    {
+        Assert.Equal(
+            $"{command} needs {needs}",
+            Assert.Throws<UsageException>(() => Program.Options.Parse([command])).Message);
+        Assert.Equal(
+            $"{command} needs {needs}",
+            Assert.Throws<UsageException>(() => Program.Options.Parse([command, "   "])).Message);
+    }
+
+    /// <summary>
+    /// `diag` is the exception and stays one: no path is the whole-tree walk.
+    /// </summary>
+    [Fact]
+    public void Diag_still_takes_no_path()
+    {
+        Assert.Null(Program.Options.Parse(["diag"]).Argument);
+        Assert.Equal("App/TypeError.cs", Program.Options.Parse(["diag", "App/TypeError.cs"]).Argument);
+    }
 }

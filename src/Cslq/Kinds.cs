@@ -22,7 +22,7 @@ namespace Cslq;
 /// Roslyn never does, reporting one as a <see cref="Method"/> from both requests. It is
 /// recoverable rather than invented — a method whose name repeats its declaring type's is a
 /// constructor and nothing else in C# is — so <see cref="Of"/> recovers it wherever the
-/// parent is known, which is every row of an outline. <c>sym</c> has no parent in hand and
+/// parent is a type that could declare one, which is every row of an outline. <c>sym</c> has no parent in hand and
 /// asks for a declaration chain instead; see <c>Targets.IsConstructor</c>.
 /// </para>
 /// </summary>
@@ -37,14 +37,29 @@ internal static class Kinds
     internal const int Struct = 23;
 
     /// <summary>
-    /// The kind to render a declaration as, given what the server said and the name of the
-    /// declaration containing it — null at the top level, where C# has no constructors.
+    /// The kind to render a declaration as, given what the server said and the name
+    /// <em>and kind</em> of the declaration containing it — null at the top level, where C#
+    /// has no constructors.
+    /// <para>
+    /// The parent's kind is load-bearing and the name alone was a bug: an outline's parent is
+    /// whatever node encloses the row, and a namespace is one of them. So
+    /// <c>namespace Widget { delegate void Widget(int n); }</c> — a namespace named after the
+    /// only type in it, an ordinary shape — rendered its delegate as <c>constructor</c>,
+    /// measured on a staged root 2026-09-10. Only a type that can <em>declare</em> a
+    /// constructor counts: class, struct and record (which reports as a class), plus
+    /// interface, whose static constructor is the one member that may repeat the type's name.
+    /// An enum cannot, and neither can a namespace.
+    /// </para>
     /// </summary>
-    internal static int Of(int kind, string name, string? parent) =>
-        Normalise(kind) == Method && parent is not null &&
+    internal static int Of(int kind, string name, string? parent, int parentKind) =>
+        Normalise(kind) == Method && parent is not null && Constructible(parentKind) &&
         string.Equals(Bare(name), Bare(parent), StringComparison.Ordinal)
             ? Constructor
             : Normalise(kind);
+
+    /// <summary>Whether a declaration of this kind can declare a constructor at all.</summary>
+    internal static bool Constructible(int kind) =>
+        kind is Class or Struct or Interface;
 
     /// <summary>
     /// The kind as the two requests would have to agree on it, before anything a container

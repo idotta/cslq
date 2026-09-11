@@ -63,7 +63,7 @@ near-useless to a model.
   coverage move.
 - **The usage text is inside the rule too, and exit 2 is what it means.** A usage error — no
   command, an unknown command or option, a missing or invalid option value, an argument the
-  command does not take — is the `cslq: ` line followed by the usage block on **stderr**, at
+  command does not take, a required argument it was not given — is the `cslq: ` line followed by the usage block on **stderr**, at
   exit **2**, with `{ "error": "<the same line>" }` on stdout under `--json` like every other
   failure. The usage block stays out of the JSON: it is thirty lines of prose for a human
   reading the log, and folding it in would make one JSON string of them. The two usage
@@ -72,7 +72,13 @@ near-useless to a model.
   thing: the command line is what has to change, not the workspace. Exit 1 keeps everything
   the parser understood and the query then failed on, `no such directory` and a malformed
   position included. `UsageException` carries the distinction, so which exit code a check
-  produces is visible at the `throw` rather than at the catch. `--help` and `--version` are
+  produces is visible at the `throw` rather than at the catch. A **missing** required argument is in
+  that list and used to be outside it: every command threw its own `needs a symbol` from the
+  dispatch, which runs after discovery and the server start, so `cslq refs --root fixture`
+  spent ~1.1 s and then exited 1 — a query that found nothing, which is not what happened.
+  It is checked in `Options.Parse` against one table, and a blank argument (`cslq refs ""`,
+  a misquoted shell variable) is the same error rather than a query for the empty string.
+  `diag` is the one command whose positional is genuinely optional and it stays so. `--help` and `--version` are
   answers rather than errors and stay exit 0 on stdout.
 - **A source line longer than 200 characters is elided in text mode, around the column the
   row is about.** A hit on a 20,079-character line printed the whole line for one result —

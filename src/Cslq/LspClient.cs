@@ -27,6 +27,13 @@ internal sealed class LspClient : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan PostLoadGrace = TimeSpan.FromSeconds(20);
 
+    /// <summary>
+    /// How long the <c>dotnet --version</c> of <see cref="SdkAsync"/> gets. It is a diagnostic
+    /// on a path that has already failed, so it is bounded well below anything a caller would
+    /// notice and the answer to overrunning it is to say nothing.
+    /// </summary>
+    private static readonly TimeSpan SdkBudget = TimeSpan.FromSeconds(10);
+
     private const int HandleFlagInherit = 0x1;
 
     public string Root { get; }
@@ -429,9 +436,20 @@ internal sealed class LspClient : IAsyncDisposable
     /// was not found", and nothing else cslq can see says so. Null when the launch itself could
     /// not happen — <c>dotnet</c> off <c>PATH</c> has its own message and must not be reported
     /// here as an SDK mismatch.
+    /// <para>
+    /// Bounded by <see cref="SdkBudget"/> on top of the caller's token, and the bound is the
+    /// point: this runs on the failure path, <em>after</em> the readiness loop has already
+    /// spent the whole <c>--timeout</c>, so a <c>dotnet</c> that never exits would hold the
+    /// process open past every deadline the caller thought it had. Disposing the process does
+    /// not end it, so the tree is killed on the way out. A diagnostic that times out is simply
+    /// no diagnosis — null, and the readiness message prints without a cause — while the
+    /// caller's own cancellation still propagates, because that is a different answer.
+    /// </para>
     /// </summary>
     private async Task<Diagnosis.Sdk?> SdkAsync(CancellationToken ct)
     {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(SdkBudget);
         try
         {
             var psi = new ProcessStartInfo(ServerArgs.Command)
@@ -446,14 +464,36 @@ internal sealed class LspClient : IAsyncDisposable
             psi.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
 
             using var proc = StartProcess(psi, "ask the SDK for its version");
-            proc.StandardInput.Close();
-            var stdout = proc.StandardOutput.ReadToEndAsync(ct);
-            var stderr = proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            try
+            {
+                proc.StandardInput.Close();
+                var stdout = proc.StandardOutput.ReadToEndAsync(budget.Token);
+                var stderr = proc.StandardError.ReadToEndAsync(budget.Token);
+                await proc.WaitForExitAsync(budget.Token);
 
-            var said = (await stderr).Trim();
-            if (said.Length == 0) said = (await stdout).Trim();
-            return new Diagnosis.Sdk(proc.ExitCode, Diagnosis.Summary(said));
+                var said = (await stderr).Trim();
+                if (said.Length == 0) said = (await stdout).Trim();
+                return new Diagnosis.Sdk(proc.ExitCode, Diagnosis.Summary(said));
+            }
+            finally
+            {
+                // Best effort, and on every path out: a child still running holds the pipes
+                // this method is reading, so leaving it is what turns a stalled `dotnet` into
+                // a stalled cslq.
+                try
+                {
+                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException
+                    or System.ComponentModel.Win32Exception)
+                {
+                }
+            }
+        }
+        // The diagnostic ran out of its own budget: no cause, rather than no answer at all.
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
