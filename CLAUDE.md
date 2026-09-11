@@ -677,8 +677,13 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   Reach for that before adding a project to the tree for a probe.
   **A file-based app is AOT-shaped, so reflection-based System.Text.Json is off**: `JsonRpc`
   then cannot deserialise even an empty result, and it fails as "connected but never accepted"
-  with nothing in any log. `#:property JsonSerializerIsReflectionEnabledByDefault=true` is the
-  fix, and `probes/pipe-smoke.cs` carries it.
+  with nothing in any log. The fix is a source-generated `TypeInfoResolver` — a
+  `[JsonSerializable]`-annotated `JsonSerializerContext` set on the formatter's
+  `JsonSerializerOptions`, which `probes/pipe-smoke.cs` carries as `Wire` — and **not**
+  `#:property JsonSerializerIsReflectionEnabledByDefault=true`: `cslq` is meant to be
+  Native-AOT-able and turning reflection back on is the direction away from that. The context
+  needs at least one `[JsonSerializable]` or it does not compile; `typeof(object)` is enough for
+  a probe whose payloads are all empty.
 - **The unrestored-tool message is localised; the command inside it is not.** `dotnet tool run`
   against a manifest whose tool is missing exits 1 with `Run "dotnet tool restore" to make the
   "<tool>" command available.` — in Portuguese on this machine, since

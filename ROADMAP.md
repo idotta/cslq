@@ -575,10 +575,11 @@ started, which stays an accepted cost.
       is the library's own answer to the same question and is not per-platform. One trap came
       with it and is in `CLAUDE.md`: a file-based app is AOT-shaped, so reflection-based
       System.Text.Json is off and `JsonRpc` cannot deserialise even an empty result — it fails
-      as "connected but never accepted" with nothing logged, and
-      `#:property JsonSerializerIsReflectionEnabledByDefault=true` is the fix
-      `probes/pipe-smoke.cs` now carries, along with the `JsonSerializerDefaults.Web` options
-      both ends of the real wire use.
+      as "connected but never accepted" with nothing logged. The fix `probes/pipe-smoke.cs` now
+      carries is a source-generated `TypeInfoResolver`, not
+      `#:property JsonSerializerIsReflectionEnabledByDefault=true`: `cslq` is meant to be
+      Native-AOT-able and the reflection switch is the direction away from that. It goes on the
+      `JsonSerializerDefaults.Web` options both ends of the real wire use.
       **Measured**: the gate 164 of 164 on **Windows**, `session-beats-no-session` 194 ms
       against 2191 ms, format clean, 345 unit tests green, and no `request failed` noise in any
       session log. **Only Windows was exercised** — WSL and Docker are both unavailable on this

@@ -20,14 +20,15 @@
 //
 // A file-based app rather than a project, like probes/hold-mutex.cs and probes/hangup.cs.
 // A file-based app is AOT-shaped by default, which turns reflection-based System.Text.Json off
-// and leaves JsonRpc unable to deserialise even the empty result of a `ping`. Nothing here is
-// ever published, so turn it back on rather than hand-writing a type resolver.
+// and leaves JsonRpc unable to deserialise even the empty result of a `ping`. The remedy is a
+// source-generated TypeInfoResolver (Wire below), not the reflection switch: cslq is meant to be
+// AOT-able, and turning reflection back on is the direction away from that.
 #:package StreamJsonRpc@2.25.29
-#:property JsonSerializerIsReflectionEnabledByDefault=true
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using StreamJsonRpc;
 
 const int ConnectMs = 2000;
@@ -293,7 +294,10 @@ async Task<long?> PingAsync(string name, bool quiet, string method = "ping")
         using var rpc = new JsonRpc(new HeaderDelimitedMessageHandler(
             client, client, new SystemTextJsonFormatter
             {
-                JsonSerializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web),
+                JsonSerializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+                {
+                    TypeInfoResolver = Wire.Default,
+                },
             }));
         rpc.StartListening();
         await rpc.InvokeAsync(method);
@@ -426,3 +430,8 @@ enum Shape
     // connection at a time.
     Single,
 }
+
+// `ping` and `stop` take nothing and return nothing, so the whole wire here is the empty result
+// JsonRpc still has to deserialise.
+[JsonSerializable(typeof(object))]
+partial class Wire : JsonSerializerContext;
