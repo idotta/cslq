@@ -681,6 +681,18 @@ started, which stays an accepted cost.
       `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
       platforms, before a single number reaches the README.
 
+      **Both remaining steps are decided (2026-09-12), so neither is an open question.**
+      (5) advertises `win-x64;linux-x64;osx-arm64;any` and nothing else: that is exactly
+      `probe.yml`'s existing three-runner matrix, so every native RID has a runner that can
+      build it — Native AOT cannot cross-compile across operating systems — and the `any`
+      package carries everyone else (`osx-x64`, `linux-arm64`, `win-arm64`) as framework-
+      dependent CoreCLR. Adding a RID without a runner is not a smaller version of this: a
+      listed RID whose sub-package is missing fails the install outright, measured above.
+      (6) goes in `probes/run.sh` as a leg of its own, not in `probe.yml` alone, because the
+      gate is where this repository's latency claims live — `session-beats-no-session` is the
+      precedent, and a README table is not a measurement. It costs an AOT publish per gate run
+      (~70 s on the dev machine), which is the price of the rule.
+
       **The code half is done and it compiles: `cslq` publishes to a 12.4 MB single native
       binary with no IL warnings, and answers.** Measured 2026-09-12 on **Windows alone** —
       which is exactly the shape of claim the session work established as untrustworthy, so
