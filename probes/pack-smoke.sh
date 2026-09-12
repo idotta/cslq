@@ -165,7 +165,23 @@ printf 'host RID: %s\n' "$rid"
 installed=1
 dotnet tool install --tool-path "$bin" --source "$out" cslq --version "$version" || installed=0
 report "$installed" "the pointer package installs"
-[ "$installed" = 1 ] || { printf '\n%s passed, %s failed\n' "$pass" "$fail"; exit 1; }
+if [ "$installed" != 1 ]; then
+  # A failed install names a missing package and nothing about the choice that led there, and
+  # this runs on hosts nobody here can reproduce -- so say which sub-package the pointer offers
+  # for this RID, what the three packages declare they depend on, and let the SDK narrate the
+  # resolution. Only on the failure path: it is several hundred lines and a second install.
+  echo "--- the pointer's DotnetToolSettings.xml ---"
+  unzip -p "$out/cslq.$version.nupkg" '*/DotnetToolSettings.xml' 2>/dev/null
+  for p in "cslq.$version" "cslq.$rid.$version" "cslq.any.$version"; do
+    echo "--- $p dependencies ---"
+    unzip -p "$out/$p.nupkg" '*.nuspec' 2>/dev/null | sed -n '/<dependencies/,/<\/dependencies>/p'
+  done
+  echo "--- the same install, diagnostic ---"
+  dotnet tool install --tool-path "$bin/diag" --source "$out" cslq --version "$version" \
+    --verbosity diagnostic 2>&1 | tail -120
+  printf '\n%s passed, %s failed\n' "$pass" "$fail"
+  exit 1
+fi
 
 # What --tool-path lays down depends on the runner the package declares. A RID package says
 # Runner="executable", and the shim for one on Windows is a .cmd rather than the apphost .exe
