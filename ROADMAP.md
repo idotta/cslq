@@ -632,16 +632,52 @@ started, which stays an accepted cost.
       operating systems, so each RID needs a runner of its own — `probe.yml`'s matrix is
       already that shape, `release.yml` is not; and the RID packages must be pushed *before*
       the pointer package, or an install landing between the two fails.
-      **The load-bearing unknown**: nothing official says how `.config/dotnet-tools.json`
-      restore resolves a RID sub-package, or whether a manifest committed on one OS restores on
-      another. That is not academic here — `cslq` installs as a tool *and* ships a manifest
-      inside its own package to pin the server.
+      **The load-bearing unknown was how `.config/dotnet-tools.json` restore resolves a RID
+      sub-package, and it is answered: the manifest never names one.** Measured 2026-09-11 on
+      SDK 10.0.301 against a throwaway pointer-package tool served from a local feed:
+      `dotnet tool install` writes the entry it writes today — id, version, `commands`,
+      `rollForward` — with no RID in it, so a manifest committed on one OS restores on another,
+      and the RID is chosen at restore time. `dotnet tool restore` then fetches two packages,
+      the pointer and the sub-package matching the host.
+      Three findings came with it, and the first is the one that shapes `release.yml`:
+      - **A RID the pointer lists has no fallback.** With `ridtool.win-x64` missing from the
+        feed, restore *failed* naming it while `ridtool.any` sat in the same feed — the `any`
+        package is reached only when the host's RID is absent from the pointer's list entirely
+        (a pointer listing `linux-x64;any` installed `ridtool.any` on Windows,
+        `Runner="dotnet"`). So a RID we advertise and fail to build is a hard install failure
+        on that platform rather than a quiet downgrade to CoreCLR, and the push order is not
+        mere hygiene.
+      - **`cslq`'s own server pin does not survive RID packaging as written.**
+        `Cslq.csproj` hardcodes `PackagePath="tools/net10.0/any/.config/"`, while
+        `ServerArgs.ToolManifestRoot` walks up from `AppContext.BaseDirectory` — which becomes
+        `tools/net10.0/<rid>/`. Verified on the throwaway: the manifest lands in the `any`
+        sibling, the walk finds nothing, and the installed tool cannot resolve the pin at all.
+        A `$(RuntimeIdentifier)`-conditioned `PackagePath` puts it beside the binary.
+      - **`~/.dotnet/toolResolverCache/1/<tool>` is keyed by name and version and stores an
+        absolute `PathToExecutable`**, so a restore in an unrelated directory, with its own
+        feed *and* its own `globalPackagesFolder`, reports success and runs the binary an
+        earlier install left behind. Four scenarios passed meaninglessly before it was cleared;
+        any leg that means to exercise a restore has to delete that file first.
+      Two more, both about the build rather than the wire: `ToolPackageRuntimeIdentifiers`
+      without `PublishAot` does not pack — plain `dotnet pack` builds every RID target and
+      fails `NETSDK1047` unless they are in `RuntimeIdentifiers` and restored — so the
+      documented AOT flow (pointer `dotnet pack`, then `-r <rid>` per RID, then
+      `-r any -p:PublishAot=false`) is the one to use; and an AOT publish **fails from Git
+      Bash**, which is the shell `probes/run.sh` runs under: `vswhere.exe` is not on its PATH
+      and ILCompiler's link step exits `MSB3073`/123 with MSVC installed and found. Adding
+      `C:\Program Files (x86)\Microsoft Visual Studio\Installer` to PATH fixes it.
+      The only figure taken so far is indicative and stays out of the README: the same trivial
+      program published both ways on this Windows machine ran 10 ms median (n=15, 10-18)
+      native against 44 ms (41-47) framework-dependent, 4.4x and inside the official range.
+      What no local run can answer is whether an SDK older than 10 can install such a tool —
+      only 10.0.301 is installed here, so that one is CI's.
 
       Order, so the unknown is answered before anything is built on it: (1) a throwaway
-      RID-specific tool package, to settle the manifest question; (2) the session pipe, whose
-      8 warnings sit behind a wire we own on both ends and can revert alone; (3) `LspClient`;
-      (4) `Output`; (5) `PublishAot` and per-RID packaging in `release.yml`; (6) measure, on
-      all three platforms, before a single number reaches the README.
+      RID-specific tool package, to settle the manifest question — **done, above**; (2) the
+      session pipe, whose 8 warnings sit behind a wire we own on both ends and can revert
+      alone; (3) `LspClient`; (4) `Output`; (5) `PublishAot` and per-RID packaging in
+      `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
+      platforms, before a single number reaches the README.
 
 ## Acceptance criteria
 
