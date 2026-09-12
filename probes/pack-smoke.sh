@@ -27,30 +27,25 @@ if ! command -v unzip >/dev/null 2>&1; then
   exit 1
 fi
 
-# The architecture half matters even though no runner needs it today: on an Intel Mac or an
-# arm64 Linux box `uname -s` alone would pack osx-arm64 or linux-x64, the install would resolve
-# a RID the pointer does not list, NuGet would hand back cslq.any, and every check below would
-# pass against the framework-dependent fallback without the native binary ever running.
-case "$(uname -s)" in
-  Linux*)               os=linux ;;
-  Darwin*)              os=osx ;;
-  MINGW*|MSYS*|CYGWIN*) os=win ;;
-  *) echo "pack-smoke: unrecognised host $(uname -s)" >&2; exit 1 ;;
-esac
-case "$(uname -m)" in
-  x86_64|amd64)  arch=x64 ;;
-  aarch64|arm64) arch=arm64 ;;
-  *) echo "pack-smoke: unrecognised architecture $(uname -m)" >&2; exit 1 ;;
-esac
-rid="$os-$arch"
-
-if [ "$os" = win ]; then
-  # An AOT publish from Git Bash fails at ILCompiler's link step with MSB3073/123 even with
-  # MSVC installed and found: vswhere.exe is not on Git Bash's PATH, and this is the shell
-  # the Windows runner gives a bash step.
-  PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH"
-  export PATH
+# The SDK resolves the sub-package at install time, so the SDK is the oracle for the host RID
+# and `uname` is not: on macos-latest an arm64 kernel with an arm64 SDK still had the installer
+# ask for an osx-x64 apphost, so a uname-derived osx-arm64 packed a native package the install
+# never reached and fell back to cslq.any instead.
+rid=$(dotnet --info | tr -d '\r' | sed -n 's/^ *RID: *\([^ ]*\).*/\1/p' | head -1)
+if [ -z "$rid" ]; then
+  echo "pack-smoke: could not read the host RID from dotnet --info" >&2
+  exit 1
 fi
+
+case "$rid" in
+  win-*)
+    # An AOT publish from Git Bash fails at ILCompiler's link step with MSB3073/123 even with
+    # MSVC installed and found: vswhere.exe is not on Git Bash's PATH, and this is the shell
+    # the Windows runner gives a bash step.
+    PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH"
+    export PATH
+    ;;
+esac
 
 # Only a RID the pointer advertises has a native sub-package to resolve; on any other host the
 # install reaches cslq.any instead and every check below passes without the binary this ships
@@ -163,6 +158,10 @@ rm -f "$HOME/.dotnet/toolResolverCache/1/cslq"
 # appends the local folder, so from the first release onward nuget.org offers the same version
 # and this could quietly install the published package instead of the one just packed.
 log "install from the local feed"
+# Context for whatever happens next, not an assertion: the sub-package is chosen by the SDK's
+# own host RID, so these two lines are what tells a fallback apart from a broken package.
+printf 'dotnet:   %s\n' "$(command -v dotnet)"
+printf 'host RID: %s\n' "$rid"
 installed=1
 dotnet tool install --tool-path "$bin" --source "$out" cslq --version "$version" || installed=0
 report "$installed" "the pointer package installs"
