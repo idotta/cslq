@@ -281,6 +281,8 @@ ts_tmp=""
 ec_tmp=""
 # Set only while the failed-design-time-build leg below has its pinned-SDK tree on disk.
 gj_tmp=""
+# Set only while the native-vs-framework-dependent leg below has its AOT publish on disk.
+aot_tmp=""
 # Set only while the restore leg below has the tool resolver cache entry moved aside. Leaving
 # it moved would make every later `dotnet tool run` on this machine re-resolve the pin.
 cache_saved=""
@@ -312,6 +314,7 @@ cleanup() {
   [ -n "$ts_tmp" ] && rm -rf "$ts_tmp"
   [ -n "$ec_tmp" ] && rm -rf "$ec_tmp"
   [ -n "$gj_tmp" ] && rm -rf "$gj_tmp"
+  [ -n "$aot_tmp" ] && rm -rf "$aot_tmp"
   # The restore writes a fresh entry; the saved one is the developer's, and it covers every
   # manifest on the machine rather than only this repository's.
   if [ -n "$cache_saved" ] && [ -e "$cache_saved" ]; then
@@ -635,6 +638,173 @@ else
 fi
 
 unset CSLQ_SESSION_PIPE_NAME
+
+# The other latency claim in this repository: the Native AOT binary against the
+# framework-dependent one it is published from. Same rule as `session-beats-no-session` and
+# for the same reason -- a figure taken on one platform is what hid a 62 s per-call regression
+# on the other two for four rounds -- so it is measured here, on every platform the gate runs
+# on, at the price of an AOT publish per run.
+#
+# That publish is why this sits *after* the `unset CSLQ_SESSION_PIPE_NAME` above rather than
+# beside the leg it echoes. It outlasts CSLQ_SESSION_KEEPALIVE, so inside the shared-session
+# region it idles out the session those legs hold -- and `session-survives-hangups`, whose
+# real assertion is that the log holds exactly one `cslq session ... pid` line, then counts
+# two and goes red. CI on macos and windows found that, not this machine. Every leg below
+# names a pipe of its own, so none of them can be idled out by this one.
+#
+# The SDK is the oracle for the host RID and `uname` is not: on macos-latest an arm64 kernel
+# with an arm64 SDK still asked for an osx-x64 apphost, which is what probes/pack-smoke.sh
+# discovered the hard way.
+log "native vs framework-dependent"
+aot_rid=$(dotnet --info | tr -d '\r' | sed -n 's/^ *RID: *\([^ ]*\).*/\1/p' | head -1)
+aot_tmp=$(mktemp -d)
+aot_log=$(mktemp)
+# An AOT publish fails from Git Bash at ILCompiler's link step with MSB3073/123 even with MSVC
+# installed and found: vswhere.exe is not on Git Bash's PATH, and Git Bash is the shell the
+# Windows runner gives a bash step. Prefixed in a subshell rather than exported, so the rest of
+# the gate runs on the PATH it was given.
+(
+  case "$aot_rid" in
+    win-*) PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH" ;;
+  esac
+  dotnet publish src/Cslq/Cslq.csproj -c Release -r "$aot_rid" -o "$aot_tmp" --nologo -v q
+) > "$aot_log" 2>&1
+aot_rc=$?
+# ServerArgs.ToolManifestRoot walks up from AppContext.BaseDirectory, and a binary published
+# into a temp directory has no repository above it -- so the pin has to travel beside it, which
+# is the shape the RID packages ship and pack-smoke asserts.
+mkdir -p "$aot_tmp/.config" && cp .config/dotnet-tools.json "$aot_tmp/.config/" || aot_rc=1
+native="$aot_tmp/cslq"
+[ -x "$native" ] || native="$native.exe"
+
+# A session pipe per binary. Session.PipeName hashes the cslq *version* among other things and
+# both binaries carry the same version, so on the derived name the second binary's call would be
+# answered by the first binary's session and the comparison would be one binary against itself.
+# Both names sit under $SESSION_PREFIX, which is what the EXIT trap globs for.
+nb_native_pipe="$SESSION_PREFIX-native"
+nb_fw_pipe="$SESSION_PREFIX-framework"
+# A failed call is a *fast* call: a binary that dies on a trimmed path in 40 ms beats a
+# working one at 200 ms and the leg reports PASS on exactly the breakage it exists to catch.
+# So every nonzero exit leaves a line here. A variable cannot carry it -- each measurement
+# runs inside median3/median5's argument list, which is a command substitution's subshell,
+# and an assignment made there dies with it.
+nb_bad=$(mktemp)
+time_pipe() {
+  tp_pipe=$1
+  shift
+  tp_start=$(now_ms)
+  CSLQ_SESSION_PIPE_NAME="$tp_pipe" "$@" > /dev/null 2>&1
+  tp_rc=$?
+  [ "$tp_rc" = 0 ] || printf '%s exited %s\n' "$1" "$tp_rc" >> "$nb_bad"
+  printf '%s' "$(( $(now_ms) - tp_start ))"
+}
+median5() { printf '%s\n%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4" "$5" | sort -n | sed -n 3p; }
+
+if [ "$aot_rc" != 0 ] || [ ! -x "$native" ]; then
+  # One publish serves both legs, so a failed publish fails both -- printed once, and the rest
+  # of the gate still runs.
+  printf 'FAIL  %s (the AOT publish for %s failed)\n' "native-beats-framework-dependent" "$aot_rid"
+  printf 'FAIL  %s (the AOT publish for %s failed)\n' "native-version-beats-framework-dependent" "$aot_rid"
+  fail=$((fail + 2))
+  sed 's/^/      | /' "$aot_log"
+else
+  # The first call against each binary pays the session's whole workspace load -- 4.9-7.6 s on
+  # Windows -- and the claim is about a warm call, so its duration is discarded. Its output is
+  # not: it is free evidence that the binary answers, and a binary that exits 0 and prints
+  # nothing would otherwise measure very fast and pass. Median of three after that, because one
+  # warm call on a loaded runner is noise; the margin is ~4x, so the bound itself stays the
+  # loose "native is faster" that session-beats-no-session uses.
+  nb_native_out=$(mktemp)
+  nb_fw_out=$(mktemp)
+  : > "$nb_bad"
+  nb_answered=1
+  CSLQ_SESSION_PIPE_NAME="$nb_native_pipe" "$native" hover Greet --root fixture \
+    > "$nb_native_out" 2>&1 || nb_answered=0
+  CSLQ_SESSION_PIPE_NAME="$nb_fw_pipe" "$CSLQ" hover Greet --root fixture \
+    > "$nb_fw_out" 2>&1 || nb_answered=0
+  grep -q 'string Greeter.Greet(string name)' "$nb_native_out" || nb_answered=0
+  grep -q 'string Greeter.Greet(string name)' "$nb_fw_out" || nb_answered=0
+  nb_native=$(median3 \
+    "$(time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture)" \
+    "$(time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture)" \
+    "$(time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture)")
+  nb_fw=$(median3 \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" hover Greet --root fixture)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" hover Greet --root fixture)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" hover Greet --root fixture)")
+  printf 'hover Greet (%s): native %sms vs framework-dependent %sms (median of 3, warm session)\n' \
+    "$aot_rid" "$nb_native" "$nb_fw"
+  # The two failures are different reports, and only the second means what the leg name says.
+  if [ "$nb_answered" != 1 ] || [ -s "$nb_bad" ]; then
+    printf 'FAIL  %s (a binary did not answer; the durations above mean nothing)\n' \
+      "native-beats-framework-dependent"
+    sed 's/^/      | /' "$nb_bad"
+    printf '      native:\n'
+    sed 's/^/      | /' "$nb_native_out"
+    printf '      framework-dependent:\n'
+    sed 's/^/      | /' "$nb_fw_out"
+    fail=$((fail + 1))
+  elif [ "$nb_native" -lt "$nb_fw" ]; then
+    printf 'PASS  %s (%sms vs %sms)\n' "native-beats-framework-dependent" "$nb_native" "$nb_fw"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (%sms vs %sms: the native binary costs more than it saves here)\n' \
+      "native-beats-framework-dependent" "$nb_native" "$nb_fw"
+    # A session that was started afresh for every call reads as latency alone.
+    printf '      native session log:\n'
+    sed 's/^/      | /' "$(session_log_path "$nb_native_pipe")" 2>/dev/null
+    printf '      framework-dependent session log:\n'
+    sed 's/^/      | /' "$(session_log_path "$nb_fw_pipe")" 2>/dev/null
+    fail=$((fail + 1))
+  fi
+
+  # `--version` isolates process start from the request path: it loads no workspace, starts no
+  # server and never reaches a session, so what is left is the runtime coming up. Median of five
+  # because the whole measurement is tens of milliseconds, where one descheduled call dominates.
+  # Its own warm-up, asserted the same way: the version is what a working binary prints, and it
+  # is the shortest output in the tool.
+  : > "$nb_bad"
+  vb_answered=1
+  vb_version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
+  "$native" --version > "$nb_native_out" 2>&1 || vb_answered=0
+  "$CSLQ" --version > "$nb_fw_out" 2>&1 || vb_answered=0
+  grep -qx "$vb_version" "$nb_native_out" || vb_answered=0
+  grep -qx "$vb_version" "$nb_fw_out" || vb_answered=0
+  vb_native=$(median5 \
+    "$(time_pipe "$nb_native_pipe" "$native" --version)" \
+    "$(time_pipe "$nb_native_pipe" "$native" --version)" \
+    "$(time_pipe "$nb_native_pipe" "$native" --version)" \
+    "$(time_pipe "$nb_native_pipe" "$native" --version)" \
+    "$(time_pipe "$nb_native_pipe" "$native" --version)")
+  vb_fw=$(median5 \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" --version)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" --version)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" --version)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" --version)" \
+    "$(time_pipe "$nb_fw_pipe" "$CSLQ" --version)")
+  # The format string cannot start with `--`: bash's printf reads it as an option.
+  printf 'cslq --version (%s): native %sms vs framework-dependent %sms (median of 5)\n' \
+    "$aot_rid" "$vb_native" "$vb_fw"
+  if [ "$vb_answered" != 1 ] || [ -s "$nb_bad" ]; then
+    printf 'FAIL  %s (a binary did not print %s; the durations above mean nothing)\n' \
+      "native-version-beats-framework-dependent" "$vb_version"
+    sed 's/^/      | /' "$nb_bad"
+    printf '      native:\n'
+    sed 's/^/      | /' "$nb_native_out"
+    printf '      framework-dependent:\n'
+    sed 's/^/      | /' "$nb_fw_out"
+    fail=$((fail + 1))
+  elif [ "$vb_native" -lt "$vb_fw" ]; then
+    printf 'PASS  %s (%sms vs %sms)\n' "native-version-beats-framework-dependent" "$vb_native" "$vb_fw"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  %s (%sms vs %sms: the native binary does not start faster here)\n' \
+      "native-version-beats-framework-dependent" "$vb_native" "$vb_fw"
+    fail=$((fail + 1))
+  fi
+  rm -f "$nb_native_out" "$nb_fw_out"
+fi
+rm -f "$aot_log" "$nb_bad"
 
 # A session that cannot be started must cost the caller an answer, never the query. The
 # trigger is the startup mutex, held the same way the daemon one is above, and a pipe name
