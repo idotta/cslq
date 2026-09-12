@@ -679,9 +679,14 @@ started, which stays an accepted cost.
       `IsAotCompatible` on the project, so a reflective serializer is a build failure rather
       than a warning nobody reads — **done**; (5) `PublishAot` and per-RID packaging in
       `release.yml`, where the `PackagePath` above is a prerequisite — **done**; (6) measure,
-      on all three platforms, before a single number reaches the README — **open**.
+      on all three platforms, before a single number reaches the README — **done**:
+      `native-beats-framework-dependent` (a warm session `hover`) and
+      `native-version-beats-framework-dependent` (`--version`, which reaches no session) are
+      two legs of `probes/run.sh`. One publish of this host's RID serves both, and each binary
+      gets a session pipe of its own: `Session.PipeName` hashes the version, which both share,
+      so on the derived name one binary's session would answer the other's calls.
 
-      **Both remaining steps are decided (2026-09-12), so neither is an open question.**
+      **Both of the last two steps were decided before either was built (2026-09-12).**
       (5) advertises `win-x64;linux-x64;osx-arm64;any` and nothing else: that is exactly
       `probe.yml`'s existing three-runner matrix, so every native RID has a runner that can
       build it — Native AOT cannot cross-compile across operating systems — and the `any`
@@ -696,7 +701,9 @@ started, which stays an accepted cost.
       **The code half is done and it compiles: `cslq` publishes to a 12.4 MB single native
       binary with no IL warnings, and answers.** Measured 2026-09-12 on **Windows alone** —
       which is exactly the shape of claim the session work established as untrustworthy, so
-      none of it goes near the README until step (6) runs it on all three:
+      none of it went near the README until step (6) put it in the gate — the two legs named
+      above now measure it on every platform the gate runs on, and the README takes its
+      numbers from what they print:
       `--version` 29 ms median against 64 ms framework-dependent (n=20), and a **warm session
       `hover` 43 ms against 180 ms** (n=12, one session per binary so they cannot share one).
       That is 4.2x and 137 ms off every warm call — more than the "roughly half of a warm call
