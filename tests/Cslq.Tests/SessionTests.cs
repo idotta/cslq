@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Nerdbank.Streams;
 using StreamJsonRpc;
+using StreamJsonRpc.Protocol;
 
 namespace Cslq.Tests;
 
@@ -140,7 +141,7 @@ public class SessionTests
         var endpoint = new Session.Endpoint(state, new SemaphoreSlim(1, 1), ct);
 
         var server = Session.Rpc(a);
-        server.AddLocalRpcTarget(endpoint);
+        server.AddLocalRpcTarget(RpcTargetMetadata.FromShape<Session.Endpoint>(), endpoint, null);
         server.StartListening();
 
         var client = Session.Rpc(b);
@@ -264,6 +265,90 @@ public class SessionTests
         public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
 
         public override void Write(string? value) => throw new IOException("the pipe is being closed");
+    }
+
+    /// <summary>
+    /// The bytes, not a round trip. Both ends read <see cref="Session.Json"/>, so a renamed
+    /// property or a re-cased naming policy would round-trip perfectly while an older
+    /// <c>cslq</c> on the other end of the pipe saw nothing it recognised — and the
+    /// source-generated context bakes its names in at generation time, so it can drift from
+    /// the options the reflective path used to derive them from. Pin the wire instead.
+    /// </summary>
+    [Fact]
+    public void The_wire_shape_is_camel_case_and_omits_a_null_error()
+    {
+        Assert.Equal(
+            """{"version":"0.2.0","argv":["refs","Greet"]}""",
+            JsonSerializer.Serialize(new Session.Request("0.2.0", ["refs", "Greet"]), Session.Json));
+
+        // An ordinary answer carries no `error` key at all, which is what the client reads to
+        // tell an answer from a decline.
+        Assert.Equal(
+            """{"exit":0,"stdout":"out","stderr":""}""",
+            JsonSerializer.Serialize(new Session.Response(0, "out", "", null), Session.Json));
+
+        Assert.Equal(
+            """{"exit":1,"stdout":"","stderr":"","error":"this session serves /w/other"}""",
+            JsonSerializer.Serialize(
+                new Session.Response(1, "", "", "this session serves /w/other"), Session.Json));
+    }
+
+    /// <summary>The reader half of the same shape: camelCase in, case-insensitively.</summary>
+    [Fact]
+    public void The_wire_reads_back_case_insensitively()
+    {
+        var request = JsonSerializer.Deserialize<Session.Request>(
+            """{"Version":"0.2.0","ARGV":["sym","Greeter"]}""", Session.Json);
+
+        Assert.NotNull(request);
+        Assert.Equal("0.2.0", request.Version);
+        Assert.Equal(["sym", "Greeter"], request.Argv);
+
+        var response = JsonSerializer.Deserialize<Session.Response>(
+            """{"exit":2,"stdout":"","stderr":"usage"}""", Session.Json);
+
+        Assert.NotNull(response);
+        Assert.Equal(2, response.Exit);
+        Assert.Null(response.Error);
+    }
+
+    /// <summary>
+    /// The error path crosses this wire too, and it is the one <see cref="Session.Json"/>
+    /// resolving through <see cref="Session.Wire"/> alone can silently take out. An exception
+    /// that is neither <c>UsageException</c> nor <c>CslqException</c> escapes
+    /// <c>AnsweredAsync</c> and StreamJsonRpc turns it into a JSON-RPC error whose <c>data</c>
+    /// is a <c>CommonErrorData</c> serialized with these same options — so without that type
+    /// in the context the *serialization* fails, the connection dies, and the client sees
+    /// <c>ConnectionLostException</c> instead of the fault. Measured: it does break, and the
+    /// only thing missing is <c>CommonErrorData</c>. Both directions matter, since the client
+    /// deserialises the same type back off <c>data</c>.
+    /// </summary>
+    [Fact]
+    public async Task An_escaping_exception_is_a_fault_the_client_can_read()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (a, b) = FullDuplexStream.CreatePair();
+        using var server = Session.Rpc(a);
+        server.AddLocalRpcTarget(new Thrower());
+        server.StartListening();
+        using var client = Session.Rpc(b);
+        client.StartListening();
+
+        var ex = await Assert.ThrowsAsync<RemoteInvocationException>(
+            () => client.InvokeWithCancellationAsync("boom", null, ct));
+
+        Assert.Equal("the roslyn client fell over", ex.Message);
+        Assert.Equal(-32000, ex.ErrorCode);
+        var data = Assert.IsType<CommonErrorData>(ex.DeserializedErrorData);
+        Assert.Equal(typeof(InvalidOperationException).FullName, data.TypeName);
+    }
+
+    /// <summary>An ordinary failure out of a target method: what an <c>LspClient</c> that
+    /// fell over reaches the wire as.</summary>
+    private sealed class Thrower
+    {
+        [JsonRpcMethod("boom")]
+        public Task Boom() => throw new InvalidOperationException("the roslyn client fell over");
     }
 
     private static Program.Options Options(string logLevel, bool daemon) => new(

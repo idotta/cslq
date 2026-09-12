@@ -582,9 +582,102 @@ started, which stays an accepted cost.
       `JsonSerializerDefaults.Web` options both ends of the real wire use.
       **Measured**: the gate 164 of 164 on **Windows**, `session-beats-no-session` 194 ms
       against 2191 ms, format clean, 345 unit tests green, and no `request failed` noise in any
-      session log. **Only Windows was exercised** — WSL and Docker are both unavailable on this
-      machine and no PR was opened, so CI has not seen it on ubuntu or macos.
+      session log. Windows was the only platform exercised locally — WSL and Docker were both
+      unavailable on this machine — so ubuntu and macos were CI's to answer, and did: all three
+      `probe` legs green on PR #31.
       **Done.** `src/Cslq/Session.cs`, `probes/pipe-smoke.cs`, `SessionTests`.
+
+- [ ] **Native AOT, so a call stops paying ~70 ms of process start.** `cslq --version`, which
+      starts nothing at all, is a ~70 ms floor, and a warm session `hover` is 138-188 ms: with
+      the workspace already loaded, roughly half of every warm call is .NET starting up. The
+      only officially measured range for CLI-shaped startup is **3-5.5×** — Microsoft's own
+      `dotnet tool list` went 378 ms to 68 ms in the .NET 11 SDK — and the order-of-magnitude
+      figures in circulation are not Microsoft-sourced. So nothing is claimed here until
+      `probes/run.sh` measures it on all three platforms, which is the rule the session work
+      already established: a latency number is a claim about one platform.
+
+      **The library half is answered, and cheaper than its warnings suggest.** StreamJsonRpc
+      documents itself as "partially NativeAOT safe" and its recipe is a source-generated
+      `TypeInfoResolver` on the formatter's options. Measured 2026-09-11 on a scratch
+      file-based app with reflection-based System.Text.Json left off: both wire shapes — a void
+      no-parameter method and a record-in, record-out method — answer, and they keep answering
+      after a real `dotnet publish` to native code. **But only with a typed target overload.**
+      With the untyped `AddLocalRpcTarget(object)` the published binary found *no methods at
+      all* and every call came back `RemoteMethodNotFoundException` — a trimmed target reads
+      exactly like a protocol bug. `AddLocalRpcTarget<T>(target, null)` works at runtime; the
+      annotation-clean path is `AddLocalRpcTarget(RpcTargetMetadata, object, options)` fed by
+      `RpcTargetMetadata.FromShape<T>()`, and **both are already in the pinned 2.25.29** —
+      checked against the shipped assembly's own documented members rather than the release
+      notes, which suggest otherwise.
+
+      **The formatter is the part with no clean answer.** `NerdbankMessagePackFormatter`
+      carries no AOT annotations at all and is what the library recommends, but the LSP
+      connection has to speak JSON, so `SystemTextJsonFormatter` stays there — and it is
+      annotated at the type level, "semi-safe" in the library's own words, with the official
+      sample suppressing IL2026/IL3050 by hand. The session's own pipe could take MessagePack
+      since both ends are ours, at the cost of two formatters and two wire formats in one tool.
+
+      **Our own code is mechanical, and the size is known**: 70 IL2026/IL3050 warnings under
+      `-p:IsAotCompatible=true` — `Output.cs` 44 (the `--json` envelopes), `LspClient.cs` 18,
+      `Session.cs` 8 — answered by a source-generated context per serialized type plus the
+      typed RPC-target overloads. The Roslyn server is unaffected: it is a separate process,
+      launched through `dotnet tool run`, and stays IL whatever we do.
+
+      **The distribution is what can sink this, and it is not code.** SDK 10 ships
+      platform-specific tools: `ToolPackageRuntimeIdentifiers` with `PublishAot`, a pointer
+      package plus one package per RID, and `Runner="executable"` in `DotnetToolSettings.xml`
+      so the shim execs the native binary. The constraints that follow: a consumer on an SDK
+      older than 10 cannot install it at all; an `any` fallback package is still needed
+      (`dotnet pack -r any -p:PublishAot=false`); Native AOT cannot cross-compile across
+      operating systems, so each RID needs a runner of its own — `probe.yml`'s matrix is
+      already that shape, `release.yml` is not; and the RID packages must be pushed *before*
+      the pointer package, or an install landing between the two fails.
+      **The load-bearing unknown was how `.config/dotnet-tools.json` restore resolves a RID
+      sub-package, and it is answered: the manifest never names one.** Measured 2026-09-11 on
+      SDK 10.0.301 against a throwaway pointer-package tool served from a local feed:
+      `dotnet tool install` writes the entry it writes today — id, version, `commands`,
+      `rollForward` — with no RID in it, so a manifest committed on one OS restores on another,
+      and the RID is chosen at restore time. `dotnet tool restore` then fetches two packages,
+      the pointer and the sub-package matching the host.
+      Three findings came with it, and the first is the one that shapes `release.yml`:
+      - **A RID the pointer lists has no fallback.** With `ridtool.win-x64` missing from the
+        feed, restore *failed* naming it while `ridtool.any` sat in the same feed — the `any`
+        package is reached only when the host's RID is absent from the pointer's list entirely
+        (a pointer listing `linux-x64;any` installed `ridtool.any` on Windows,
+        `Runner="dotnet"`). So a RID we advertise and fail to build is a hard install failure
+        on that platform rather than a quiet downgrade to CoreCLR, and the push order is not
+        mere hygiene.
+      - **`cslq`'s own server pin does not survive RID packaging as written.**
+        `Cslq.csproj` hardcodes `PackagePath="tools/net10.0/any/.config/"`, while
+        `ServerArgs.ToolManifestRoot` walks up from `AppContext.BaseDirectory` — which becomes
+        `tools/net10.0/<rid>/`. Verified on the throwaway: the manifest lands in the `any`
+        sibling, the walk finds nothing, and the installed tool cannot resolve the pin at all.
+        A `$(RuntimeIdentifier)`-conditioned `PackagePath` puts it beside the binary.
+      - **`~/.dotnet/toolResolverCache/1/<tool>` is keyed by name and version and stores an
+        absolute `PathToExecutable`**, so a restore in an unrelated directory, with its own
+        feed *and* its own `globalPackagesFolder`, reports success and runs the binary an
+        earlier install left behind. Four scenarios passed meaninglessly before it was cleared;
+        any leg that means to exercise a restore has to delete that file first.
+      Two more, both about the build rather than the wire: `ToolPackageRuntimeIdentifiers`
+      without `PublishAot` does not pack — plain `dotnet pack` builds every RID target and
+      fails `NETSDK1047` unless they are in `RuntimeIdentifiers` and restored — so the
+      documented AOT flow (pointer `dotnet pack`, then `-r <rid>` per RID, then
+      `-r any -p:PublishAot=false`) is the one to use; and an AOT publish **fails from Git
+      Bash**, which is the shell `probes/run.sh` runs under: `vswhere.exe` is not on its PATH
+      and ILCompiler's link step exits `MSB3073`/123 with MSVC installed and found. Adding
+      `C:\Program Files (x86)\Microsoft Visual Studio\Installer` to PATH fixes it.
+      The only figure taken so far is indicative and stays out of the README: the same trivial
+      program published both ways on this Windows machine ran 10 ms median (n=15, 10-18)
+      native against 44 ms (41-47) framework-dependent, 4.4x and inside the official range.
+      What no local run can answer is whether an SDK older than 10 can install such a tool —
+      only 10.0.301 is installed here, so that one is CI's.
+
+      Order, so the unknown is answered before anything is built on it: (1) a throwaway
+      RID-specific tool package, to settle the manifest question — **done, above**; (2) the
+      session pipe, whose 8 warnings sit behind a wire we own on both ends and can revert
+      alone; (3) `LspClient`; (4) `Output`; (5) `PublishAot` and per-RID packaging in
+      `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
+      platforms, before a single number reaches the README.
 
 ## Acceptance criteria
 
