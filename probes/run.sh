@@ -739,6 +739,14 @@ fi
 # walking up into the repository, which an installed binary has no way to do. This packs,
 # installs into a throwaway --tool-path and runs from an unrelated cwd, so the only manifest
 # within reach is the one packed into tools/net10.0/any/.
+#
+# Two packs now, and the pointer's RID list is narrowed to `any`: since the tool became
+# platform-specific, the pointer package carries no binary at all -- it names one sub-package
+# per RID -- and a RID it lists whose sub-package is absent is a hard install failure rather
+# than a fallback. Building this host's real RID here would put a ~70 s Native AOT publish in
+# the gate; a pointer that lists only `any` reaches the framework-dependent fallback instead,
+# which is the same install path and the same manifest question at the cost of an ordinary
+# publish. probes/pack-smoke.sh is what proves the shipped shape, on each platform in CI.
 log "packaged tool install"
 install_tmp=$(mktemp -d)
 version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
@@ -747,7 +755,14 @@ version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | h
 fixture_abs=$( cd fixture && { pwd -W 2>/dev/null || pwd; } )
 
 ok=1
-dotnet pack src/Cslq/Cslq.csproj -c Release -o "$install_tmp/pkg" --nologo -v q || ok=0
+# BaseOutputPath into the throwaway directory, because -p:ToolPackageRuntimeIdentifiers is a
+# global property and MSBuild rebuilds for it -- the copy to src/Cslq/bin/Release then fails
+# with MSB3027, since that is the binary every case above runs and the sessions they left are
+# still holding it. The RID pack below writes under its own RID and needs no such thing.
+dotnet pack src/Cslq/Cslq.csproj -c Release -o "$install_tmp/pkg" --nologo -v q \
+  -p:ToolPackageRuntimeIdentifiers=any -p:BaseOutputPath="$install_tmp/build/" || ok=0
+dotnet pack src/Cslq/Cslq.csproj -c Release -r any -p:PublishAot=false -o "$install_tmp/pkg" \
+  --nologo -v q || ok=0
 # --source, not --add-source: --add-source only appends the local folder to the feed list, so
 # from the first release onward nuget.org offers the same version and the leg could quietly
 # test the published package instead of the one just packed. --source replaces every feed,

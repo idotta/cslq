@@ -31,6 +31,20 @@
     <PackageProjectUrl>https://github.com/idotta/cslq</PackageProjectUrl>
     <PackageTags>roslyn;lsp;csharp;dotnet-tool;coding-agent;cli</PackageTags>
     <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <!-- Platform-specific tool packaging: a pointer package listing these RIDs, one
+         Native AOT package per native RID, and `any` as the framework-dependent CoreCLR
+         fallback for every platform without a runner of its own (osx-x64, linux-arm64,
+         win-arm64). The three native RIDs are exactly probe.yml's matrix, because Native
+         AOT cannot cross-compile across operating systems and a RID the pointer lists
+         whose sub-package is missing fails the install outright rather than falling back
+         to `any`.
+
+         ToolPackageRuntimeIdentifiers rather than RuntimeIdentifiers: with PublishAot a
+         plain `dotnet pack` then produces the pointer package alone and each RID package
+         comes from its own `dotnet pack -r <rid>`, where RuntimeIdentifiers would make
+         plain `dotnet pack` build every RID target and fail NETSDK1047. -->
+    <ToolPackageRuntimeIdentifiers>win-x64;linux-x64;osx-arm64;any</ToolPackageRuntimeIdentifiers>
+    <PublishAot>true</PublishAot>
     <!-- Normalises the paths SourceLink embeds, so a package built by release.yml is
          reproducible. Conditioned on the runner's own variable rather than set outright:
          a local dotnet pack keeps its absolute paths and stays debuggable. -->
@@ -42,13 +56,36 @@
   </ItemGroup>
 
   <!-- The server pin travels with the tool. ServerArgs.ToolManifestRoot walks up from
-       AppContext.BaseDirectory, which for an installed tool is this same
-       tools/net10.0/any/ directory, so the walk finds the manifest on its first step and
-       LspClient runs the server there. Without this an installed binary cannot resolve the
-       pin at all - there is no repository above it. -->
-  <ItemGroup>
-    <None Include="../../.config/dotnet-tools.json" Pack="true" PackagePath="tools/net10.0/any/.config/" />
-  </ItemGroup>
+       AppContext.BaseDirectory, which for an installed tool is the directory the binary was
+       laid down in, so the walk finds the manifest on its first step and LspClient runs the
+       server there. Without this an installed binary cannot resolve the pin at all - there is
+       no repository above it.
+
+       That directory is tools/<tfm>/<rid>/, and both halves move: the rid is `any` for the
+       pointer pack and an ordinary local `dotnet pack`, and the tfm is `any` rather than
+       net10.0 whenever the pack is self-contained, which every Native AOT RID pack is. So
+       win-x64 is tools/any/win-x64/ while the fallback is tools/net10.0/any/, and a hardcoded
+       path leaves the manifest in a sibling directory the walk never enters - the tool then
+       installs, runs and cannot resolve the pin, at exit 0 from every build.
+
+       The tfm half is the SDK's own property (Microsoft.NET.PackTool.targets), computed in
+       SetPackToolProperties, which is why this is a target after PackToolImplementation
+       rather than a Pack="true" item: at evaluation time it is not known. It is private, so
+       probes/pack-smoke.sh asserts the manifest lands beside DotnetToolSettings.xml rather
+       than at a path written down twice. -->
+  <Target Name="PackServerPinBesideTheBinary" AfterTargets="PackToolImplementation">
+    <PropertyGroup>
+      <!-- The SDK's own two lines, repeated because it sets _ToolRidPath inside the PackTool
+           body, which runs after this. The tfm half is already computed by then. -->
+      <_CslqToolRidPath>any</_CslqToolRidPath>
+      <_CslqToolRidPath Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_CslqToolRidPath>
+    </PropertyGroup>
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="../../.config/dotnet-tools.json">
+        <PackagePath>tools/$(_ToolPackShortTargetFrameworkName)/$(_CslqToolRidPath)/.config/</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
 
   <!-- The nuget.org readme. It is its own file rather than README.md because every link on a
        nuget.org page has to be absolute - relative ones render dead there. -->

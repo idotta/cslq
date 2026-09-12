@@ -678,8 +678,8 @@ started, which stays an accepted cost.
       alone — **done, #34**; (3) `LspClient` — **done, #35**; (4) `Output`, and with it
       `IsAotCompatible` on the project, so a reflective serializer is a build failure rather
       than a warning nobody reads — **done**; (5) `PublishAot` and per-RID packaging in
-      `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
-      platforms, before a single number reaches the README.
+      `release.yml`, where the `PackagePath` above is a prerequisite — **done**; (6) measure,
+      on all three platforms, before a single number reaches the README — **open**.
 
       **Both remaining steps are decided (2026-09-12), so neither is an open question.**
       (5) advertises `win-x64;linux-x64;osx-arm64;any` and nothing else: that is exactly
@@ -714,6 +714,39 @@ started, which stays an accepted cost.
       answers `RemoteMethodNotFoundException`; and `[JsonSourceGenerationOptions]` governs only
       the context's `Default` instance, so a context constructed around options of its own must
       repeat the naming policy there or every key comes out PascalCase.
+
+      **(5) is done, and three of the things it measured contradict what this item says
+      above.** The packaging is proved per platform by `probes/pack-smoke.sh` — packs the
+      pointer, the runner's own RID and the `any` fallback, asserts the manifest's placement,
+      installs from the local feed and runs `--version` and `ready` against the fixture — and
+      it runs on every PR in `probe.yml`'s three-runner matrix as well as in `release.yml`'s
+      packing job, so a package that cannot install is red on a PR rather than at a tag.
+      `release.yml` is three jobs now: `gate` on ubuntu, `pack` across the three runners, and
+      `publish` pushing every RID package and `any` before the pointer.
+      - **The AOT package's layout is `tools/any/<rid>/`, not `tools/net10.0/<rid>/`.**
+        `SelfContained` — which every Native AOT pack is — rewrites the tfm half of
+        `tools/<tfm>/<rid>/` to `any`, so **both** segments move and the
+        `$(RuntimeIdentifier)`-conditioned `PackagePath` this item prescribed still misplaces
+        the manifest, one segment further up: the tool installs, runs, and cannot resolve the
+        pin, at exit 0 from every build. Measured 2026-09-12. The tfm half is the SDK's own
+        `_ToolPackShortTargetFrameworkName`, a private property, which is an accepted risk
+        rather than a hidden one because `pack-smoke.sh` asserts the manifest lands in
+        `DotnetToolSettings.xml`'s **own** directory rather than at a path written down twice.
+        `_ToolRidPath` cannot be borrowed the same way: it is set inside the `PackTool` body,
+        after `PackToolImplementation`, so a target hooked there reads it empty and produces
+        `tools/any//.config/`.
+      - **A RID sub-package declares `Runner="executable"`**, and `--tool-path` lays down
+        `cslq.cmd` on Windows rather than the apphost `.exe` a framework-dependent tool gets.
+      - **`run.sh`'s install leg can no longer pack the shipped shape**, since a plain
+        `dotnet pack` now yields the pointer alone and a listed RID with no sub-package is a
+        hard install failure; building the host's real RID there would put a ~70 s AOT publish
+        in the gate. It narrows the pointer to `-p:ToolPackageRuntimeIdentifiers=any` and packs
+        the fallback beside it — and that `-p` is a *global* property, so MSBuild rebuilds and
+        the copy into `src/Cslq/bin/Release` fails `MSB3027` against the binary the earlier
+        cases' sessions are still holding. `-p:BaseOutputPath` into the throwaway directory is
+        the fix, and the failure would have been red on CI too, not only here. The same two
+        packs are the README's build-from-source recipe, for the same reason and with no AOT
+        toolchain needed.
 
 ## Acceptance criteria
 

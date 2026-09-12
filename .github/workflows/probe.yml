@@ -48,3 +48,9 @@ jobs:
       - run: dotnet format --verify-no-changes
 
       - run: ./probes/run.sh
+
+      # After the gate, which is what restores fixture/ and builds fixture/Gen. It packs the
+      # pointer, this runner's RID and the `any` fallback, installs the result and runs it: a
+      # package that builds but cannot install, or an installed binary that cannot find the
+      # server pin packed beside it, is otherwise invisible until a tag.
+      - run: ./probes/pack-smoke.sh

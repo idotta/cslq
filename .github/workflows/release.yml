@@ -1,7 +1,9 @@
 name: release
 
-# Tag-triggered, so a release is `git tag v0.1.0 && git push --tags`. The gate runs first:
-# nothing reaches nuget.org that has not survived probes/run.sh on this runner.
+# Tag-triggered, so a release is `git tag v0.1.0 && git push --tags`. Three jobs, because
+# Native AOT cannot cross-compile across operating systems: the gate, then one packing runner
+# per advertised native RID, then the publish. Nothing reaches nuget.org that has not survived
+# probes/run.sh and, on its own platform, an install of the package about to be pushed.
 on:
   push:
     tags: ['v*']
@@ -10,16 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  gate:
     runs-on: ubuntu-latest
-    # Trusted publishing: the job's OIDC token is exchanged with nuget.org for a one-hour API
-    # key, so no long-lived secret exists to leak. The policy on nuget.org names this repo,
-    # this file (release.yml) and the environment below; anything else is refused.
-    # contents: write is for the GitHub Release at the end, nothing before it writes.
-    permissions:
-      contents: write
-      id-token: write
-    environment: release
     steps:
       - uses: actions/checkout@v7
 
@@ -49,11 +43,110 @@ jobs:
       # Before the gate, so no path to a release skips the format check.
       - run: dotnet format --verify-no-changes
 
+      # On this runner alone: the three-platform gate runs on every PR in probe.yml, and the
+      # pack job below still proves the package on each of the three.
       - run: ./probes/run.sh
 
-      - run: dotnet pack src/Cslq/Cslq.csproj -c Release -o artifacts --nologo
+  pack:
+    needs: gate
+    strategy:
+      # A RID whose package fails to build must not cancel the others: the push order in
+      # `publish` exists because a listed RID with no package is a hard install failure, so
+      # which RIDs failed is the thing worth reading off a red run.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-arm64
 
-      # Requested after the gate and the pack, not before: the key it returns lives one hour
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('.config/dotnet-tools.json', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # pack-smoke.sh's `ready` needs a restored fixture and a built generator, which is
+      # normally what probes/run.sh leaves behind. The whole gate is not repeated here -- it
+      # ran on every PR across these same three runners -- so this is that prerequisite alone.
+      - name: fixture prerequisites for pack-smoke
+        run: |
+          dotnet tool restore
+          dotnet restore fixture/Fixture.slnx --nologo -v q
+          dotnet build fixture/Core/Core.csproj -c Debug --nologo -v q
+
+      # Packs the pointer, this runner's RID and the `any` fallback into artifacts/, installs
+      # the result and runs it. A package that builds but cannot install, or an installed
+      # binary that cannot find the server pin packed beside it, is invisible to everything
+      # else here.
+      - run: ./probes/pack-smoke.sh artifacts
+
+      # Every upload below names a literal file. A glob is matched by @actions/glob rather
+      # than by the shell, nothing before a tag ever runs one, and with if-no-files-found:
+      # error a pattern that matches nothing fails the release at the point where the
+      # sub-packages may already be immutable on nuget.org.
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: nupkg-${{ matrix.rid }}
+          path: artifacts/cslq.${{ matrix.rid }}.${{ steps.v.outputs.version }}.nupkg
+          if-no-files-found: error
+
+      # The pointer and the `any` fallback are the same package whichever runner builds them,
+      # and only one copy may be pushed, so they come from this leg alone.
+      - uses: actions/upload-artifact@v5
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: nupkg-shared
+          path: |
+            artifacts/cslq.${{ steps.v.outputs.version }}.nupkg
+            artifacts/cslq.any.${{ steps.v.outputs.version }}.nupkg
+          if-no-files-found: error
+
+  publish:
+    needs: pack
+    runs-on: ubuntu-latest
+    # Trusted publishing: the job's OIDC token is exchanged with nuget.org for a one-hour API
+    # key, so no long-lived secret exists to leak. The policy on nuget.org names this repo,
+    # this file (release.yml) and the environment below; anything else is refused -- so both
+    # keep their names whatever else moves.
+    # contents: write is for the GitHub Release at the end, nothing before it writes.
+    permissions:
+      contents: write
+      id-token: write
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+          pattern: nupkg-*
+          merge-multiple: true
+
+      # Requested after the gate and the packs, not before: the key it returns lives one hour
       # and probes/run.sh alone can take several minutes cold. NUGET_USER is the nuget.org
       # profile name of the policy owner, not an email address.
       - name: nuget.org login
@@ -62,15 +155,28 @@ jobs:
         with:
           user: ${{ secrets.NUGET_USER }}
 
+      # Order is load-bearing. The pointer package is what a `dotnet tool install cslq`
+      # resolves, and a RID it lists whose sub-package is absent fails the install outright
+      # rather than falling back to `any` -- measured. So every sub-package is pushed first
+      # and the pointer last, and an install landing mid-push gets either the old version or
+      # a complete new one.
       - name: push to nuget.org
-        run: >
-          dotnet nuget push "artifacts/*.nupkg"
-          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          push() {
+            dotnet nuget push "$1" --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json --skip-duplicate
+          }
+          for rid in win-x64 linux-x64 osx-arm64 any; do
+            push "artifacts/cslq.$rid.$version.nupkg"
+          done
+          push "artifacts/cslq.$version.nupkg"
 
       # Every version on nuget.org is bound to a GitHub Release of the same tag, with the
-      # nupkg attached and notes generated from the PRs merged since the previous tag — bump
+      # nupkgs attached and notes generated from the PRs merged since the previous tag — bump
       # PRs carry the server version in their title, so the notes say what each patch is.
       # After the push, so a red gate or a failed push leaves no release behind; guarded like
       # the push, so a re-run of a published tag is a no-op rather than a failure.

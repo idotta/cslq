@@ -44,12 +44,16 @@ cslq --version
 Release](https://github.com/idotta/cslq/releases) of the same tag with the `.nupkg` attached
 and notes saying which language server it pins. To run what is on `main` instead, install from
 a package you build — the `--source` pointing at your own `dotnet pack` output is what takes
-the place of nuget.org:
+the place of nuget.org. Two packs rather than one, because a plain `dotnet pack` now produces
+only the pointer package that names one Native AOT sub-package per platform: narrowing it to
+`any` and packing the framework-dependent fallback beside it installs the same tool without
+needing an AOT toolchain:
 
 ```
 git clone https://github.com/idotta/cslq.git
 cd cslq
-dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts
+dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts -p:ToolPackageRuntimeIdentifiers=any
+dotnet pack src/Cslq/Cslq.csproj -c Release -o ./artifacts -r any -p:PublishAot=false
 dotnet tool install -g cslq --source ./artifacts
 ```
 
@@ -812,7 +816,11 @@ does not equal it — before the gate, because the tag is what names the package
 disagreement would publish a version nobody asked for.
 
 What it then runs, in order: `dotnet format --verify-no-changes`, so no path to nuget.org skips
-the format check; `probes/run.sh`, the same gate every PR runs; `dotnet pack -c Release`;
+the format check; `probes/run.sh`, the same gate every PR runs; then a packing job per
+platform, each running `probes/pack-smoke.sh` on its own runner because Native AOT cannot
+cross-compile across operating systems; then a publishing job that pushes every RID package
+and the `any` fallback first and the pointer package last, since a RID the pointer lists whose
+sub-package is not up yet is a hard install failure rather than a fallback;
 `NuGet/login@v1`, which exchanges the job's OIDC token for a one-hour nuget.org key so no
 long-lived secret exists to leak; `dotnet nuget push --skip-duplicate`, so a re-run of an
 already-published version is a no-op rather than a failure; and last, `gh release create
