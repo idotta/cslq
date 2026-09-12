@@ -699,16 +699,22 @@ started, which stays an accepted cost.
       (~70 s on the dev machine), which is the price of the rule.
 
       **The code half is done and it compiles: `cslq` publishes to a 12.4 MB single native
-      binary with no IL warnings, and answers.** Measured 2026-09-12 on **Windows alone** —
-      which is exactly the shape of claim the session work established as untrustworthy, so
-      none of it went near the README until step (6) put it in the gate — the two legs named
-      above now measure it on every platform the gate runs on, and the README takes its
-      numbers from what they print:
-      `--version` 29 ms median against 64 ms framework-dependent (n=20), and a **warm session
-      `hover` 43 ms against 180 ms** (n=12, one session per binary so they cannot share one).
-      That is 4.2x and 137 ms off every warm call — more than the "roughly half of a warm call
-      is .NET starting up" estimate this item opened with, because the client process pays JIT
-      for the whole request path and not only for startup. The native binary was exercised
+      binary with no IL warnings, and answers.** The first figures were taken on **Windows
+      alone** — `--version` 29 ms against 64 ms (n=20) and a warm session `hover` 43 ms against
+      180 ms (n=12) — which is exactly the shape of claim the session work established as
+      untrustworthy, so none of it went near the README. Step (6) put it in the gate instead,
+      and these are what the two legs measured on every platform, 2026-09-12:
+
+          warm session hover    linux-x64  20ms vs 222ms    osx-arm64  19ms vs 155ms    win-x64  77ms vs 274ms
+          cslq --version        linux-x64  13ms vs  37ms    osx-arm64  18ms vs  49ms    win-x64  57ms vs  84ms
+
+      The Windows-only number was the **pessimistic** one: 3.6x there against 8x on macos and
+      11x on linux, the opposite direction from the regression that established the rule, which
+      is the point of measuring rather than extrapolating. `--version` on win-x64 is 1.5x, the
+      thinnest margin in the suite and the leg to watch. The warm gap is more than the "roughly
+      half of a warm call is .NET starting up" estimate this item opened with, because the
+      client process pays JIT for the whole request path and not only for startup. The README
+      takes its numbers from what these legs print, and nothing goes in it that they do not. The native binary was exercised
       beyond `--version`: `ready`, `hover` and a `--json` `refs` against the fixture all answer
       correctly, with the server pin resolved from a `.config/` placed beside the executable —
       which is the shape item (5) has to reproduce in the package.

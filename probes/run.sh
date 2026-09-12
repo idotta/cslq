@@ -683,11 +683,19 @@ native="$aot_tmp/cslq"
 # Both names sit under $SESSION_PREFIX, which is what the EXIT trap globs for.
 nb_native_pipe="$SESSION_PREFIX-native"
 nb_fw_pipe="$SESSION_PREFIX-framework"
+# A failed call is a *fast* call: a binary that dies on a trimmed path in 40 ms beats a
+# working one at 200 ms and the leg reports PASS on exactly the breakage it exists to catch.
+# So every nonzero exit leaves a line here. A variable cannot carry it -- each measurement
+# runs inside median3/median5's argument list, which is a command substitution's subshell,
+# and an assignment made there dies with it.
+nb_bad=$(mktemp)
 time_pipe() {
   tp_pipe=$1
   shift
   tp_start=$(now_ms)
   CSLQ_SESSION_PIPE_NAME="$tp_pipe" "$@" > /dev/null 2>&1
+  tp_rc=$?
+  [ "$tp_rc" = 0 ] || printf '%s exited %s\n' "$1" "$tp_rc" >> "$nb_bad"
   printf '%s' "$(( $(now_ms) - tp_start ))"
 }
 median5() { printf '%s\n%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4" "$5" | sort -n | sed -n 3p; }
@@ -701,11 +709,21 @@ if [ "$aot_rc" != 0 ] || [ ! -x "$native" ]; then
   sed 's/^/      | /' "$aot_log"
 else
   # The first call against each binary pays the session's whole workspace load -- 4.9-7.6 s on
-  # Windows -- and the claim is about a warm call, so it is discarded. Median of three after
-  # that, because one warm call on a loaded runner is noise; the margin is ~4x, so the bound
-  # stays the loose "native is faster" the leg above uses.
-  time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture > /dev/null
-  time_pipe "$nb_fw_pipe" "$CSLQ" hover Greet --root fixture > /dev/null
+  # Windows -- and the claim is about a warm call, so its duration is discarded. Its output is
+  # not: it is free evidence that the binary answers, and a binary that exits 0 and prints
+  # nothing would otherwise measure very fast and pass. Median of three after that, because one
+  # warm call on a loaded runner is noise; the margin is ~4x, so the bound itself stays the
+  # loose "native is faster" that session-beats-no-session uses.
+  nb_native_out=$(mktemp)
+  nb_fw_out=$(mktemp)
+  : > "$nb_bad"
+  nb_answered=1
+  CSLQ_SESSION_PIPE_NAME="$nb_native_pipe" "$native" hover Greet --root fixture \
+    > "$nb_native_out" 2>&1 || nb_answered=0
+  CSLQ_SESSION_PIPE_NAME="$nb_fw_pipe" "$CSLQ" hover Greet --root fixture \
+    > "$nb_fw_out" 2>&1 || nb_answered=0
+  grep -q 'string Greeter.Greet(string name)' "$nb_native_out" || nb_answered=0
+  grep -q 'string Greeter.Greet(string name)' "$nb_fw_out" || nb_answered=0
   nb_native=$(median3 \
     "$(time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture)" \
     "$(time_pipe "$nb_native_pipe" "$native" hover Greet --root fixture)" \
@@ -716,13 +734,23 @@ else
     "$(time_pipe "$nb_fw_pipe" "$CSLQ" hover Greet --root fixture)")
   printf 'hover Greet (%s): native %sms vs framework-dependent %sms (median of 3, warm session)\n' \
     "$aot_rid" "$nb_native" "$nb_fw"
-  if [ "$nb_native" -lt "$nb_fw" ]; then
+  # The two failures are different reports, and only the second means what the leg name says.
+  if [ "$nb_answered" != 1 ] || [ -s "$nb_bad" ]; then
+    printf 'FAIL  %s (a binary did not answer; the durations above mean nothing)\n' \
+      "native-beats-framework-dependent"
+    sed 's/^/      | /' "$nb_bad"
+    printf '      native:\n'
+    sed 's/^/      | /' "$nb_native_out"
+    printf '      framework-dependent:\n'
+    sed 's/^/      | /' "$nb_fw_out"
+    fail=$((fail + 1))
+  elif [ "$nb_native" -lt "$nb_fw" ]; then
     printf 'PASS  %s (%sms vs %sms)\n' "native-beats-framework-dependent" "$nb_native" "$nb_fw"
     pass=$((pass + 1))
   else
     printf 'FAIL  %s (%sms vs %sms: the native binary costs more than it saves here)\n' \
       "native-beats-framework-dependent" "$nb_native" "$nb_fw"
-    # The interesting failure is a session that never answered, which reads as latency alone.
+    # A session that was started afresh for every call reads as latency alone.
     printf '      native session log:\n'
     sed 's/^/      | /' "$(session_log_path "$nb_native_pipe")" 2>/dev/null
     printf '      framework-dependent session log:\n'
@@ -733,8 +761,15 @@ else
   # `--version` isolates process start from the request path: it loads no workspace, starts no
   # server and never reaches a session, so what is left is the runtime coming up. Median of five
   # because the whole measurement is tens of milliseconds, where one descheduled call dominates.
-  "$native" --version > /dev/null 2>&1
-  "$CSLQ" --version > /dev/null 2>&1
+  # Its own warm-up, asserted the same way: the version is what a working binary prints, and it
+  # is the shortest output in the tool.
+  : > "$nb_bad"
+  vb_answered=1
+  vb_version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
+  "$native" --version > "$nb_native_out" 2>&1 || vb_answered=0
+  "$CSLQ" --version > "$nb_fw_out" 2>&1 || vb_answered=0
+  grep -qx "$vb_version" "$nb_native_out" || vb_answered=0
+  grep -qx "$vb_version" "$nb_fw_out" || vb_answered=0
   vb_native=$(median5 \
     "$(time_pipe "$nb_native_pipe" "$native" --version)" \
     "$(time_pipe "$nb_native_pipe" "$native" --version)" \
@@ -750,7 +785,16 @@ else
   # The format string cannot start with `--`: bash's printf reads it as an option.
   printf 'cslq --version (%s): native %sms vs framework-dependent %sms (median of 5)\n' \
     "$aot_rid" "$vb_native" "$vb_fw"
-  if [ "$vb_native" -lt "$vb_fw" ]; then
+  if [ "$vb_answered" != 1 ] || [ -s "$nb_bad" ]; then
+    printf 'FAIL  %s (a binary did not print %s; the durations above mean nothing)\n' \
+      "native-version-beats-framework-dependent" "$vb_version"
+    sed 's/^/      | /' "$nb_bad"
+    printf '      native:\n'
+    sed 's/^/      | /' "$nb_native_out"
+    printf '      framework-dependent:\n'
+    sed 's/^/      | /' "$nb_fw_out"
+    fail=$((fail + 1))
+  elif [ "$vb_native" -lt "$vb_fw" ]; then
     printf 'PASS  %s (%sms vs %sms)\n' "native-version-beats-framework-dependent" "$vb_native" "$vb_fw"
     pass=$((pass + 1))
   else
@@ -758,8 +802,9 @@ else
       "native-version-beats-framework-dependent" "$vb_native" "$vb_fw"
     fail=$((fail + 1))
   fi
+  rm -f "$nb_native_out" "$nb_fw_out"
 fi
-rm -f "$aot_log"
+rm -f "$aot_log" "$nb_bad"
 
 # A session that cannot be started must cost the caller an answer, never the query. The
 # trigger is the startup mutex, held the same way the daemon one is above, and a pipe name
