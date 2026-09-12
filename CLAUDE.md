@@ -734,6 +734,52 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `SKILL.md` sends the agent there. So a fact belongs in `SKILL.md` only if it changes what an
   agent does on an ordinary query or prevents a wrong answer at exit 0; everything else goes to
   `REFERENCE.md`, and growing `SKILL.md` back past ~100 lines undoes the whole change.
+- **The tool ships as a platform-specific package, and every trap in that packaging is a silent
+  one.** The shipped shape is five packages: a pointer `cslq` naming three Native AOT
+  sub-packages (`cslq.win-x64`, `cslq.linux-x64`, `cslq.osx-arm64`) plus `cslq.any`,
+  framework-dependent CoreCLR for everyone else. Four things about it cost time and would cost
+  it again:
+  - **The manifest goes wherever `DotnetToolSettings.xml` goes, and the layout is
+    `tools/<tfm>/<rid>/` with a feature-band-dependent `<tfm>`.** It is `any` for a
+    self-contained pack — every AOT RID pack — and, on **10.0.401 but not 10.0.301**, also for
+    the pointer. So no hardcoded `PackagePath` is right under both: `PackServerPinBesideTheBinary`
+    derives it from the `DotnetToolSettings.xml` item the SDK already put in
+    `@(TfmSpecificPackageFile)`, and hooks `TargetsForTfmSpecificContentInPackage` rather than
+    `AfterTargets="PackToolImplementation"`, where `_ToolRidPath` reads empty and the pin lands
+    in `tools/any//.config/`. Getting it wrong is not a build error: under 10.0.401 the stray
+    `tools/net10.0/` folder makes `dotnet tool install` fail with *"Settings file
+    'DotnetToolSettings.xml' was not found in the package"*, and under 10.0.301 it installs and
+    silently cannot resolve the server pin.
+  - **Installing a RID sub-package fetches `Microsoft.NETCore.App.Host.<rid>` at install time**,
+    so a `--source` that *replaces* every feed cannot install one at all — it died on macOS, the
+    one runner without that pack cached. `probes/pack-smoke.sh` uses `packageSourceMapping`
+    instead (`cslq*` from the packed folder, `*` from nuget.org), which states the guarantee
+    `--source` was reached for rather than buying it with isolation.
+  - **A RID sub-package declares `Runner="executable"`**, so `--tool-path` lays down a `cslq.cmd`
+    shim on Windows rather than the apphost `.exe` a framework-dependent tool gets. Assert on
+    what runs, not on an `.exe`.
+  - **A RID the pointer lists has no fallback**: a listed RID whose sub-package is missing fails
+    the install outright rather than resolving `any`, which is why `release.yml` pushes every
+    sub-package before the pointer, and why `run.sh`'s install leg narrows the pointer to
+    `-p:ToolPackageRuntimeIdentifiers=any` instead of packing the shipped shape. That `-p` is a
+    *global* property, so MSBuild rebuilds and the copy into `src/Cslq/bin/Release` fails
+    `MSB3027` against the binary earlier cases' sessions still hold — `-p:BaseOutputPath` into a
+    throwaway directory is the fix.
+  The workflows keep `dotnet-version: '10.0.x'` floating on purpose: CI on 10.0.401 against a dev
+  machine on 10.0.301 is what found the band dependence, and pinning them would have hidden it
+  until a user's own SDK found it instead.
+- **Leg order in `probes/run.sh` is load-bearing, and the failure is invisible on this machine.**
+  Everything between `export CSLQ_SESSION_PIPE_NAME` and its `unset` shares one session, an AOT
+  publish costs ~70 s and `CSLQ_SESSION_KEEPALIVE` is 60 — so a slow leg standing inside that
+  region idles the shared session out, and `session-survives-hangups`, whose real assertion is
+  exactly one `cslq session ... pid` line in the log, counts two and goes red. Green on ubuntu,
+  red on macos and windows; CI found it, the dev machine did not. The native-vs-framework block
+  sits *after* the `unset` for that reason and every leg in it names a pipe of its own.
+  **And a failed call is a fast call**: `time_pipe` discarded the exit status, so a native binary
+  dying on a trimmed path in 40 ms beat a working one at 200 ms and the leg passed on exactly the
+  breakage it exists to catch. Review found that, not the gate. Every nonzero exit now appends to
+  `nb_bad` — a file rather than a variable, because each measurement runs inside a command
+  substitution's subshell and an assignment made there dies with it.
 
 ## C# and .NET rules
 

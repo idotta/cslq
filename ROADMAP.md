@@ -587,7 +587,7 @@ started, which stays an accepted cost.
       `probe` legs green on PR #31.
       **Done.** `src/Cslq/Session.cs`, `probes/pipe-smoke.cs`, `SessionTests`.
 
-- [ ] **Native AOT, so a call stops paying ~70 ms of process start.** `cslq --version`, which
+- [x] **Native AOT, so a call stops paying ~70 ms of process start.** `cslq --version`, which
       starts nothing at all, is a ~70 ms floor, and a warm session `hover` is 138-188 ms: with
       the workspace already loaded, roughly half of every warm call is .NET starting up. The
       only officially measured range for CLI-shaped startup is **3-5.5×** — Microsoft's own
