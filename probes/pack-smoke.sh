@@ -27,18 +27,38 @@ if ! command -v unzip >/dev/null 2>&1; then
   exit 1
 fi
 
+# The architecture half matters even though no runner needs it today: on an Intel Mac or an
+# arm64 Linux box `uname -s` alone would pack osx-arm64 or linux-x64, the install would resolve
+# a RID the pointer does not list, NuGet would hand back cslq.any, and every check below would
+# pass against the framework-dependent fallback without the native binary ever running.
 case "$(uname -s)" in
-  Linux*)  rid=linux-x64 ;;
-  Darwin*) rid=osx-arm64 ;;
-  MINGW*|MSYS*|CYGWIN*)
-    rid=win-x64
-    # An AOT publish from Git Bash fails at ILCompiler's link step with MSB3073/123 even with
-    # MSVC installed and found: vswhere.exe is not on Git Bash's PATH, and this is the shell
-    # the Windows runner gives a bash step.
-    PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH"
-    export PATH
-    ;;
+  Linux*)               os=linux ;;
+  Darwin*)              os=osx ;;
+  MINGW*|MSYS*|CYGWIN*) os=win ;;
   *) echo "pack-smoke: unrecognised host $(uname -s)" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64)  arch=x64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) echo "pack-smoke: unrecognised architecture $(uname -m)" >&2; exit 1 ;;
+esac
+rid="$os-$arch"
+
+if [ "$os" = win ]; then
+  # An AOT publish from Git Bash fails at ILCompiler's link step with MSB3073/123 even with
+  # MSVC installed and found: vswhere.exe is not on Git Bash's PATH, and this is the shell
+  # the Windows runner gives a bash step.
+  PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH"
+  export PATH
+fi
+
+# Only a RID the pointer advertises has a native sub-package to resolve; on any other host the
+# install reaches cslq.any instead and every check below passes without the binary this ships
+# ever running. Say that rather than go green on it.
+advertised=$(sed -n 's@.*<ToolPackageRuntimeIdentifiers>\(.*\)</ToolPackageRuntimeIdentifiers>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
+case ";$advertised;" in
+  *";$rid;"*) ;;
+  *) echo "pack-smoke: $rid is not advertised ($advertised); this host cannot prove a native package" >&2; exit 1 ;;
 esac
 
 version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
@@ -158,6 +178,12 @@ done
 report "$([ -n "$cslq" ] && echo 1 || echo 0)" "the install leaves a runnable shim"
 [ -n "$cslq" ] || { printf '\n%s passed, %s failed\n' "$pass" "$fail"; exit 1; }
 
+# What the install resolved, not what the packages contain: with the RID sub-package missing or
+# unadvertised NuGet hands back cslq.any, and the shim, --version and ready checks below all
+# pass against the framework-dependent fallback while the native binary never runs.
+report "$([ -d "$bin/.store/cslq/$version/cslq.$rid" ] && [ ! -d "$bin/.store/cslq/$version/cslq.any" ] && echo 1 || echo 0)" \
+  "the install resolved cslq.$rid rather than the any fallback"
+
 log "$cslq --version"
 ver_out=$("$cslq" --version 2>&1)
 ver_rc=$?
@@ -169,10 +195,15 @@ report "$([ "$ver_rc" = 0 ] && [ "$ver_out" = "$version" ] && echo 1 || echo 0)"
 # installed binary can only do if it resolved the pin out of the .config/ packed beside it.
 # --no-session for the reason run.sh's install leg gives -- a session started by this binary
 # would hold the throwaway --tool-path open past the EXIT trap that deletes it.
+#
+# Redirected to a log rather than captured with $(...): a capture is the shape that turns a
+# regression in StartProcess's handle clearing into a stall for the whole daemon keepalive,
+# and this call does launch a daemon. run.sh's own install leg redirects for the same reason.
 log "$cslq ready --root fixture"
-ready_out=$( cd "$out" && "$cslq" ready --root "$fixture_abs" --timeout 300 --no-session 2>&1 )
+( cd "$out" && "$cslq" ready --root "$fixture_abs" --timeout 300 --no-session ) \
+  > "$bin/ready.log" 2>&1
 ready_rc=$?
-printf '%s\n' "$ready_out"
+cat "$bin/ready.log"
 report "$([ "$ready_rc" = 0 ] && echo 1 || echo 0)" "the installed binary resolves the pin and reaches ready"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

@@ -715,26 +715,39 @@ started, which stays an accepted cost.
       the context's `Default` instance, so a context constructed around options of its own must
       repeat the naming policy there or every key comes out PascalCase.
 
-      **(5) is done, and three of the things it measured contradict what this item says
+      **(5) is done, and four of the things it measured contradict what this item says
       above.** The packaging is proved per platform by `probes/pack-smoke.sh` — packs the
       pointer, the runner's own RID and the `any` fallback, asserts the manifest's placement,
-      installs from the local feed and runs `--version` and `ready` against the fixture — and
+      installs from the local feed and checks that what resolved was the native sub-package
+      rather than the fallback, then runs `--version` and `ready` against the fixture — and
       it runs on every PR in `probe.yml`'s three-runner matrix as well as in `release.yml`'s
       packing job, so a package that cannot install is red on a PR rather than at a tag.
       `release.yml` is three jobs now: `gate` on ubuntu, `pack` across the three runners, and
       `publish` pushing every RID package and `any` before the pointer.
-      - **The AOT package's layout is `tools/any/<rid>/`, not `tools/net10.0/<rid>/`.**
-        `SelfContained` — which every Native AOT pack is — rewrites the tfm half of
-        `tools/<tfm>/<rid>/` to `any`, so **both** segments move and the
-        `$(RuntimeIdentifier)`-conditioned `PackagePath` this item prescribed still misplaces
-        the manifest, one segment further up: the tool installs, runs, and cannot resolve the
-        pin, at exit 0 from every build. Measured 2026-09-12. The tfm half is the SDK's own
-        `_ToolPackShortTargetFrameworkName`, a private property, which is an accepted risk
-        rather than a hidden one because `pack-smoke.sh` asserts the manifest lands in
-        `DotnetToolSettings.xml`'s **own** directory rather than at a path written down twice.
-        `_ToolRidPath` cannot be borrowed the same way: it is set inside the `PackTool` body,
-        after `PackToolImplementation`, so a target hooked there reads it empty and produces
-        `tools/any//.config/`.
+      - **The manifest goes wherever `DotnetToolSettings.xml` goes, and two different rules
+        move it.** The layout is `tools/<tfm>/<rid>/`, and the tfm half is `any` when the pack
+        is **self-contained** — every Native AOT RID pack — and, on **10.0.401 but not
+        10.0.301**, also for a **pointer** package with user-specified RIDs, whose settings
+        file is deliberately made tfm-agnostic while `_ToolPackShortTargetFrameworkName` stays
+        `net10.0`. So the behaviour is SDK-feature-band-dependent, and a `$(RuntimeIdentifier)`-
+        conditioned `PackagePath` is wrong under both rules. Getting it wrong is not a build
+        error: under 10.0.401 the extra `tools/net10.0/` folder made `dotnet tool install` fail
+        with *"Settings file 'DotnetToolSettings.xml' was not found in the package"* on all
+        three runners — proved by rebuilding the pointer three ways, where removing our
+        `.config` or moving it beside the settings file both install and leaving it does not —
+        and under 10.0.301 it installs and silently cannot resolve the pin. The target
+        therefore derives the path from the `DotnetToolSettings.xml` item the SDK has already
+        put in `@(TfmSpecificPackageFile)`, so the code and `pack-smoke.sh`'s assertion agree
+        by construction and neither restates a path the next band may move. It is appended to
+        `TargetsForTfmSpecificContentInPackage`, where `PackTool` itself is registered, and
+        takes `PackTool` as a dependency: the two path properties are set in `PackTool`'s own
+        body, so a target hooked `AfterTargets="PackToolImplementation"` reads `_ToolRidPath`
+        empty and writes `tools/any//.config/`.
+      - **The workflows keep `dotnet-version: '10.0.x'` floating on purpose.** This was caught
+        because CI moved to 10.0.401 while the dev machine was on 10.0.301; pinning the
+        workflows to whatever the dev machine has would have hidden it until a user's own SDK
+        found it. `global.json`'s `rollForward: latestFeature` is what then reproduces CI
+        locally.
       - **A RID sub-package declares `Runner="executable"`**, and `--tool-path` lays down
         `cslq.cmd` on Windows rather than the apphost `.exe` a framework-dependent tool gets.
       - **`run.sh`'s install leg can no longer pack the shipped shape**, since a plain

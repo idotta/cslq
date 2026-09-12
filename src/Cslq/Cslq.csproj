@@ -61,28 +61,27 @@
        server there. Without this an installed binary cannot resolve the pin at all - there is
        no repository above it.
 
-       That directory is tools/<tfm>/<rid>/, and both halves move: the rid is `any` for the
-       pointer pack and an ordinary local `dotnet pack`, and the tfm is `any` rather than
-       net10.0 whenever the pack is self-contained, which every Native AOT RID pack is. So
-       win-x64 is tools/any/win-x64/ while the fallback is tools/net10.0/any/, and a hardcoded
-       path leaves the manifest in a sibling directory the walk never enters - the tool then
-       installs, runs and cannot resolve the pin, at exit 0 from every build.
+       That directory is tools/<tfm>/<rid>/ and both segments move, by rules that differ
+       between SDK feature bands: a self-contained pack (every Native AOT one) has the tfm
+       `any`, and on 10.0.401 a pointer package with user-specified RIDs does too, which
+       10.0.301 does not do. So the manifest is placed relative to DotnetToolSettings.xml,
+       which the SDK has already added to @(TfmSpecificPackageFile) by then - that file marks
+       the directory the installer resolves and the binary runs from, whatever the next band
+       calls the two segments. Getting this wrong is not a build error: a second tools/<tfm>/
+       folder makes `dotnet tool install` fail with "Settings file not found" on 10.0.401, and
+       on 10.0.301 it installs and silently cannot resolve the pin.
 
-       The tfm half is the SDK's own property (Microsoft.NET.PackTool.targets), computed in
-       SetPackToolProperties, which is why this is a target after PackToolImplementation
-       rather than a Pack="true" item: at evaluation time it is not known. It is private, so
-       probes/pack-smoke.sh asserts the manifest lands beside DotnetToolSettings.xml rather
-       than at a path written down twice. -->
-  <Target Name="PackServerPinBesideTheBinary" AfterTargets="PackToolImplementation">
-    <PropertyGroup>
-      <!-- The SDK's own two lines, repeated because it sets _ToolRidPath inside the PackTool
-           body, which runs after this. The tfm half is already computed by then. -->
-      <_CslqToolRidPath>any</_CslqToolRidPath>
-      <_CslqToolRidPath Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_CslqToolRidPath>
-    </PropertyGroup>
+       PackTool is registered in TargetsForTfmSpecificContentInPackage and sets the paths in
+       its own body, so this appends to the same list and takes PackTool as a dependency
+       rather than guessing an AfterTargets. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);PackServerPinBesideTheBinary</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+  <Target Name="PackServerPinBesideTheBinary" DependsOnTargets="PackTool" Condition="'$(PackAsTool)' == 'true'">
     <ItemGroup>
+      <_CslqToolSettings Include="@(TfmSpecificPackageFile)" Condition="'%(Filename)%(Extension)' == 'DotnetToolSettings.xml'" />
       <TfmSpecificPackageFile Include="../../.config/dotnet-tools.json">
-        <PackagePath>tools/$(_ToolPackShortTargetFrameworkName)/$(_CslqToolRidPath)/.config/</PackagePath>
+        <PackagePath>%(_CslqToolSettings.PackagePath).config/</PackagePath>
       </TfmSpecificPackageFile>
     </ItemGroup>
   </Target>

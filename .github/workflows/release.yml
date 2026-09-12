@@ -111,14 +111,21 @@ jobs:
           if-no-files-found: error
 
       # The pointer and the `any` fallback are the same package whichever runner builds them,
-      # and only one copy may be pushed, so they come from this leg alone.
+      # and only one copy may be pushed, so they come from this leg alone. One upload each:
+      # if-no-files-found is evaluated against the whole search rather than per path, so a
+      # single upload listing both would pass with one of them missing.
       - uses: actions/upload-artifact@v5
         if: matrix.os == 'ubuntu-latest'
         with:
-          name: nupkg-shared
-          path: |
-            artifacts/cslq.${{ steps.v.outputs.version }}.nupkg
-            artifacts/cslq.any.${{ steps.v.outputs.version }}.nupkg
+          name: nupkg-pointer
+          path: artifacts/cslq.${{ steps.v.outputs.version }}.nupkg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v5
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: nupkg-any
+          path: artifacts/cslq.any.${{ steps.v.outputs.version }}.nupkg
           if-no-files-found: error
 
   publish:
