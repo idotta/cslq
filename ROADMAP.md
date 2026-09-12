@@ -678,8 +678,20 @@ started, which stays an accepted cost.
       alone — **done, #34**; (3) `LspClient` — **done, #35**; (4) `Output`, and with it
       `IsAotCompatible` on the project, so a reflective serializer is a build failure rather
       than a warning nobody reads — **done**; (5) `PublishAot` and per-RID packaging in
-      `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
-      platforms, before a single number reaches the README.
+      `release.yml`, where the `PackagePath` above is a prerequisite — **done**; (6) measure,
+      on all three platforms, before a single number reaches the README — **open**.
+
+      **Both remaining steps are decided (2026-09-12), so neither is an open question.**
+      (5) advertises `win-x64;linux-x64;osx-arm64;any` and nothing else: that is exactly
+      `probe.yml`'s existing three-runner matrix, so every native RID has a runner that can
+      build it — Native AOT cannot cross-compile across operating systems — and the `any`
+      package carries everyone else (`osx-x64`, `linux-arm64`, `win-arm64`) as framework-
+      dependent CoreCLR. Adding a RID without a runner is not a smaller version of this: a
+      listed RID whose sub-package is missing fails the install outright, measured above.
+      (6) goes in `probes/run.sh` as a leg of its own, not in `probe.yml` alone, because the
+      gate is where this repository's latency claims live — `session-beats-no-session` is the
+      precedent, and a README table is not a measurement. It costs an AOT publish per gate run
+      (~70 s on the dev machine), which is the price of the rule.
 
       **The code half is done and it compiles: `cslq` publishes to a 12.4 MB single native
       binary with no IL warnings, and answers.** Measured 2026-09-12 on **Windows alone** —
@@ -702,6 +714,60 @@ started, which stays an accepted cost.
       answers `RemoteMethodNotFoundException`; and `[JsonSourceGenerationOptions]` governs only
       the context's `Default` instance, so a context constructed around options of its own must
       repeat the naming policy there or every key comes out PascalCase.
+
+      **(5) is done, and four of the things it measured contradict what this item says
+      above.** The packaging is proved per platform by `probes/pack-smoke.sh` — packs the
+      pointer, the runner's own RID and the `any` fallback, asserts the manifest's placement,
+      installs from the local feed and checks that what resolved was the native sub-package
+      rather than the fallback, then runs `--version` and `ready` against the fixture — and
+      it runs on every PR in `probe.yml`'s three-runner matrix as well as in `release.yml`'s
+      packing job, so a package that cannot install is red on a PR rather than at a tag.
+      `release.yml` is three jobs now: `gate` on ubuntu, `pack` across the three runners, and
+      `publish` pushing every RID package and `any` before the pointer.
+      - **The manifest goes wherever `DotnetToolSettings.xml` goes, and two different rules
+        move it.** The layout is `tools/<tfm>/<rid>/`, and the tfm half is `any` when the pack
+        is **self-contained** — every Native AOT RID pack — and, on **10.0.401 but not
+        10.0.301**, also for a **pointer** package with user-specified RIDs, whose settings
+        file is deliberately made tfm-agnostic while `_ToolPackShortTargetFrameworkName` stays
+        `net10.0`. So the behaviour is SDK-feature-band-dependent, and a `$(RuntimeIdentifier)`-
+        conditioned `PackagePath` is wrong under both rules. Getting it wrong is not a build
+        error: under 10.0.401 the extra `tools/net10.0/` folder made `dotnet tool install` fail
+        with *"Settings file 'DotnetToolSettings.xml' was not found in the package"* on all
+        three runners — proved by rebuilding the pointer three ways, where removing our
+        `.config` or moving it beside the settings file both install and leaving it does not —
+        and under 10.0.301 it installs and silently cannot resolve the pin. The target
+        therefore derives the path from the `DotnetToolSettings.xml` item the SDK has already
+        put in `@(TfmSpecificPackageFile)`, so the code and `pack-smoke.sh`'s assertion agree
+        by construction and neither restates a path the next band may move. It is appended to
+        `TargetsForTfmSpecificContentInPackage`, where `PackTool` itself is registered, and
+        takes `PackTool` as a dependency: the two path properties are set in `PackTool`'s own
+        body, so a target hooked `AfterTargets="PackToolImplementation"` reads `_ToolRidPath`
+        empty and writes `tools/any//.config/`.
+      - **The workflows keep `dotnet-version: '10.0.x'` floating on purpose.** This was caught
+        because CI moved to 10.0.401 while the dev machine was on 10.0.301; pinning the
+        workflows to whatever the dev machine has would have hidden it until a user's own SDK
+        found it. `global.json`'s `rollForward: latestFeature` is what then reproduces CI
+        locally.
+      - **A RID sub-package declares `Runner="executable"`**, and `--tool-path` lays down
+        `cslq.cmd` on Windows rather than the apphost `.exe` a framework-dependent tool gets.
+      - **`run.sh`'s install leg can no longer pack the shipped shape**, since a plain
+        `dotnet pack` now yields the pointer alone and a listed RID with no sub-package is a
+        hard install failure; building the host's real RID there would put a ~70 s AOT publish
+        in the gate. It narrows the pointer to `-p:ToolPackageRuntimeIdentifiers=any` and packs
+        the fallback beside it — and that `-p` is a *global* property, so MSBuild rebuilds and
+        the copy into `src/Cslq/bin/Release` fails `MSB3027` against the binary the earlier
+        cases' sessions are still holding. `-p:BaseOutputPath` into the throwaway directory is
+        the fix, and the failure would have been red on CI too, not only here. The same two
+        packs are the README's build-from-source recipe, for the same reason and with no AOT
+        toolchain needed.
+      - **Installing a RID sub-package fetches `Microsoft.NETCore.App.Host.<rid>` at install
+        time**, so a feed that *replaces* every source cannot install a native tool package at
+        all: on macOS — the one runner without that pack already cached — `--source "$out"`
+        died on it. `pack-smoke.sh` maps sources per package instead (`packageSourceMapping`:
+        `cslq*` from the packed folder alone, `*` from nuget.org), which states the guarantee
+        `--source` was there for rather than buying it with isolation. The resolution itself
+        was never in doubt: the SDK's own output said `Best matching RID: osx-arm64` and
+        `Resolved package: cslq.osx-arm64` before it failed.
 
 ## Acceptance criteria
 
