@@ -1,11 +1,13 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
+using PolyType;
 using StreamJsonRpc;
 
 namespace Cslq;
 
-internal sealed class LspClient : IAsyncDisposable
+internal sealed partial class LspClient : IAsyncDisposable
 {
     private readonly Process _proc;
     private readonly JsonRpc _rpc;
@@ -236,6 +238,43 @@ internal sealed class LspClient : IAsyncDisposable
         return line.Length > 200 ? line[..200] : line;
     }
 
+    /// <summary>
+    /// This end of the language server's wire: JSON-RPC over the server process's stdio,
+    /// framed by <c>Content-Length</c> headers.
+    /// <para>
+    /// Both halves are the trim-safe shape rather than the obvious one. The formatter is
+    /// annotated at the type level whatever it is handed, so the suppression says why it is
+    /// nonetheless true here: <see cref="Lsp.Options"/> resolves through
+    /// <see cref="LspWire"/> alone, so nothing crossing it is serialized reflectively. The
+    /// target goes in as metadata read off a compile-time shape, because the untyped
+    /// overload leaves a published binary with <em>no methods at all</em> — every
+    /// server-to-client call then comes back <c>RemoteMethodNotFoundException</c>, which
+    /// reads as a protocol bug rather than as a trimmed target.
+    /// </para>
+    /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "SystemTextJsonFormatter is annotated at the type level, so the whole " +
+            "of it is flagged whatever it is handed. Lsp.Options has one resolver, the " +
+            "source-generated LspWire, and no reflection-based fallback behind it: a type " +
+            "that is not declared there throws instead of being reflected over, trimmed or " +
+            "not. LspWireTests pins that.")]
+    [UnconditionalSuppressMessage(
+        "AOT", "IL3050:RequiresDynamicCode",
+        Justification = "Same site, same reason: no reflective serialization reaches this " +
+            "formatter, so it makes no dynamic code.")]
+    private static JsonRpc Rpc(Process proc, out Endpoints endpoints)
+    {
+        var formatter = new SystemTextJsonFormatter { JsonSerializerOptions = Lsp.Options };
+        var handler = new HeaderDelimitedMessageHandler(
+            proc.StandardInput.BaseStream, proc.StandardOutput.BaseStream, formatter);
+
+        endpoints = new Endpoints();
+        var rpc = new JsonRpc(handler);
+        rpc.AddLocalRpcTarget(RpcTargetMetadata.FromShape<Endpoints>(), endpoints, null);
+        return rpc;
+    }
+
     private static async Task<LspClient> StartCoreAsync(
         string root, string manifestRoot, string logLevel, bool daemon, CancellationToken ct)
     {
@@ -260,13 +299,7 @@ internal sealed class LspClient : IAsyncDisposable
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) { lock (stderr) stderr.AppendLine(e.Data); } };
         proc.BeginErrorReadLine();
 
-        var formatter = new SystemTextJsonFormatter { JsonSerializerOptions = Lsp.Options };
-        var handler = new HeaderDelimitedMessageHandler(
-            proc.StandardInput.BaseStream, proc.StandardOutput.BaseStream, formatter);
-
-        var endpoints = new Endpoints();
-        var rpc = new JsonRpc(handler);
-        rpc.AddLocalRpcTarget(endpoints);
+        var rpc = Rpc(proc, out var endpoints);
         rpc.StartListening();
 
         var client = new LspClient(root, proc, rpc, endpoints, stderr, daemon, ct);
@@ -300,6 +333,16 @@ internal sealed class LspClient : IAsyncDisposable
         return client;
     }
 
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "The parameter-object overloads are flagged because an untyped " +
+            "argument may be reflected over. Nothing here is: Lsp.Options resolves through " +
+            "the source-generated LspWire and has no fallback resolver, so every payload and " +
+            "result crossing this connection is serialized by generated code or not at all. " +
+            "The NamedArgs and dictionary overloads the warning suggests are not an option: " +
+            "measured 2026-09-11, NamedArgs writes the CLR member names verbatim, so the " +
+            "params object goes out with a PascalCase key per member, and LSP wants the " +
+            "object itself rather than named arguments.")]
     private async Task InitializeAsync(CancellationToken ct)
     {
         var uri = PathUri.FromPath(Root);
@@ -330,7 +373,7 @@ internal sealed class LspClient : IAsyncDisposable
                 $"Server negotiated positionEncoding '{encoding}'; cslq assumes '{ServerArgs.ExpectedPositionEncoding}'.");
         }
 
-        await _rpc.NotifyWithParameterObjectAsync("initialized", new { });
+        await _rpc.NotifyWithParameterObjectAsync("initialized", new InitializedParams());
     }
 
     /// <summary>
@@ -1082,6 +1125,16 @@ internal sealed class LspClient : IAsyncDisposable
     /// That is what this cache is: per document, per attach, never across runs.
     /// </para>
     /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "The parameter-object overloads are flagged because an untyped " +
+            "argument may be reflected over. Nothing here is: Lsp.Options resolves through " +
+            "the source-generated LspWire and has no fallback resolver, so every payload and " +
+            "result crossing this connection is serialized by generated code or not at all. " +
+            "The NamedArgs and dictionary overloads the warning suggests are not an option: " +
+            "measured 2026-09-11, NamedArgs writes the CLR member names verbatim, so the " +
+            "params object goes out with a PascalCase key per member, and LSP wants the " +
+            "object itself rather than named arguments.")]
     public async Task<IReadOnlyList<DocumentContext>> ContextsAsync(string uri, CancellationToken ct)
     {
         if (_contexts.TryGetValue(uri, out var cached)) return cached;
@@ -1162,6 +1215,17 @@ internal sealed class LspClient : IAsyncDisposable
     /// in <see cref="StartCoreAsync"/> — it has a different message and its own disposal — and
     /// <see cref="ContextsAsync"/> is the one deliberate bypass; see the catch there.
     /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "Same overload, same reason - and here the reason has to hold for a " +
+            "caller that does not exist yet, not just for today's. It does, structurally: " +
+            "Lsp.Options names LspWire as its only TypeInfoResolver, so a T or a @params " +
+            "type that context does not declare throws on the first call rather than being " +
+            "reflected over, in a trimmed build and an untrimmed one alike. A request added " +
+            "without registering its shapes cannot reach the server at all, which is the " +
+            "right outcome in this file: a malformed payload takes the server's whole queue " +
+            "down. LspWireTests.An_unregistered_type_is_refused_rather_than_reflected_over " +
+            "pins it.")]
     private async Task<T?> RequestAsync<T>(string method, object? @params, CancellationToken ct)
     {
         try
@@ -1179,6 +1243,17 @@ internal sealed class LspClient : IAsyncDisposable
     /// but it is still a write to the connection, and a daemon that has gone away fails it
     /// with the same <see cref="ConnectionLostException"/> a request would.
     /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "Same overload, same reason - and here the reason has to hold for a " +
+            "caller that does not exist yet, not just for today's. It does, structurally: " +
+            "Lsp.Options names LspWire as its only TypeInfoResolver, so a T or a @params " +
+            "type that context does not declare throws on the first call rather than being " +
+            "reflected over, in a trimmed build and an untrimmed one alike. A request added " +
+            "without registering its shapes cannot reach the server at all, which is the " +
+            "right outcome in this file: a malformed payload takes the server's whole queue " +
+            "down. LspWireTests.An_unregistered_type_is_refused_rather_than_reflected_over " +
+            "pins it.")]
     private async Task NotifyAsync(string method, object? @params)
     {
         try
@@ -1267,8 +1342,19 @@ internal sealed class LspClient : IAsyncDisposable
         _proc.Dispose();
     }
 
-    /// <summary>Server-to-client calls. An unhandled request would fault the connection.</summary>
-    private sealed class Endpoints
+    /// <summary>
+    /// Server-to-client calls. An unhandled request would fault the connection.
+    /// <para>
+    /// The target is registered from a compile-time shape, and <c>IncludeMethods</c> is
+    /// load-bearing there: a
+    /// shape carries properties alone by default, so the metadata would describe a target
+    /// with no methods and every notification — every <c>window/logMessage</c>, and
+    /// <c>projectInitializationComplete</c>, which readiness waits on — would reach a target
+    /// that cannot answer it.
+    /// </para>
+    /// </summary>
+    [GenerateShape(IncludeMethods = MethodShapeFlags.PublicInstance)]
+    internal sealed partial class Endpoints
     {
         private readonly TaskCompletionSource _projectInitialized =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
