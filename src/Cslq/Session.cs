@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PolyType;
 using StreamJsonRpc;
 
 namespace Cslq;
@@ -25,7 +27,7 @@ namespace Cslq;
 /// the in-process path rather than failing the query. See <see cref="FallbackNotice"/>.
 /// </para>
 /// </summary>
-internal static class Session
+internal static partial class Session
 {
     /// <summary>
     /// Printed on stderr whenever a run that asked for a session did not get one, in the
@@ -56,7 +58,29 @@ internal static class Session
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        TypeInfoResolver = Wire.Default,
     };
+
+    /// <summary>
+    /// The whole of this wire, source-generated, so nothing on it is serialized reflectively.
+    /// The options are declared here rather than inherited from <see cref="Json"/>: property
+    /// names are baked in at generation time, so a context that did not repeat them would
+    /// write PascalCase against a camelCase reader. <c>object</c> is here for the empty
+    /// result <c>ping</c> and <c>stop</c> still make JsonRpc deserialise, and
+    /// <c>CommonErrorData</c> for the error path: StreamJsonRpc serializes an escaped
+    /// exception's <c>data</c> with these options, so leaving it out kills the connection
+    /// instead of faulting the call. See
+    /// <c>SessionTests.An_escaping_exception_is_a_fault_the_client_can_read</c>.
+    /// </summary>
+    [JsonSourceGenerationOptions(
+        PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonSerializable(typeof(Request))]
+    [JsonSerializable(typeof(Response))]
+    [JsonSerializable(typeof(object))]
+    [JsonSerializable(typeof(StreamJsonRpc.Protocol.CommonErrorData))]
+    internal sealed partial class Wire : JsonSerializerContext;
 
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
 
@@ -79,6 +103,17 @@ internal static class Session
     /// <see cref="JsonRpc.Attach(Stream)"/>'s default is Newtonsoft and serialization in this
     /// tool is System.Text.Json everywhere.
     /// </summary>
+    [UnconditionalSuppressMessage(
+        "Trimming", "IL2026:RequiresUnreferencedCode",
+        Justification = "SystemTextJsonFormatter is annotated at the type level, so the whole " +
+            "of it is flagged whatever it is handed. Both ends of this pipe are cslq and both " +
+            "go through this method: the only types crossing it are Request and Response, " +
+            "which Wire source-generates, and Json resolves through Wire alone, so nothing " +
+            "here is serialized reflectively.")]
+    [UnconditionalSuppressMessage(
+        "AOT", "IL3050:RequiresDynamicCode",
+        Justification = "Same site, same reason: no reflective serialization reaches this " +
+            "formatter, so it makes no dynamic code.")]
     internal static JsonRpc Rpc(Stream pipe) => new(new HeaderDelimitedMessageHandler(
         pipe, pipe, new SystemTextJsonFormatter { JsonSerializerOptions = Json }));
 
@@ -892,7 +927,7 @@ internal static class Session
             await using (pipe)
             {
                 using var rpc = Rpc(pipe);
-                rpc.AddLocalRpcTarget(endpoint);
+                rpc.AddLocalRpcTarget(RpcTargetMetadata.FromShape<Endpoint>(), endpoint, null);
                 rpc.StartListening();
                 // Until the client hangs up, which is what makes the answer safe without the
                 // WaitForPipeDrain this replaced: a Windows named pipe disposed under a client
@@ -923,8 +958,15 @@ internal static class Session
     /// rather than the workspace and are answered here, off the request gate: what they ask is
     /// whether it is there, and a session loading a workspace holds that gate for the whole
     /// load. Only <c>run</c> goes behind it.
+    /// <para>
+    /// The shape is what keeps the target trim-safe, and <c>IncludeMethods</c> is load-bearing:
+    /// a shape carries properties alone by default, so the metadata describes a target with no
+    /// methods and every call comes back <c>RemoteMethodNotFoundException</c> — which reads
+    /// exactly like a protocol bug rather than a missing attribute.
+    /// </para>
     /// </summary>
-    internal sealed class Endpoint(State state, SemaphoreSlim gate, CancellationToken ct)
+    [GenerateShape(IncludeMethods = MethodShapeFlags.PublicInstance)]
+    internal sealed partial class Endpoint(State state, SemaphoreSlim gate, CancellationToken ct)
     {
         /// <summary>Whether <c>stop</c> was asked for, read once the client has its answer.</summary>
         public bool Stopping { get; private set; }
