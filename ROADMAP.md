@@ -760,6 +760,14 @@ started, which stays an accepted cost.
         the fix, and the failure would have been red on CI too, not only here. The same two
         packs are the README's build-from-source recipe, for the same reason and with no AOT
         toolchain needed.
+      - **Installing a RID sub-package fetches `Microsoft.NETCore.App.Host.<rid>` at install
+        time**, so a feed that *replaces* every source cannot install a native tool package at
+        all: on macOS — the one runner without that pack already cached — `--source "$out"`
+        died on it. `pack-smoke.sh` maps sources per package instead (`packageSourceMapping`:
+        `cslq*` from the packed folder alone, `*` from nuget.org), which states the guarantee
+        `--source` was there for rather than buying it with isolation. The resolution itself
+        was never in doubt: the SDK's own output said `Best matching RID: osx-arm64` and
+        `Resolved package: cslq.osx-arm64` before it failed.
 
 ## Acceptance criteria
 

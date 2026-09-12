@@ -154,16 +154,42 @@ report "$(beside_the_binary "cslq.any.$version.nupkg" && echo 1 || echo 0)" \
 # meaninglessly while this was being settled.
 rm -f "$HOME/.dotnet/toolResolverCache/1/cslq"
 
-# --source, not --add-source, for the reason run.sh's install leg gives: --add-source only
-# appends the local folder, so from the first release onward nuget.org offers the same version
-# and this could quietly install the published package instead of the one just packed.
+# A config of our own rather than --source. --source replaces every feed, and installing a RID
+# sub-package makes the SDK fetch Microsoft.NETCore.App.Host.<rid> at install time -- which a
+# folder holding only our nupkgs cannot serve, so on macOS, the one runner without that pack
+# already cached, the install resolved cslq.osx-arm64 correctly and then died on it.
+# packageSourceMapping states the guarantee --source was there for precisely instead of by
+# isolation: `cslq*` may come only from the folder just packed, so from the first release onward
+# nuget.org can never supply the published package of the same version in its place, while
+# framework packs resolve from nuget.org normally.
+out_abs=$( cd "$out" && { pwd -W 2>/dev/null || pwd; } )
+config="$bin/nuget.config"
+cat > "$config" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="packed" value="$out_abs" />
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+  <packageSourceMapping>
+    <packageSource key="packed">
+      <package pattern="cslq*" />
+    </packageSource>
+    <packageSource key="nuget.org">
+      <package pattern="*" />
+    </packageSource>
+  </packageSourceMapping>
+</configuration>
+XML
+
 log "install from the local feed"
 # Context for whatever happens next, not an assertion: the sub-package is chosen by the SDK's
 # own host RID, so these two lines are what tells a fallback apart from a broken package.
 printf 'dotnet:   %s\n' "$(command -v dotnet)"
 printf 'host RID: %s\n' "$rid"
 installed=1
-dotnet tool install --tool-path "$bin" --source "$out" cslq --version "$version" || installed=0
+dotnet tool install --tool-path "$bin" --configfile "$config" cslq --version "$version" || installed=0
 report "$installed" "the pointer package installs"
 if [ "$installed" != 1 ]; then
   # A failed install names a missing package and nothing about the choice that led there, and
@@ -177,7 +203,7 @@ if [ "$installed" != 1 ]; then
     unzip -p "$out/$p.nupkg" '*.nuspec' 2>/dev/null | sed -n '/<dependencies/,/<\/dependencies>/p'
   done
   echo "--- the same install, diagnostic ---"
-  dotnet tool install --tool-path "$bin/diag" --source "$out" cslq --version "$version" \
+  dotnet tool install --tool-path "$bin/diag" --configfile "$config" cslq --version "$version" \
     --verbosity diagnostic 2>&1 | tail -120
   printf '\n%s passed, %s failed\n' "$pass" "$fail"
   exit 1
