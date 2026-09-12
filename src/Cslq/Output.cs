@@ -1,5 +1,6 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Cslq;
 
@@ -48,12 +49,17 @@ internal static class Output
     public const int DefaultMax = 50;
 
     // Source lines are full of quotes and angle brackets; the default encoder turns them
-    // into " noise that a model then has to decode.
-    private static readonly JsonSerializerOptions JsonOut = new()
+    // into " noise that a model then has to decode. Indentation and the encoder are the two
+    // settings a source-generated context cannot carry as attributes, so the context is built
+    // around options rather than reached through its static Default.
+    private static readonly OutWire Wire = new(new JsonSerializerOptions
     {
+        // Repeated from the context's own attribute: a context constructed around options
+        // takes its naming from them, and the attribute alone governs only OutWire.Default.
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
+    });
 
     /// <summary>
     /// <paramref name="documents"/> carries the lookups a label and a context line need. Text
@@ -101,26 +107,24 @@ internal static class Output
 
         if (json)
         {
-            var payload = new List<object>(shown.Count);
+            var payload = new List<LocationRow>(shown.Count);
             foreach (var hit in shown)
             {
-                payload.Add(new
-                {
-                    path = hit.Display,
-                    line = hit.Range.Start.Line + 1,
-                    column = hit.Range.Start.Character + 1,
-                    endLine = hit.Range.End.Line + 1,
-                    endColumn = hit.Range.End.Character + 1,
-                    generated = PathUri.IsGenerated(hit.Uri),
-                    metadata = PathUri.IsDecompiled(hit.Uri),
-                    external = PathUri.IsExternal(root, hit.Uri),
-                    text = At(await documents.Lines(hit.Uri), hit.Range.Start.Line)?.TrimEnd(),
-                });
+                payload.Add(new LocationRow(
+                    hit.Display,
+                    hit.Range.Start.Line + 1,
+                    hit.Range.Start.Character + 1,
+                    hit.Range.End.Line + 1,
+                    hit.Range.End.Character + 1,
+                    PathUri.IsGenerated(hit.Uri),
+                    PathUri.IsDecompiled(hit.Uri),
+                    PathUri.IsExternal(root, hit.Uri),
+                    At(await documents.Lines(hit.Uri), hit.Range.Start.Line)?.TrimEnd()));
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
-                Envelope(hits.Count, hits.Count > shown.Count, payload, note),
-                JsonOut));
+                Wrap(hits.Count, hits.Count > shown.Count, payload, note),
+                Wire.LocationEnvelope));
             return;
         }
 
@@ -168,19 +172,14 @@ internal static class Output
     /// the rule is the same. Both keys are absent for the commands that do not choose a
     /// context at all.
     /// </summary>
-    private static object Envelope(int count, bool truncated, object results, ContextNote? note) =>
+    private static Envelope<T> Wrap<T>(
+        int count, bool truncated, IReadOnlyList<T> results, ContextNote? note) =>
         (note, note?.Answered) switch
         {
-            (null, _) => new { count, truncated, results },
-            (not null, null) => new { count, truncated, contexts = note.All.Count, results },
-            var (_, answered) => new
-            {
-                count,
-                truncated,
-                tfm = answered!.Tfm,
-                contexts = note!.All.Count,
-                results,
-            },
+            (null, _) => new Envelope<T>(count, truncated, null, null, results),
+            (not null, null) => new Envelope<T>(count, truncated, null, note.All.Count, results),
+            var (_, answered) => new Envelope<T>(
+                count, truncated, answered!.Tfm, note!.All.Count, results),
         };
 
     /// <summary>
@@ -253,7 +252,7 @@ internal static class Output
     /// </summary>
     public static void WriteError(string message, bool json)
     {
-        if (json) Console.WriteLine(JsonSerializer.Serialize(new { error = message }, JsonOut));
+        if (json) Console.WriteLine(JsonSerializer.Serialize(new ErrorOut(message), Wire.ErrorOut));
         Console.Error.WriteLine("cslq: " + message);
     }
 
@@ -290,31 +289,29 @@ internal static class Output
 
         if (json)
         {
-            var payload = new List<object>(shown.Count);
+            var payload = new List<DiagnosticRow>(shown.Count);
             foreach (var hit in shown)
             {
                 var range = hit.Diagnostic.Range;
-                payload.Add(new
-                {
-                    path = hit.Display,
-                    line = range.Start.Line + 1,
-                    column = range.Start.Character + 1,
-                    endLine = range.End.Line + 1,
-                    endColumn = range.End.Character + 1,
-                    severity = Severity(hit.Diagnostic.Severity),
-                    code = Code(hit.Diagnostic.Code),
-                    message = hit.Diagnostic.Message,
-                    generated = PathUri.IsGenerated(hit.Uri),
-                    metadata = PathUri.IsDecompiled(hit.Uri),
-                    external = PathUri.IsExternal(root, hit.Uri),
-                    tfm = hit.Only,
-                    text = At(await documents.Lines(hit.Uri), range.Start.Line)?.TrimEnd(),
-                });
+                payload.Add(new DiagnosticRow(
+                    hit.Display,
+                    range.Start.Line + 1,
+                    range.Start.Character + 1,
+                    range.End.Line + 1,
+                    range.End.Character + 1,
+                    Severity(hit.Diagnostic.Severity),
+                    Code(hit.Diagnostic.Code),
+                    hit.Diagnostic.Message,
+                    PathUri.IsGenerated(hit.Uri),
+                    PathUri.IsDecompiled(hit.Uri),
+                    PathUri.IsExternal(root, hit.Uri),
+                    hit.Only,
+                    At(await documents.Lines(hit.Uri), range.Start.Line)?.TrimEnd()));
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
-                Envelope(hits.Count, hits.Count > shown.Count, payload, note),
-                JsonOut));
+                Wrap(hits.Count, hits.Count > shown.Count, payload, note),
+                Wire.DiagnosticEnvelope));
             return;
         }
 
@@ -396,22 +393,22 @@ internal static class Output
 
         if (json)
         {
-            var payload = shown.Select(h => new
-            {
-                name = h.Row.Symbol.Name,
-                kind = Kind(h.Row.Kind),
-                container = h.Row.Symbol.ContainerName,
-                path = h.Display,
-                line = h.Row.Symbol.Location.Range.Start.Line + 1,
-                column = h.Row.Symbol.Location.Range.Start.Character + 1,
-                generated = PathUri.IsGenerated(h.Row.Symbol.Location.Uri),
-                metadata = PathUri.IsDecompiled(h.Row.Symbol.Location.Uri),
-                external = PathUri.IsExternal(root, h.Row.Symbol.Location.Uri),
-            });
+            var payload = shown
+                .Select(h => new SymbolJsonRow(
+                    h.Row.Symbol.Name,
+                    Kind(h.Row.Kind),
+                    h.Row.Symbol.ContainerName,
+                    h.Display,
+                    h.Row.Symbol.Location.Range.Start.Line + 1,
+                    h.Row.Symbol.Location.Range.Start.Character + 1,
+                    PathUri.IsGenerated(h.Row.Symbol.Location.Uri),
+                    PathUri.IsDecompiled(h.Row.Symbol.Location.Uri),
+                    PathUri.IsExternal(root, h.Row.Symbol.Location.Uri)))
+                .ToList();
 
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = symbols.Count, truncated = symbols.Count > shown.Count, results = payload },
-                JsonOut));
+                Wrap(symbols.Count, symbols.Count > shown.Count, payload, null),
+                Wire.SymbolEnvelope));
             return;
         }
 
@@ -544,20 +541,18 @@ internal static class Output
         {
             var budget = kept;
             Console.WriteLine(JsonSerializer.Serialize(
-                new
-                {
-                    count = total,
-                    truncated = total > kept,
-                    path = display,
-                    generated = PathUri.IsGenerated(uri),
-                    metadata = PathUri.IsDecompiled(uri),
-                    external = PathUri.IsExternal(root, uri),
+                new OutlineEnvelope(
+                    total,
+                    total > kept,
+                    display,
+                    PathUri.IsGenerated(uri),
+                    PathUri.IsDecompiled(uri),
+                    PathUri.IsExternal(root, uri),
                     // No envelope-level tfm here, unlike the other context-bound commands:
                     // an outline is a union, and every row carries its own.
-                    contexts = note?.All.Count,
-                    results = Nodes(symbols, contexts, lines, ref budget),
-                },
-                JsonOut));
+                    note?.All.Count,
+                    Nodes(symbols, contexts, lines, ref budget)),
+                Wire.OutlineEnvelope));
             return;
         }
 
@@ -631,26 +626,24 @@ internal static class Output
 
         if (json)
         {
-            List<object> results = value is null
+            List<HoverRow> results = value is null
                 ? []
                 :
                 [
-                    new
-                    {
-                        path = display,
-                        line = start.Line + 1,
-                        column = start.Character + 1,
+                    new HoverRow(
+                        display,
+                        start.Line + 1,
+                        start.Character + 1,
                         signature,
-                        documentation = string.Join('\n', kept),
-                        generated = PathUri.IsGenerated(uri),
-                        metadata = PathUri.IsDecompiled(uri),
-                        external = PathUri.IsExternal(root, uri),
-                    },
+                        string.Join('\n', kept),
+                        PathUri.IsGenerated(uri),
+                        PathUri.IsDecompiled(uri),
+                        PathUri.IsExternal(root, uri)),
                 ];
 
             Console.WriteLine(JsonSerializer.Serialize(
-                Envelope(results.Count, kept.Count < lines.Length, results, note),
-                JsonOut));
+                Wrap(results.Count, kept.Count < lines.Length, results, note),
+                Wire.HoverEnvelope));
             return;
         }
 
@@ -722,13 +715,8 @@ internal static class Output
         }
 
         Console.WriteLine(JsonSerializer.Serialize(
-            new
-            {
-                count = 1,
-                truncated = false,
-                results = new[] { new { ready = true, projects, skipped, unprobed } },
-            },
-            JsonOut));
+            Wrap<ReadyRow>(1, false, [new ReadyRow(true, projects, skipped, unprobed)], null),
+            Wire.ReadyEnvelope));
     }
 
     /// <summary>
@@ -746,23 +734,19 @@ internal static class Output
         }
 
         Console.WriteLine(JsonSerializer.Serialize(
-            new
-            {
-                count = 1,
-                truncated = false,
-                results = new[]
-                {
-                    new
-                    {
-                        restored = true,
-                        manifest = manifestRoot,
-                        packages = pruned?.Packages,
-                        removed = pruned?.Removed ?? [],
-                        kept = pruned?.Kept.Select(k => new { dir = k.Dir, why = k.Why }) ?? [],
-                    },
-                },
-            },
-            JsonOut));
+            Wrap<RestoredRow>(
+                1,
+                false,
+                [
+                    new RestoredRow(
+                        true,
+                        manifestRoot,
+                        pruned?.Packages,
+                        pruned?.Removed ?? [],
+                        [.. pruned?.Kept.Select(k => new KeptRow(k.Dir, k.Why)) ?? []]),
+                ],
+                null),
+            Wire.RestoredEnvelope));
     }
 
     /// <summary>
@@ -785,16 +769,12 @@ internal static class Output
         }
 
         Console.WriteLine(JsonSerializer.Serialize(
-            new
-            {
-                count = 1,
-                truncated = false,
-                results = new[]
-                {
-                    new { running = status.Running, pipe = status.Pipe, root = status.Root, pid = status.Pid, log = status.Log },
-                },
-            },
-            JsonOut));
+            Wrap<SessionRow>(
+                1,
+                false,
+                [new SessionRow(status.Running, status.Pipe, status.Root, status.Pid, status.Log)],
+                null),
+            Wire.SessionEnvelope));
     }
 
     /// <summary>
@@ -811,8 +791,8 @@ internal static class Output
         }
 
         Console.WriteLine(JsonSerializer.Serialize(
-            new { count = 1, truncated = false, results = new[] { new { stopped, pipe } } },
-            JsonOut));
+            Wrap<StoppedRow>(1, false, [new StoppedRow(stopped, pipe)], null),
+            Wire.StoppedEnvelope));
     }
 
     /// <summary>
@@ -861,19 +841,11 @@ internal static class Output
         if (json)
         {
             var results = shown
-                .Select(r => new
-                {
-                    path = display,
-                    project = r.Project,
-                    tfm = r.Tfm,
-                    generated = false,
-                    metadata = false,
-                    external = external,
-                })
+                .Select(r => new ProjectRow(display, r.Project, r.Tfm, false, false, external))
                 .ToList();
             Console.WriteLine(JsonSerializer.Serialize(
-                new { count = rows.Count, truncated = rows.Count > shown.Count, results },
-                JsonOut));
+                Wrap(rows.Count, rows.Count > shown.Count, results, null),
+                Wire.ProjectEnvelope));
             return;
         }
 
@@ -969,11 +941,11 @@ internal static class Output
 
     // Pruned against the same pre-order budget the text form uses, so --max means the same
     // thing in both and a JSON case and a text case stay cases about the same output.
-    private static List<object> Nodes(
+    private static List<OutlineRow> Nodes(
         IReadOnlyList<OutlineNode> symbols, int contexts, string[] lines, ref int budget,
         string? parent = null, int parentKind = 0)
     {
-        var nodes = new List<object>();
+        var nodes = new List<OutlineRow>();
         foreach (var node in symbols)
         {
             if (budget <= 0) break;
@@ -982,20 +954,17 @@ internal static class Output
             var symbol = node.Symbol;
             var start = symbol.SelectionRange.Start;
             var end = symbol.SelectionRange.End;
-            nodes.Add(new
-            {
-                name = symbol.Name,
-                kind = Kinds.Name(Kinds.Of(symbol.Kind, symbol.Name, parent, parentKind)),
-                detail = symbol.Detail,
-                line = start.Line + 1,
-                column = start.Character + 1,
-                endLine = end.Line + 1,
-                endColumn = end.Character + 1,
-                tfm = Outline.Mark(node, contexts),
-                text = At(lines, start.Line)?.TrimEnd(),
-                children = Nodes(
-                    node.Children, contexts, lines, ref budget, symbol.Name, symbol.Kind),
-            });
+            nodes.Add(new OutlineRow(
+                symbol.Name,
+                Kinds.Name(Kinds.Of(symbol.Kind, symbol.Name, parent, parentKind)),
+                symbol.Detail,
+                start.Line + 1,
+                start.Character + 1,
+                end.Line + 1,
+                end.Character + 1,
+                Outline.Mark(node, contexts),
+                At(lines, start.Line)?.TrimEnd(),
+                Nodes(node.Children, contexts, lines, ref budget, symbol.Name, symbol.Kind)));
         }
 
         return nodes;
@@ -1091,3 +1060,167 @@ internal static class Output
 
     private sealed record Match(string Display, SymbolRow Row);
 }
+
+/// <summary>
+/// The <c>{ count, truncated, results }</c> envelope every command but <c>outline</c> answers
+/// in, and the two keys a context-bound one adds. Member order is key order, so <c>Tfm</c> is
+/// declared before <c>Contexts</c> — that is the whole reason one record reproduces all three
+/// shapes. Both are omitted when absent rather than written as null, per DESIGN.md: an
+/// envelope key that could only ever be null is a field a caller has to interpret when the
+/// answer is that the question does not apply. The condition is per-member deliberately, and
+/// never on the options: a <em>row</em>'s null is a value — a row's <c>tfm: null</c> means "in
+/// every context asked", and <c>session status</c>'s <c>pid: null</c> means "not running".
+/// </summary>
+internal sealed record Envelope<T>(
+    int Count,
+    bool Truncated,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Tfm,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Contexts,
+    IReadOnlyList<T> Results);
+
+/// <summary>A place to go: <c>refs</c>, <c>def</c> and <c>impl</c>.</summary>
+internal sealed record LocationRow(
+    string Path,
+    int Line,
+    int Column,
+    int EndLine,
+    int EndColumn,
+    bool Generated,
+    bool Metadata,
+    bool External,
+    string? Text);
+
+/// <summary>One finding, with the contexts it is <em>only</em> in as <c>Tfm</c>.</summary>
+internal sealed record DiagnosticRow(
+    string Path,
+    int Line,
+    int Column,
+    int EndLine,
+    int EndColumn,
+    string Severity,
+    string? Code,
+    string Message,
+    bool Generated,
+    bool Metadata,
+    bool External,
+    string? Tfm,
+    string? Text);
+
+/// <summary>A <c>sym</c> hit. Named for the type rather than the command because
+/// <see cref="SymbolRow"/> is the internal pairing this is rendered from.</summary>
+internal sealed record SymbolJsonRow(
+    string Name,
+    string Kind,
+    string? Container,
+    string Path,
+    int Line,
+    int Column,
+    bool Generated,
+    bool Metadata,
+    bool External);
+
+/// <summary>The one row a <c>hover</c> answers with, or none.</summary>
+internal sealed record HoverRow(
+    string Path,
+    int Line,
+    int Column,
+    string Signature,
+    string Documentation,
+    bool Generated,
+    bool Metadata,
+    bool External);
+
+/// <summary>
+/// <c>outline</c>'s envelope, which is the one that is not <see cref="Envelope{T}"/>: the
+/// document is envelope-level because there is exactly one of it, and <c>Contexts</c> is
+/// written even when null, because here it is a row-shaped fact about the document rather
+/// than a key that does not apply.
+/// </summary>
+internal sealed record OutlineEnvelope(
+    int Count,
+    bool Truncated,
+    string Path,
+    bool Generated,
+    bool Metadata,
+    bool External,
+    int? Contexts,
+    IReadOnlyList<OutlineRow> Results);
+
+/// <summary>One declaration in an outline, with its own nested declarations.</summary>
+internal sealed record OutlineRow(
+    string Name,
+    string Kind,
+    string? Detail,
+    int Line,
+    int Column,
+    int EndLine,
+    int EndColumn,
+    string? Tfm,
+    string? Text,
+    IReadOnlyList<OutlineRow> Children);
+
+/// <summary>The three counts <c>ready</c> answers with; see <see cref="Output.WriteReady"/>.</summary>
+internal sealed record ReadyRow(
+    bool Ready, int Projects, IReadOnlyList<string> Skipped, IReadOnlyList<string> Unprobed);
+
+/// <summary>What <c>restore</c> restored, and what the prune after it did.</summary>
+internal sealed record RestoredRow(
+    bool Restored,
+    string Manifest,
+    string? Packages,
+    IReadOnlyList<string> Removed,
+    IReadOnlyList<KeptRow> Kept);
+
+/// <summary>A version the prune could not remove, and why.</summary>
+internal sealed record KeptRow(string Dir, string Why);
+
+/// <summary><c>session status</c>. <c>Pid</c> is null when nothing is running, and that
+/// null is a value: it is what separates "no session" from a session answering badly.</summary>
+internal sealed record SessionRow(
+    bool Running, string Pipe, string Root, int? Pid, string Log);
+
+/// <summary><c>session stop</c>.</summary>
+internal sealed record StoppedRow(bool Stopped, string Pipe);
+
+/// <summary><c>project</c>: one row per context the document is compiled in.</summary>
+internal sealed record ProjectRow(
+    string Path,
+    string Project,
+    string? Tfm,
+    bool Generated,
+    bool Metadata,
+    bool External);
+
+/// <summary>
+/// The failure shape, and the discriminator between the two: an answer envelope never
+/// carries <c>error</c> and this never carries <c>count</c>.
+/// </summary>
+internal sealed record ErrorOut(string Error);
+
+/// <summary>
+/// Every shape <c>--json</c> can print, source-generated, so nothing an agent reads is
+/// serialized reflectively. Each closed generic earns its own registration —
+/// <c>Envelope&lt;LocationRow&gt;</c>, not <c>Envelope&lt;T&gt;</c> — because that is what the
+/// generator can emit code for. <c>TypeInfoPropertyName</c> is given explicitly so a call site
+/// names the shape it is writing rather than a mangled generic.
+/// <para>
+/// The naming policy is repeated here because generated property names are baked in at
+/// generation time; <c>WriteIndented</c> and the relaxed encoder cannot be, so the context is
+/// constructed around a <see cref="JsonSerializerOptions"/> carrying them — see
+/// <c>Output.Wire</c>. There is deliberately <b>no</b> <c>DefaultIgnoreCondition</c>: a row's
+/// null is a value, and only the envelope's optional keys are ignored, per member.
+/// </para>
+/// </summary>
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(Envelope<LocationRow>), TypeInfoPropertyName = "LocationEnvelope")]
+[JsonSerializable(typeof(Envelope<DiagnosticRow>), TypeInfoPropertyName = "DiagnosticEnvelope")]
+[JsonSerializable(typeof(Envelope<SymbolJsonRow>), TypeInfoPropertyName = "SymbolEnvelope")]
+[JsonSerializable(typeof(Envelope<HoverRow>), TypeInfoPropertyName = "HoverEnvelope")]
+[JsonSerializable(typeof(Envelope<ReadyRow>), TypeInfoPropertyName = "ReadyEnvelope")]
+[JsonSerializable(typeof(Envelope<RestoredRow>), TypeInfoPropertyName = "RestoredEnvelope")]
+[JsonSerializable(typeof(Envelope<SessionRow>), TypeInfoPropertyName = "SessionEnvelope")]
+[JsonSerializable(typeof(Envelope<StoppedRow>), TypeInfoPropertyName = "StoppedEnvelope")]
+[JsonSerializable(typeof(Envelope<ProjectRow>), TypeInfoPropertyName = "ProjectEnvelope")]
+[JsonSerializable(typeof(OutlineEnvelope))]
+[JsonSerializable(typeof(ErrorOut))]
+internal sealed partial class OutWire : JsonSerializerContext;

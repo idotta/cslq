@@ -1232,4 +1232,125 @@ public class OutputTests
         Assert.Equal(2, row.GetProperty("removed").GetArrayLength());
         Assert.Equal("in use.", row.GetProperty("kept")[0].GetProperty("why").GetString());
     }
+
+    /// <summary>
+    /// The two shapes the replay oracle cannot reach, pinned whole rather than probed key by
+    /// key: <c>cslq restore</c> really restores and prunes the shared packages folder, so no
+    /// capture of it can be replayed, and <c>session stop --json</c> is not a command the gate
+    /// runs. Every other <c>--json</c> site is covered by a probe case. The literal is the
+    /// point — moving these off anonymous types onto declared records is exactly the change
+    /// that renames a key silently, and a caller parsing <c>manifest</c> would never see
+    /// <c>Manifest</c> coming.
+    /// </summary>
+    [Fact]
+    public async Task Restore_renders_the_same_envelope_with_and_without_a_prune()
+    {
+        var bare = await CaptureAsync(() =>
+        {
+            Output.WriteRestored("/m", null, json: true);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(
+            """
+            {
+              "count": 1,
+              "truncated": false,
+              "results": [
+                {
+                  "restored": true,
+                  "manifest": "/m",
+                  "packages": null,
+                  "removed": [],
+                  "kept": []
+                }
+              ]
+            }
+            """.ReplaceLineEndings("\n"),
+            bare.ReplaceLineEndings("\n").TrimEnd('\n'));
+
+        var pruned = await CaptureAsync(() =>
+        {
+            Output.WriteRestored(
+                "/m",
+                new Prune.Result("/pkg", ["roslyn-language-server/1.0.0"], [("roslyn-language-server/0.9.0", "in use.")]),
+                json: true);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(
+            """
+            {
+              "count": 1,
+              "truncated": false,
+              "results": [
+                {
+                  "restored": true,
+                  "manifest": "/m",
+                  "packages": "/pkg",
+                  "removed": [
+                    "roslyn-language-server/1.0.0"
+                  ],
+                  "kept": [
+                    {
+                      "dir": "roslyn-language-server/0.9.0",
+                      "why": "in use."
+                    }
+                  ]
+                }
+              ]
+            }
+            """.ReplaceLineEndings("\n"),
+            pruned.ReplaceLineEndings("\n").TrimEnd('\n'));
+    }
+
+    [Fact]
+    public async Task Session_stop_renders_the_envelope_either_way()
+    {
+        var stopped = await CaptureAsync(() =>
+        {
+            Output.WriteSessionStopped(true, "cslq-abc", json: true);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(
+            """
+            {
+              "count": 1,
+              "truncated": false,
+              "results": [
+                {
+                  "stopped": true,
+                  "pipe": "cslq-abc"
+                }
+              ]
+            }
+            """.ReplaceLineEndings("\n"),
+            stopped.ReplaceLineEndings("\n").TrimEnd('\n'));
+
+        using var none = JsonDocument.Parse(await CaptureAsync(() =>
+        {
+            Output.WriteSessionStopped(false, "cslq-abc", json: true);
+            return Task.CompletedTask;
+        }));
+        Assert.False(none.RootElement.GetProperty("results")[0].GetProperty("stopped").GetBoolean());
+    }
+
+    /// <summary>
+    /// A shape nobody registered on <see cref="OutWire"/> throws rather than falling back to
+    /// reflection, which is what makes the assembly's AOT compatibility true for a renderer
+    /// that has not been written yet. Same guard as <c>LspWireTests</c>'s, one wire over.
+    /// </summary>
+    [Fact]
+    public void An_unregistered_output_shape_is_refused_rather_than_reflected_over()
+    {
+        var options = new JsonSerializerOptions { TypeInfoResolver = OutWire.Default };
+
+        var ex = Assert.Throws<NotSupportedException>(
+            () => JsonSerializer.Serialize(new Unregistered("x"), typeof(Unregistered), options));
+
+        Assert.Contains(nameof(Unregistered), ex.Message, StringComparison.Ordinal);
+    }
+
+    private sealed record Unregistered(string Name);
 }
