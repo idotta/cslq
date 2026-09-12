@@ -675,9 +675,33 @@ started, which stays an accepted cost.
       Order, so the unknown is answered before anything is built on it: (1) a throwaway
       RID-specific tool package, to settle the manifest question — **done, above**; (2) the
       session pipe, whose 8 warnings sit behind a wire we own on both ends and can revert
-      alone; (3) `LspClient`; (4) `Output`; (5) `PublishAot` and per-RID packaging in
+      alone — **done, #34**; (3) `LspClient` — **done, #35**; (4) `Output`, and with it
+      `IsAotCompatible` on the project, so a reflective serializer is a build failure rather
+      than a warning nobody reads — **done**; (5) `PublishAot` and per-RID packaging in
       `release.yml`, where the `PackagePath` above is a prerequisite; (6) measure, on all three
       platforms, before a single number reaches the README.
+
+      **The code half is done and it compiles: `cslq` publishes to a 12.4 MB single native
+      binary with no IL warnings, and answers.** Measured 2026-09-12 on **Windows alone** —
+      which is exactly the shape of claim the session work established as untrustworthy, so
+      none of it goes near the README until step (6) runs it on all three:
+      `--version` 29 ms median against 64 ms framework-dependent (n=20), and a **warm session
+      `hover` 43 ms against 180 ms** (n=12, one session per binary so they cannot share one).
+      That is 4.2x and 137 ms off every warm call — more than the "roughly half of a warm call
+      is .NET starting up" estimate this item opened with, because the client process pays JIT
+      for the whole request path and not only for startup. The native binary was exercised
+      beyond `--version`: `ready`, `hover` and a `--json` `refs` against the fixture all answer
+      correctly, with the server pin resolved from a `.config/` placed beside the executable —
+      which is the shape item (5) has to reproduce in the package.
+      Three things that cost time and would cost it again: an AOT publish **fails from Git
+      Bash** because `vswhere.exe` is not on its PATH (`MSB3073`/123, with MSVC installed and
+      found) — prefix the run with `C:\Program Files (x86)\Microsoft Visual Studio\Installer`;
+      `[GenerateShape]` alone carries **properties only**, so a target fed from
+      `RpcTargetMetadata.FromShape<T>()` without
+      `IncludeMethods = MethodShapeFlags.PublicInstance` describes no methods and every call
+      answers `RemoteMethodNotFoundException`; and `[JsonSourceGenerationOptions]` governs only
+      the context's `Default` instance, so a context constructed around options of its own must
+      repeat the naming policy there or every key comes out PascalCase.
 
 ## Acceptance criteria
 
