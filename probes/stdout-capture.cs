@@ -22,9 +22,10 @@ using System.Globalization;
 using System.IO.Pipes;
 using System.Text;
 
-if (args.Length != 1)
+if (args.Length != 2)
 {
-    Console.Error.WriteLine("usage: dotnet run probes/stdout-capture.cs -- <path to cslq>");
+    Console.Error.WriteLine(
+        "usage: dotnet run probes/stdout-capture.cs -- <path to cslq> <absolute root>");
     return 2;
 }
 
@@ -35,6 +36,10 @@ const int Keepalive = 30;
 const int BoundSeconds = 25;
 
 var cslq = args[0];
+// Absolute, and the caller's job. `dotnet run` on a file-based app sets the working directory
+// to the .cs file's own folder on some SDKs and to the caller's on others, so a relative root
+// here is two different directories depending on the machine.
+var root = args[1];
 var pipe = $"cslq-capture-{Environment.ProcessId}";
 
 var (exit, elapsed, output, watched) = await RunAsync(pipe, session: true);
@@ -82,7 +87,7 @@ async Task<(int Exit, double Seconds, string Output, string Watched)> RunAsync(
         RedirectStandardError = true,
         UseShellExecute = false,
     };
-    foreach (var a in new[] { "ready", "--root", "fixture", "--timeout", "300" }) psi.ArgumentList.Add(a);
+    foreach (var a in new[] { "ready", "--root", root, "--timeout", "300" }) psi.ArgumentList.Add(a);
     foreach (var a in extra) psi.ArgumentList.Add(a);
     psi.Environment["ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME"] = daemon;
     psi.Environment["ROSLYN_LANGUAGE_SERVER_DAEMON_KEEPALIVE"] = Keepalive.ToString();
