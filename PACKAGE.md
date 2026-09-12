@@ -20,6 +20,11 @@ dotnet tool install -g cslq       # the tool
 npx skills add idotta/cslq -g     # the skill, into every agent on the machine
 ```
 
+What the first command installs depends on the machine: a single Native AOT binary on
+`win-x64`, `linux-x64` and `osx-arm64`, and the framework-dependent CoreCLR build
+(`cslq.any`) everywhere else — an Intel Mac, `linux-arm64`, `win-arm64`. The SDK picks; both
+answer the same commands, the native one faster.
+
 The second command is [`npx skills`](https://github.com/vercel-labs/skills), which installs
 `skills/cslq/` from the repository into each agent's skills directory —
 `~/.claude/skills/cslq/` for Claude Code. Drop `-g` to install into the current repository

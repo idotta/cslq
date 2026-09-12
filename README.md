@@ -40,14 +40,21 @@ dotnet tool install -g cslq
 cslq --version
 ```
 
+What that installs depends on the machine. `cslq` ships as five packages: a pointer package
+naming one Native AOT sub-package per platform — `win-x64`, `linux-x64` and `osx-arm64`, a
+single native binary each, with most of .NET's start-up compiled away — and `cslq.any`, the
+framework-dependent CoreCLR build, which is what every other platform resolves. That fallback
+is not a corner case: **an Intel Mac gets it**, and so do `linux-arm64` and `win-arm64`. The
+.NET 10 SDK above is what picks between them; nothing else is needed either way.
+
 `dotnet tool update -g cslq` moves to the latest release, and every release is a [GitHub
-Release](https://github.com/idotta/cslq/releases) of the same tag with the `.nupkg` attached
-and notes saying which language server it pins. To run what is on `main` instead, install from
-a package you build — the `--source` pointing at your own `dotnet pack` output is what takes
-the place of nuget.org. Two packs rather than one, because a plain `dotnet pack` now produces
-only the pointer package that names one Native AOT sub-package per platform: narrowing it to
-`any` and packing the framework-dependent fallback beside it installs the same tool without
-needing an AOT toolchain:
+Release](https://github.com/idotta/cslq/releases) of the same tag with every `.nupkg` attached and
+notes saying which language server it pins. To run what is on `main` instead, install from a
+package you build — the `--source` pointing at your own `dotnet pack` output is what takes the
+place of nuget.org. Two packs rather than one, because a plain `dotnet pack` now produces only the
+pointer package that names one Native AOT sub-package per platform: narrowing it to `any` and
+packing the framework-dependent fallback beside it installs the same tool without needing an AOT
+toolchain:
 
 ```
 git clone https://github.com/idotta/cslq.git
@@ -652,7 +659,9 @@ it goes. Same rows, same streams, same exit code, all at the end.
 Since the session landed, **the number that matters is not in the tables below**. They measure
 the path that threw the attach away: `--no-session`, which every call used to take. Measured on
 the fixture (4 projects), Windows 11 / .NET 10, **Release build** (the configuration
-`probes/run.sh` builds), 2026-09-11:
+`probes/run.sh` builds), 2026-09-11. That build is the framework-dependent one, which is what
+the session comparison wants and is *not* what most people install: the shipped tool is a
+native binary on the three RIDs that have one, and it is faster than every figure below.
 
 | | through the session (default) | `--no-session`, daemon warm |
 |---|---|---|
@@ -677,6 +686,20 @@ Every figure in that table is Windows, and a latency number is a claim about one
 only figures measured everywhere are the gate's own, from `session-beats-no-session` on PR #30:
 the warm `hover` costs 190 ms against 2951 ms under `--no-session` on windows, 131 ms against
 2377 ms on ubuntu, and 67 ms against 1429 ms on macos.
+
+The same rule is what puts the native binary's figures here and nowhere else.
+`native-beats-framework-dependent` and `native-version-beats-framework-dependent` are two more
+legs of `probes/run.sh`, publishing the host's RID and timing it against the framework-dependent
+build the tables above measure, on every platform the gate runs on (2026-09-12):
+
+| | linux-x64 | osx-arm64 | win-x64 |
+|---|---|---|---|
+| warm session `hover` | 20 ms vs 222 ms | 19 ms vs 155 ms | 77 ms vs 274 ms |
+| `cslq --version` | 13 ms vs 37 ms | 18 ms vs 49 ms | 57 ms vs 84 ms |
+
+Windows is the narrowest margin in both rows, and `--version` there — 1.5x — is the leg to
+watch. The per-command tables are not restated in native terms: those commands were measured on
+the framework-dependent build and nothing has measured them on the native one.
 
 The rest of this section is the one-shot path — what `--no-session` costs, and what the daemon
 does and does not buy underneath it.
@@ -824,7 +847,7 @@ sub-package is not up yet is a hard install failure rather than a fallback;
 `NuGet/login@v1`, which exchanges the job's OIDC token for a one-hour nuget.org key so no
 long-lived secret exists to leak; `dotnet nuget push --skip-duplicate`, so a re-run of an
 already-published version is a no-op rather than a failure; and last, `gh release create
---generate-notes` with the `.nupkg` attached, so every version on nuget.org is bound to a
+--generate-notes` with all five `.nupkg`s attached, so every version on nuget.org is bound to a
 GitHub Release of the same tag. The notes are the PRs merged since the previous tag, and a
 bump PR's title names the server version it pins, which is what tells `0.1.3` from `0.1.4`.
 The release step comes after the push so a red gate leaves nothing behind, and skips itself
