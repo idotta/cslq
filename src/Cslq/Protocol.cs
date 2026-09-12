@@ -18,8 +18,66 @@ internal static class Lsp
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        TypeInfoResolver = LspWire.Default,
     };
 }
+
+/// <summary>
+/// The whole of the language server's wire, source-generated, so nothing crossing it is
+/// serialized reflectively. It is the <em>only</em> resolver <see cref="Lsp.Options"/> has:
+/// a type that is not declared here throws rather than falling back to reflection, which
+/// is what makes the suppressions in <see cref="LspClient"/> true for a caller that does
+/// not exist yet — a new payload fails loudly on its first call instead of reaching a
+/// server that answers a malformed request by taking its whole queue down.
+/// <c>LspWireTests</c> pins both halves: the bytes of every payload, and that an
+/// unregistered type throws.
+/// <para>
+/// The options are repeated here rather than inherited from <see cref="Lsp.Options"/>:
+/// generated property names are baked in at generation time, so a context that did not
+/// declare the same policy would write PascalCase past a camelCase reader — and the
+/// <c>[JsonPropertyName]</c> members of this file are the shapes where that is fatal
+/// rather than merely wrong.
+/// </para>
+/// <para>
+/// <c>object</c>, <c>object[]</c> and <c>string[]</c> are what <see cref="LspClient"/>'s
+/// endpoints answer the server's own requests with; <c>JsonElement</c> is what the ones
+/// that accept and discard take. <c>CommonErrorData</c> is the error path: StreamJsonRpc
+/// serializes a fault's <c>data</c> with these options, and this server really does
+/// return errors — <c>-32000: Server was requested to shut down</c> is the one a dropped
+/// registration would erase, leaving a dead connection and no cause.
+/// </para>
+/// </summary>
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true,
+    NumberHandling = JsonNumberHandling.AllowReadingFromString,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(InitializeParams))]
+[JsonSerializable(typeof(InitializeResult))]
+[JsonSerializable(typeof(InitializedParams))]
+[JsonSerializable(typeof(DidOpenTextDocumentParams))]
+[JsonSerializable(typeof(DidCloseTextDocumentParams))]
+[JsonSerializable(typeof(ReferenceParams))]
+[JsonSerializable(typeof(TextDocumentPositionParams))]
+[JsonSerializable(typeof(DocumentSymbolParams))]
+[JsonSerializable(typeof(DocumentSymbol[]))]
+[JsonSerializable(typeof(WorkspaceSymbolParams))]
+[JsonSerializable(typeof(SymbolInformation[]))]
+[JsonSerializable(typeof(Location[]))]
+[JsonSerializable(typeof(Hover))]
+[JsonSerializable(typeof(TextDocumentContentParams))]
+[JsonSerializable(typeof(TextDocumentContentResult))]
+[JsonSerializable(typeof(ProjectContextParams))]
+[JsonSerializable(typeof(ProjectContextList))]
+[JsonSerializable(typeof(DocumentDiagnosticParams))]
+[JsonSerializable(typeof(DocumentDiagnosticReport))]
+[JsonSerializable(typeof(ConfigurationParams))]
+[JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(object))]
+[JsonSerializable(typeof(object[]))]
+[JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(StreamJsonRpc.Protocol.CommonErrorData))]
+internal sealed partial class LspWire : JsonSerializerContext;
 
 internal sealed record Position(int Line, int Character);
 
@@ -48,6 +106,11 @@ internal sealed record VsProjectContext(
     [property: JsonPropertyName("_vs_label")] string Label);
 
 internal sealed record TextDocumentItem(string Uri, string LanguageId, int Version, string Text);
+
+// `initialized` carries an empty object and nothing else. It was an anonymous `new { }`
+// until the wire had to be source-generated, which an anonymous type cannot be; a record
+// with no members serialises to the same `{}`, pinned by LspWireTests.
+internal sealed record InitializedParams;
 
 internal sealed record DidOpenTextDocumentParams(TextDocumentItem TextDocument);
 
