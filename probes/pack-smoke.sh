@@ -247,5 +247,53 @@ ready_rc=$?
 cat "$bin/ready.log"
 report "$([ "$ready_rc" = 0 ] && echo 1 || echo 0)" "the installed binary resolves the pin and reaches ready"
 
+# The four checks above prove the package installs and that the binary can start a server.
+# They do not touch the three surfaces the Native AOT rewrite rewrote -- the LSP wire, the
+# --json envelopes and the session's pipe RPC -- all three of which are source-generated now,
+# and a reflection path that slipped past the build's zero IL warnings fails only at runtime.
+# Each leg below runs one of them natively, from "$out" and redirected, for the two reasons
+# the ready leg gives.
+
+# The LSP wire: a hover is a request and a response through Protocol.cs, which nothing native
+# has sent yet.
+log "$cslq hover Greet"
+( cd "$out" && "$cslq" hover Greet --root "$fixture_abs" --timeout 300 --no-session ) \
+  > "$bin/hover.log" 2>&1
+hover_rc=$?
+cat "$bin/hover.log"
+report "$([ "$hover_rc" = 0 ] && grep -q 'Greeter\.Greet' "$bin/hover.log" && echo 1 || echo 0)" \
+  "the installed binary answers a hover"
+
+# The --json envelopes: every shape in Output.cs is written through OutWire's generated
+# resolver, so a missing [JsonSerializable] is an exception here and nowhere earlier.
+log "$cslq sym Greet --json"
+( cd "$out" && "$cslq" sym Greet --root "$fixture_abs" --timeout 300 --json --no-session ) \
+  > "$bin/sym.log" 2>&1
+sym_rc=$?
+cat "$bin/sym.log"
+report "$([ "$sym_rc" = 0 ] && grep -q '"count":' "$bin/sym.log" && grep -q '"name": "Greet"' "$bin/sym.log" && echo 1 || echo 0)" \
+  "the installed binary writes a --json envelope"
+
+# The session's pipe RPC: two calls without --no-session, with a status between them, because
+# the second call only proves anything if the first left a session listening -- a session that
+# died is answered by the fallback, correctly and slowly, at exit 0.
+log "$cslq hover Greet, twice, through a session"
+( cd "$out" && "$cslq" hover Greet --root "$fixture_abs" --timeout 300 ) > "$bin/session1.log" 2>&1
+s1_rc=$?
+( cd "$out" && "$cslq" session status ) > "$bin/session-status.log" 2>&1
+( cd "$out" && "$cslq" hover Greet --root "$fixture_abs" --timeout 300 ) > "$bin/session2.log" 2>&1
+s2_rc=$?
+cat "$bin/session1.log" "$bin/session-status.log" "$bin/session2.log"
+report "$([ "$s1_rc" = 0 ] && [ "$s2_rc" = 0 ] && grep -q '^running' "$bin/session-status.log" && echo 1 || echo 0)" \
+  "two calls are answered and a session is running between them"
+
+# Explicitly, and before the EXIT trap deletes the --tool-path this session is running out of.
+log "$cslq session stop"
+( cd "$out" && "$cslq" session stop ) > "$bin/session-stop.log" 2>&1
+stop_rc=$?
+cat "$bin/session-stop.log"
+report "$([ "$stop_rc" = 0 ] && grep -q 'stopped the session on' "$bin/session-stop.log" && echo 1 || echo 0)" \
+  "the session stops"
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
