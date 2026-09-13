@@ -87,6 +87,9 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
 - **A query fired before load returns empty, not an error.** Never `sleep`; poll a sentinel
   that must resolve, from the first round. Once `workspace/projectInitializationComplete` has
   fired **in this process**, the wait is bounded to a further 20 s (`LspClient.PostLoadGrace`)
+  measured from when the notification *arrived* — `Endpoints.InitializedAt`, stamped in the
+  handler, rather than the round that notices it, which ran 6.9 s late on OrchardCore because
+  a round asking one `workspace/symbol` per unproved project queues behind the load —
   and then fails — a project whose only type sits in an `#if false` branch is the shape it
   exists for, ordinary `.csproj` and all, so no skip rule sees it. That notification ends
   *this client's own* reload on every attach, cold and warm alike (see the daemon bullet), so
@@ -94,10 +97,23 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   projects kept resolving for 6-8 s after it on CommunityToolkit, which is the length the
   grace has to cover and the reason it is 20 s rather than zero. **Never bound it when the
   notification has not fired**: that state means the load this client asked for has not
-  finished, and the incomplete-answer window is inside it — and on a repository where the
-  notification never fires at all (see the daemon bullet) the grace never applies, so an
-  unresolvable candidate there holds the whole `--timeout` and the failure text stays on the
-  still-loading wording. `exhausted-candidate-fails-after-load` is the leg.
+  finished, and the incomplete-answer window is inside it.
+  `exhausted-candidate-fails-after-load` is the leg.
+  **The stamp lives for the attach, so a warm session's calls get no grace at all, and that is
+  the intent rather than a side effect.** The time used to be a local of `WaitReadyAsync`, so
+  every call of a long-lived session re-stamped it and bought itself a fresh 20 s of waiting
+  for something that had already failed. Measured 2026-09-13 on neuroscope-dev (22 projects),
+  warm session, unresolvable `--sentinel`: **21.0 s before, 170 ms after**; cold is unchanged
+  in kind and slightly earlier, **32.6 s to 28.4 s**, which is the 6.9 s above moving off the
+  round that notices. The load the grace covers the tail of ended before a warm call started,
+  and a candidate a fully loaded workspace does not answer will not start answering by being
+  asked for another twenty seconds. The case that would make this wrong — a project added
+  after the session started, which `_proved` being a set exists to keep probing — cannot
+  arise: discovery reads the root's solution alone, so the project is invisible until the
+  solution lists it, and writing the solution changes `Program.SolutionSignature` and trips
+  the session's watcher, so `Session.State.ClientAsync` re-attaches first and
+  `Endpoints.InitializedAt` is null again with the full timeout available
+  (`session-reattaches-when-the-solution-changes`).
 - **A sentinel that resolved is proved for the life of the attach, and the proof is a set of
   per-project keys rather than a ready flag.** `LspClient._proved` holds one key per sentinel
   that has answered — `LspClient.ProofKey`, the project's own directory, or the candidates for
@@ -535,22 +551,29 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     workspace rather than the daemon's loaded one — no cslq-side fix exists at the
     `initialize` layer. Consequences, all measured rather than inferred:
     - **`workspace/projectInitializationComplete` fires at most once per attach, and on a
-      large repository it does not fire at all.** Measured 2026-09-13 with the flag dumped on
-      every request: on OrchardCore it was still unfired at the end of the cold load and on
-      every one of five warm calls, i.e. more than ten minutes into one attach, while
-      CleanArchitecture fired normally and answered `True` from its first warm call on.
+      large repository it fires *late* — it does not fail to fire.** Measured 2026-09-13 on
+      OrchardCore with every inbound message timestamped: the cold load takes **7 m 25 s**
+      (`[LanguageServerProjectSystem] Completed (re)load of all projects in 00:07:25.1741729`),
+      the notification lands **25 ms after** that line and the `$/progress` `end`
+      `{"message":"Loaded OrchardCore.slnx"}` **38 ms after** it, and it fires in
+      `--no-daemon --no-session` and in the default daemon+session mode alike, on the cold call
+      and on every warm call after it. What produces the "never fires" reading is a `--timeout`
+      shorter than the load: a 420 s run gave up at `"percentage":96` with the notification
+      still three minutes away, and the only `$/progress` `end` it ever saw was its own
+      disconnect's `{"message":"Cancelled"}`. That failure is not a missing signal, and its
+      "still loading — Raise --timeout" headline is right advice.
       **Readiness does not depend on it** — `WaitReadyAsync` returns the moment every sentinel
-      resolves, fired or not, which is how OrchardCore is ready at all — and that is exactly
-      why this is dangerous: anything *gated* on the notification silently does nothing on
-      the repositories big enough to need it, with no error and no slow path to notice.
-      Do not write such a gate, and do not read an unfired notification as a workspace that
-      has not loaded. What it really bounds is the *failure* path, one bullet below. (This
-      bullet used to say it fires on every attach, warm daemon included, and before that that
-      it never fires on a warm one. Both were generalisations from one repository. The fix
-      the second one justified was right anyway: `WaitReadyAsync` polls the sentinels from
-      the start rather than blocking on the notification, which it would have to do regardless
-      — the notification comes *after* the load it terminates.) It never fires for a client
-      that sends no workspace folders, since that is what triggers the reload it ends.
+      resolves, fired or not, and the last project resolved 6.9 s *before* the notification on
+      that run — so do not gate anything on it, and do not read an unfired notification as a
+      workspace that failed to load. What it really bounds is the *failure* path, one bullet
+      below. (This bullet has now been rewritten three times, twice by generalising from a
+      single repository — it has said the notification fires on every attach, then that it
+      never fires on a warm one, then that a large repository never fires at all. Start the
+      fourth rewrite suspicious, and measure more than one root. The fix the second one
+      justified was right anyway: `WaitReadyAsync` polls the sentinels from the start rather
+      than blocking on the notification, which it would have to do regardless — the
+      notification comes *after* the load it terminates.) It never fires for a client that
+      sends no workspace folders, since that is what triggers the reload it ends.
     - **The notification does not mean every project is queryable.** On CommunityToolkit
       sentinels resolved progressively *through* the reload — 8 of 12 projects before the
       notification, spread over 20 s — and four kept resolving for a further 6-8 s *after*

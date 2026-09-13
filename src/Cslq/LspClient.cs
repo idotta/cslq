@@ -422,9 +422,10 @@ internal sealed partial class LspClient : IAsyncDisposable
     /// </para>
     /// <para>
     /// The wait is bounded to <see cref="PostLoadGrace"/> past
-    /// <c>projectInitializationComplete</c>, but only when that notification arrived <em>in
-    /// this process</em> — which is what <c>ProjectInitialized.IsCompleted</c> means, since
-    /// nothing but our own notification handler ever completes that task. It fires on every
+    /// <c>projectInitializationComplete</c>, measured from when that notification <em>arrived</em>
+    /// — <see cref="Endpoints.InitializedAt"/>, not from the round that notices it — and only
+    /// when it arrived <em>in this process</em>, since nothing but our own notification handler
+    /// ever stamps it. It fires on every
     /// attach, warm daemon included, because it ends the load this client asked for, so the
     /// bound applies to cold and warm alike. Past it, a candidate still unresolved is very
     /// likely never going to resolve — a project whose only type the regex read out of an
@@ -436,11 +437,39 @@ internal sealed partial class LspClient : IAsyncDisposable
     /// timeout is what is wanted. A <c>--timeout</c> shorter than the grace still wins.
     /// </para>
     /// <para>
+    /// The stamp lives for the <em>attach</em>, not for the call, so a session's second and
+    /// later calls get no further grace at all: the notification arrived minutes ago,
+    /// <c>loaded + PostLoadGrace</c> is already in the past, and an unresolvable candidate
+    /// fails after a single round. That is the point rather than a side effect — the load
+    /// whose tail the grace covers ended before the call was made, and a candidate that a
+    /// fully loaded workspace does not answer is not going to start answering because it was
+    /// asked for another twenty seconds. Measured 2026-09-13 on a 22-project repository, warm
+    /// session, unresolvable <c>--sentinel</c>: 21.0 s before this, 170 ms after. The cold
+    /// path is unchanged in kind and slightly earlier, 32.6 s to 28.4 s, which is the stamp
+    /// moving off the round that notices. A per-call stamp is what produced the 21.0 s: the
+    /// time was a local, so every warm call re-stamped and bought itself a fresh twenty
+    /// seconds of waiting for something that had already failed.
+    /// </para>
+    /// <para>
+    /// The one case that would make that wrong is a project added after the session started,
+    /// which must still be probed — it is why <see cref="_proved"/> is a set rather than a
+    /// flag — and which on a warm attach would now get one round rather than twenty seconds.
+    /// It cannot arise, because such a project cannot reach this method on the old attach:
+    /// discovery reads the root's solution alone, so a new project is invisible until the
+    /// <c>.sln</c>/<c>.slnx</c> lists it; writing that solution changes
+    /// <c>Program.SolutionSignature</c> (and trips the session's watcher, which filters
+    /// <c>*.csproj</c>, <c>*.sln</c> and <c>*.slnx</c>), so <c>Session.State.ClientAsync</c>
+    /// re-attaches before serving the call — a new <see cref="LspClient"/>, a new
+    /// <see cref="Endpoints"/>, <see cref="Endpoints.InitializedAt"/> null again and the full
+    /// timeout available until the new load ends. <c>session-reattaches-when-the-solution-changes</c>
+    /// is the leg.
+    /// </para>
+    /// <para>
     /// A sentinel that has resolved is remembered in <see cref="_proved"/> and not asked
     /// again for the life of this attach — see <see cref="Unproved"/> for why that is a set
     /// rather than a flag. Nothing else is cached: a sentinel that has never resolved is
-    /// re-probed on every call, with this same deadline and grace, and the whole failure path
-    /// below is untouched.
+    /// re-probed on every call, with this same deadline and whatever is left of the grace,
+    /// and the whole failure path below is untouched.
     /// </para>
     /// </summary>
     public async Task WaitReadyAsync(
@@ -450,7 +479,6 @@ internal sealed partial class LspClient : IAsyncDisposable
         var pending = Unproved(sentinels, _proved);
         var unprobed = sentinels.Where(s => s.Candidates.Count == 0 && !s.Skipped).ToList();
         var linked = sentinels.Where(s => s.Skipped).ToList();
-        DateTime? loaded = null;
 
         while (true)
         {
@@ -464,7 +492,7 @@ internal sealed partial class LspClient : IAsyncDisposable
 
             pending = [.. pending.Where((_, i) => !resolved[i])];
             if (pending.Count == 0) return;
-            if (_endpoints.ProjectInitialized.IsCompleted) loaded ??= DateTime.UtcNow;
+            var loaded = _endpoints.InitializedAt;
             var bound = loaded is null || deadline < loaded.Value + PostLoadGrace
                 ? deadline
                 : loaded.Value + PostLoadGrace;
@@ -472,7 +500,7 @@ internal sealed partial class LspClient : IAsyncDisposable
             await Task.Delay(250, ct);
         }
 
-        var fired = _endpoints.ProjectInitialized.IsCompleted;
+        var fired = _endpoints.InitializedAt is not null;
         var probed = sentinels.Count(s => s.Candidates.Count > 0);
         // The whole load finished and not one project answered: that is what a failed
         // design-time build looks like from here, and it is the only state worth a `dotnet`
@@ -1403,11 +1431,37 @@ internal sealed partial class LspClient : IAsyncDisposable
     {
         private readonly TaskCompletionSource _projectInitialized =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long _initializedAtTicks;
 
+        /// <summary>
+        /// Completes when <c>projectInitializationComplete</c> arrives, for a caller that wants
+        /// to await it against a live wire — which is what <c>LspWireTests</c> does. Readiness
+        /// reads <see cref="InitializedAt"/> instead, so that "it fired" and "when it fired"
+        /// are one fact rather than two fields that become true a statement apart.
+        /// </summary>
         public Task ProjectInitialized => _projectInitialized.Task;
 
+        /// <summary>
+        /// When <c>projectInitializationComplete</c> arrived, or null while it has not. The
+        /// stamp is its own publication: one field, read atomically, so there is no ordering
+        /// between two fields for a reader to have to trust. The alternative — having the
+        /// readiness loop stamp the time itself when it next notices — measured 6.9 s late on
+        /// OrchardCore (2026-09-13), because a round asking one <c>workspace/symbol</c> per
+        /// unproved project queues behind the load, and it tied the grace to how long a blocked
+        /// round takes to return.
+        /// </summary>
+        public DateTime? InitializedAt =>
+            Volatile.Read(ref _initializedAtTicks) is var ticks and > 0
+                ? new DateTime(ticks, DateTimeKind.Utc)
+                : null;
+
         [JsonRpcMethod("workspace/projectInitializationComplete")]
-        public void OnProjectInitializationComplete() => _projectInitialized.TrySetResult();
+        public void OnProjectInitializationComplete()
+        {
+            // First writer wins, so a repeat notification cannot move the stamp forward.
+            Interlocked.CompareExchange(ref _initializedAtTicks, DateTime.UtcNow.Ticks, 0);
+            _projectInitialized.TrySetResult();
+        }
 
         [JsonRpcMethod("workspace/configuration", UseSingleObjectParameterDeserialization = true)]
         public object?[] OnConfiguration(ConfigurationParams p) => new object?[p.Items.Length];
