@@ -1130,10 +1130,10 @@ rc=$?
 ec_elapsed=$(( $(date +%s) - ec_start ))
 # The same query again, now that the session holds a loaded workspace. The grace is stamped per
 # attach rather than per call, so the load it covers the tail of ended before this call started
-# and an unresolvable candidate has to fail after a single round -- 21.0 s to 170 ms on
-# neuroscope-dev when the stamp moved. A per-call stamp buys each warm call a fresh 20 s, so the
-# bound below is what tells the two apart; it is 5 s against a measured sub-second, not a
-# coin flip.
+# and an unresolvable candidate has to fail after a single round -- 21.0 s to 170 ms on a
+# 22-project workspace when the stamp moved. A per-call stamp buys each warm call a fresh 20 s,
+# so the bound below is what tells the two apart; it is 5 s against a measured sub-second, not
+# a coin flip.
 ecw_start=$(date +%s)
 ecw_out=$(CSLQ_SESSION_PIPE_NAME="$ec_pipe" "$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
 ecw_rc=$?

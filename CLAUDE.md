@@ -102,7 +102,7 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   **The stamp lives for the attach, so a warm session's calls get no grace at all, and that is
   the intent rather than a side effect.** The time used to be a local of `WaitReadyAsync`, so
   every call of a long-lived session re-stamped it and bought itself a fresh 20 s of waiting
-  for something that had already failed. Measured 2026-09-13 on neuroscope-dev (22 projects),
+  for something that had already failed. Measured 2026-09-13 on a 22-project workspace,
   warm session, unresolvable `--sentinel`: **21.0 s before, 170 ms after**; cold is unchanged
   in kind and slightly earlier, **32.6 s to 28.4 s**, which is the 6.9 s above moving off the
   round that notices. The load the grace covers the tail of ended before a warm call started,
