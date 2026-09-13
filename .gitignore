@@ -13,3 +13,6 @@ TestResults/
 # The 0.1.0 testing reference and its fix plan are working notes, kept local.
 TESTING-0.1.0.md
 FIXES-0.1.0.md
+
+# The 0.3.0 shipping notes are the same kind of thing.
+SHIPPING-0.3.0.md
