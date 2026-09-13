@@ -422,9 +422,10 @@ internal sealed partial class LspClient : IAsyncDisposable
     /// </para>
     /// <para>
     /// The wait is bounded to <see cref="PostLoadGrace"/> past
-    /// <c>projectInitializationComplete</c>, but only when that notification arrived <em>in
-    /// this process</em> — which is what <c>ProjectInitialized.IsCompleted</c> means, since
-    /// nothing but our own notification handler ever completes that task. It fires on every
+    /// <c>projectInitializationComplete</c>, measured from when that notification <em>arrived</em>
+    /// — <see cref="Endpoints.InitializedAt"/>, not from the round that notices it — and only
+    /// when it arrived <em>in this process</em>, since nothing but our own notification handler
+    /// ever stamps it. It fires on every
     /// attach, warm daemon included, because it ends the load this client asked for, so the
     /// bound applies to cold and warm alike. Past it, a candidate still unresolved is very
     /// likely never going to resolve — a project whose only type the regex read out of an
@@ -450,7 +451,6 @@ internal sealed partial class LspClient : IAsyncDisposable
         var pending = Unproved(sentinels, _proved);
         var unprobed = sentinels.Where(s => s.Candidates.Count == 0 && !s.Skipped).ToList();
         var linked = sentinels.Where(s => s.Skipped).ToList();
-        DateTime? loaded = null;
 
         while (true)
         {
@@ -464,7 +464,7 @@ internal sealed partial class LspClient : IAsyncDisposable
 
             pending = [.. pending.Where((_, i) => !resolved[i])];
             if (pending.Count == 0) return;
-            if (_endpoints.ProjectInitialized.IsCompleted) loaded ??= DateTime.UtcNow;
+            var loaded = _endpoints.InitializedAt;
             var bound = loaded is null || deadline < loaded.Value + PostLoadGrace
                 ? deadline
                 : loaded.Value + PostLoadGrace;
@@ -472,7 +472,7 @@ internal sealed partial class LspClient : IAsyncDisposable
             await Task.Delay(250, ct);
         }
 
-        var fired = _endpoints.ProjectInitialized.IsCompleted;
+        var fired = _endpoints.InitializedAt is not null;
         var probed = sentinels.Count(s => s.Candidates.Count > 0);
         // The whole load finished and not one project answered: that is what a failed
         // design-time build looks like from here, and it is the only state worth a `dotnet`
@@ -1403,11 +1403,37 @@ internal sealed partial class LspClient : IAsyncDisposable
     {
         private readonly TaskCompletionSource _projectInitialized =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long _initializedAtTicks;
 
+        /// <summary>
+        /// Completes when <c>projectInitializationComplete</c> arrives, for a caller that wants
+        /// to await it against a live wire — which is what <c>LspWireTests</c> does. Readiness
+        /// reads <see cref="InitializedAt"/> instead, so that "it fired" and "when it fired"
+        /// are one fact rather than two fields that become true a statement apart.
+        /// </summary>
         public Task ProjectInitialized => _projectInitialized.Task;
 
+        /// <summary>
+        /// When <c>projectInitializationComplete</c> arrived, or null while it has not. The
+        /// stamp is its own publication: one field, read atomically, so there is no ordering
+        /// between two fields for a reader to have to trust. The alternative — having the
+        /// readiness loop stamp the time itself when it next notices — measured 6.9 s late on
+        /// OrchardCore (2026-09-13), because a round asking one <c>workspace/symbol</c> per
+        /// unproved project queues behind the load, and it tied the grace to how long a blocked
+        /// round takes to return.
+        /// </summary>
+        public DateTime? InitializedAt =>
+            Volatile.Read(ref _initializedAtTicks) is var ticks and > 0
+                ? new DateTime(ticks, DateTimeKind.Utc)
+                : null;
+
         [JsonRpcMethod("workspace/projectInitializationComplete")]
-        public void OnProjectInitializationComplete() => _projectInitialized.TrySetResult();
+        public void OnProjectInitializationComplete()
+        {
+            // First writer wins, so a repeat notification cannot move the stamp forward.
+            Interlocked.CompareExchange(ref _initializedAtTicks, DateTime.UtcNow.Ticks, 0);
+            _projectInitialized.TrySetResult();
+        }
 
         [JsonRpcMethod("workspace/configuration", UseSingleObjectParameterDeserialization = true)]
         public object?[] OnConfiguration(ConfigurationParams p) => new object?[p.Items.Length];
