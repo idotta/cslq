@@ -1128,6 +1128,16 @@ ec_start=$(date +%s)
 out=$(CSLQ_SESSION_PIPE_NAME="$ec_pipe" "$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
 rc=$?
 ec_elapsed=$(( $(date +%s) - ec_start ))
+# The same query again, now that the session holds a loaded workspace. The grace is stamped per
+# attach rather than per call, so the load it covers the tail of ended before this call started
+# and an unresolvable candidate has to fail after a single round -- 21.0 s to 170 ms on
+# neuroscope-dev when the stamp moved. A per-call stamp buys each warm call a fresh 20 s, so the
+# bound below is what tells the two apart; it is 5 s against a measured sub-second, not a
+# coin flip.
+ecw_start=$(date +%s)
+ecw_out=$(CSLQ_SESSION_PIPE_NAME="$ec_pipe" "$CSLQ" ready --root "$ec_abs" --no-daemon --timeout 150 2>&1)
+ecw_rc=$?
+ecw_elapsed=$(( $(date +%s) - ecw_start ))
 # Through the session like every other call, so the bound covers the session load too -- and
 # stopped by name before the tree goes, or it would hold a dedicated server for a root that no
 # longer exists until the keepalive. `session stop` is the user-facing lever for exactly this.
@@ -1151,6 +1161,23 @@ else
   printf 'FAIL  %s (exit %s after %ss, wanted 1 under 90s naming B and the notification)\n' \
     "exhausted-candidate-fails-after-load" "$rc" "$ec_elapsed"
   printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+ok=1
+[ "$ecw_rc" = 1 ] || ok=0
+[ "$ecw_elapsed" -lt 5 ] || ok=0
+case "$ecw_out" in
+  *"projectInitializationComplete fired"*) ;;
+  *) ok=0 ;;
+esac
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%ss)\n' "exhausted-candidate-fails-at-once-when-warm" "$ecw_elapsed"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 under 5s naming the notification)\n' \
+    "exhausted-candidate-fails-at-once-when-warm" "$ecw_rc" "$ecw_elapsed"
+  printf '%s\n' "$ecw_out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
 

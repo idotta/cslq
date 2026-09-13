@@ -99,6 +99,21 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   notification has not fired**: that state means the load this client asked for has not
   finished, and the incomplete-answer window is inside it.
   `exhausted-candidate-fails-after-load` is the leg.
+  **The stamp lives for the attach, so a warm session's calls get no grace at all, and that is
+  the intent rather than a side effect.** The time used to be a local of `WaitReadyAsync`, so
+  every call of a long-lived session re-stamped it and bought itself a fresh 20 s of waiting
+  for something that had already failed. Measured 2026-09-13 on neuroscope-dev (22 projects),
+  warm session, unresolvable `--sentinel`: **21.0 s before, 170 ms after**; cold is unchanged
+  in kind and slightly earlier, **32.6 s to 28.4 s**, which is the 6.9 s above moving off the
+  round that notices. The load the grace covers the tail of ended before a warm call started,
+  and a candidate a fully loaded workspace does not answer will not start answering by being
+  asked for another twenty seconds. The case that would make this wrong — a project added
+  after the session started, which `_proved` being a set exists to keep probing — cannot
+  arise: discovery reads the root's solution alone, so the project is invisible until the
+  solution lists it, and writing the solution changes `Program.SolutionSignature` and trips
+  the session's watcher, so `Session.State.ClientAsync` re-attaches first and
+  `Endpoints.InitializedAt` is null again with the full timeout available
+  (`session-reattaches-when-the-solution-changes`).
 - **A sentinel that resolved is proved for the life of the attach, and the proof is a set of
   per-project keys rather than a ready flag.** `LspClient._proved` holds one key per sentinel
   that has answered — `LspClient.ProofKey`, the project's own directory, or the candidates for
