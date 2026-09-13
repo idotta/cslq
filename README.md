@@ -437,9 +437,9 @@ elsewhere, unlike `--tfm`, which is rejected where it would filter nothing), `--
 
 The 180 s default is not enough for a very large solution: a 227-project tree (OrchardCore)
 took 7 m 25 s to load cold on one Windows machine on 2026-09-13, and until the load finishes
-every command fails with `the workspace is still loading`. Raise `--timeout` at that scale —
-the first call pays it, and a session then answers the rest out of the workspace it is already
-holding.
+every command that needs a workspace fails with `the workspace is still loading`. Raise
+`--timeout` at that scale — the first call pays it, and a session then answers the rest out of
+the workspace it is already holding.
 
 **Options may appear anywhere** — before the command, between the command and its argument, or
 after both — the way every other `dotnet` CLI takes them. The set is closed and each member is
