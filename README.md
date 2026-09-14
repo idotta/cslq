@@ -11,9 +11,13 @@ Two constraints drive the design:
 1. **Official tooling only.** The C#-specific component in the query path is Microsoft-published.
 2. **Always current.** A weekly cron bumps the pin and a probe suite gates the bump.
 
-Status: **all five milestones done; `0.3.0` adds the background session on top of `0.2.0` and
-the eight fix batches behind it** (PRs #21-#28: readiness per project, symbol targeting,
-multi-targeted contexts, and one rule for non-answers and usage errors). Eleven commands —
+Status: **all five milestones done; `0.3.1` is a patch on `0.3.0`**, which added the background
+session on top of `0.2.0` and the eight fix batches behind it (PRs #21-#28: readiness per
+project, symbol targeting, multi-targeted contexts, and one rule for non-answers and usage
+errors). `0.3.1` makes a warm session's calls — successes and readiness failures alike — answer
+in milliseconds rather than seconds, adds a `missing` flag to `--json` location rows for a hit
+whose file has been deleted, and names `cslq session stop` when a session's inferred sentinel
+has gone stale. Eleven commands —
 `ready`, `refs`, `def`, `impl`, `hover`, `sym`, `outline`, `diag`, `project`, `restore` and
 `session` — over a cross-project fixture with source-generated, non-ASCII, metadata and
 deliberate-error cases; a session holding the loaded workspace open between calls, so a warm
