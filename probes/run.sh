@@ -272,6 +272,11 @@ log "source-generator staleness"
 greeter=fixture/Core/Greeter.cs
 greeter_saved=$(mktemp)
 cp "$greeter" "$greeter_saved"
+# Saved here rather than beside the leg that breaks it, so one EXIT hook covers both edits:
+# an interrupt between the break and the repair must not leave the fixture uncompilable.
+party=fixture/Core/Party.cs
+party_saved=$(mktemp)
+cp "$party" "$party_saved"
 # One EXIT hook for the whole run. The rename below has to be undone even on an interrupt --
 # see CLAUDE.md -- and the packaged-tool leg's throwaway tree is cleaned by the same hook.
 install_tmp=""
@@ -281,6 +286,8 @@ ts_tmp=""
 ec_tmp=""
 # Set only while the failed-design-time-build leg below has its pinned-SDK tree on disk.
 gj_tmp=""
+# Set only while the stale-sentinel leg below has its two-project tree on disk.
+ss_tmp=""
 # Set only while the native-vs-framework-dependent leg below has its AOT publish on disk.
 aot_tmp=""
 # Set only while the restore leg below has the tool resolver cache entry moved aside. Leaving
@@ -310,10 +317,13 @@ cleanup() {
   kill_sessions
   cp "$greeter_saved" "$greeter"
   rm -f "$greeter_saved"
+  cp "$party_saved" "$party"
+  rm -f "$party_saved"
   [ -n "$install_tmp" ] && rm -rf "$install_tmp"
   [ -n "$ts_tmp" ] && rm -rf "$ts_tmp"
   [ -n "$ec_tmp" ] && rm -rf "$ec_tmp"
   [ -n "$gj_tmp" ] && rm -rf "$gj_tmp"
+  [ -n "$ss_tmp" ] && rm -rf "$ss_tmp"
   [ -n "$aot_tmp" ] && rm -rf "$aot_tmp"
   # The restore writes a fresh entry; the saved one is the developer's, and it covers every
   # manifest on the machine rather than only this repository's.
@@ -604,6 +614,67 @@ cp "$greeter_saved" "$greeter"
 sd_leg session-sees-the-restore Greet present "string Greeter.Greet(string name)"
 sd_leg session-loses-the-edited-name Greeted absent
 rm -f "$sd_log"
+
+# The guarantee an agent actually relies on, which nothing in this suite asserted: a repository
+# with compile errors in it is not a degraded mode. Measured 2026-09-13 over seven break shapes
+# and ~60 queries -- a half-written body, an unbalanced brace, a missing using, a half-finished
+# rename, a new file, two deletions -- every query outside the break answered, and every query
+# at it was exit 1 rather than a stale hit. A break that took the workspace down fails leg 1,
+# which is about a different project entirely.
+#
+# Warm calls on the session the legs above already loaded, so ~2s all told, and the repair is
+# asserted rather than assumed: a session answering leg 1 out of the text it read before the
+# break would pass leg 1 and fail leg 4.
+log "broken source still answers"
+bs_log=$(mktemp)
+bs_ok=1
+bs_call() {
+  "$CSLQ" "$@" --root fixture > "$bs_log" 2>&1
+  bs_rc=$?
+  bs_out=$(cat "$bs_log")
+}
+bs_want() {
+  [ "$bs_rc" = "$1" ] || { bs_ok=0; printf '      wanted exit %s, got %s\n' "$1" "$bs_rc"; }
+  shift
+  for bs_need in "$@"; do
+    case "$bs_out" in
+      *"$bs_need"*) ;;
+      *)
+        bs_ok=0
+        printf '      wanted %s in:\n' "$bs_need"
+        printf '%s\n' "$bs_out" | sed 's/^/      | /'
+        ;;
+    esac
+  done
+}
+
+# A method whose body is half written, the way a file looks between two keystrokes. The braces
+# stay balanced so the break is a compile error rather than a reparented file: the unbalanced
+# shape is covered by the same measurement, and it renders as nesting, which is a different
+# assertion.
+printf '\npublic static class Half\n{\n    public static int Bad() { var x = ; return x; }\n}\n' >> "$party"
+
+bs_call refs Greet
+bs_want 0 "Core/Greeter.cs:" "App/Program.cs:"
+bs_call outline Core/Party.cs
+bs_want 0 "Party"
+# A compiler code, not a count: the analyzer rows on this file drift with the SDK.
+bs_call diag Core/Party.cs
+bs_want 0 "CS1525"
+
+cp "$party_saved" "$party"
+bs_call refs Greet
+bs_want 0 "Core/Greeter.cs:" "App/Program.cs:"
+rm -f "$bs_log"
+
+if [ "$bs_ok" = 1 ]; then
+  printf 'PASS  %s\n' "broken-syntax-still-answers-elsewhere"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (a syntax error in one file changed what the rest of the workspace answers)\n' \
+    "broken-syntax-still-answers-elsewhere"
+  fail=$((fail + 1))
+fi
 
 # The other half of a living session: the workspace shape itself can change under it. Roslyn's
 # file watcher keeps ordinary .cs edits inside a loaded project current; nothing keeps the
@@ -1180,6 +1251,100 @@ else
   printf '%s\n' "$ecw_out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
+
+# The same failure reached by ordinary editing rather than by a #if false branch: a session
+# infers its sentinels once per attach, and a .cs edit neither re-attaches it nor changes the
+# solution signature -- so an edit that removes a not-yet-proved project's only candidate makes
+# every later call in that session fail, naming a type that is now nowhere on disk. Two things
+# are asserted and the second is the one a probe row could not reach:
+#
+#   * the message says the sentinel was inferred before the edit and names the lever, because
+#     the reader's first move is to grep for the name and find nothing;
+#   * it fails in seconds. A per-call grace stamp buys each warm call a fresh 20 s of waiting
+#     for something that already failed -- measured 2026-09-13, 1 404 ms warm against 21 831 ms
+#     cold on this shape.
+#
+# The rename must NOT preserve the prefix. workspace/symbol prefix-matches, so renaming Beacon
+# to BeaconRenamed leaves the stale candidate resolving to the new type and readiness green --
+# the leg would pass having staged nothing. One type in one file, because the fixture's
+# projects declare several and the shape needs a project with exactly one candidate to lose.
+ss_tmp=$(mktemp -d)
+mkdir -p "$ss_tmp/A" "$ss_tmp/B"
+printf '<Solution>
+  <Project Path="A/A.csproj" />
+  <Project Path="B/B.csproj" />
+</Solution>
+'   > "$ss_tmp/Two.slnx"
+for proj in A B; do
+  printf '<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+'     > "$ss_tmp/$proj/$proj.csproj"
+done
+printf 'namespace A;
+
+public class Real { }
+' > "$ss_tmp/A/Real.cs"
+printf 'namespace B;
+
+public class Beacon { }
+' > "$ss_tmp/B/Beacon.cs"
+dotnet restore "$ss_tmp/Two.slnx" --nologo -v q > /dev/null 2>&1
+ss_abs=$( cd "$ss_tmp" && { pwd -W 2>/dev/null || pwd; } )
+
+ss_pipe="$SESSION_PREFIX-stale-sentinel"
+# --timeout 0 concludes after a single round, so this caches the session's inferred set off the
+# intact text and proves nothing about the workspace, which is exactly the state wanted.
+CSLQ_SESSION_PIPE_NAME="$ss_pipe" "$CSLQ" ready --root "$ss_abs" --no-daemon --timeout 0 > /dev/null 2>&1
+# perl for the reason the rename above uses it: BSD sed has neither -i without a suffix nor \b.
+perl -pi -e 's/\bBeacon\b/Zeta/g' "$ss_tmp/B/Beacon.cs"
+# Into files rather than through $(...), like every other leg that talks to a session: a
+# capturing parent is the shape the inherited-handle trap lives in, and it cost ~62 s a call
+# off Windows.
+ss_cold_log=$(mktemp)
+ss_log=$(mktemp)
+# The load has to finish before the warm call can mean anything: this one runs out the
+# post-notification grace, the way the cold leg above does, so the call being timed starts with
+# the notification already well behind it.
+CSLQ_SESSION_PIPE_NAME="$ss_pipe" "$CSLQ" ready --root "$ss_abs" --no-daemon --timeout 60 \
+  > "$ss_cold_log" 2>&1
+
+ss_start=$(date +%s)
+CSLQ_SESSION_PIPE_NAME="$ss_pipe" "$CSLQ" hover Real --root "$ss_abs" --no-daemon --timeout 45 \
+  > "$ss_log" 2>&1
+ss_rc=$?
+ss_elapsed=$(( $(date +%s) - ss_start ))
+ss_out=$(cat "$ss_log")
+CSLQ_SESSION_PIPE_NAME="$ss_pipe" "$CSLQ" session stop --root "$ss_abs" --no-daemon > /dev/null 2>&1
+rm -rf "$ss_tmp"
+ss_tmp=""
+
+ok=1
+[ "$ss_rc" = 1 ] || ok=0
+[ "$ss_elapsed" -lt 10 ] || ok=0
+# A query about A, which loaded: the failure is the other project's sentinel, and that is the
+# half that makes the stale line worth printing.
+for want in "returned no symbols for project" "was inferred when this session attached" "session stop --root"; do
+  case "$ss_out" in
+    *"$want"*) ;;
+    *) ok=0 ;;
+  esac
+done
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s (%ss)\n' "stale-inferred-sentinel-fails-at-once-when-warm" "$ss_elapsed"
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s after %ss, wanted 1 under 10s naming the stale sentinel)\n' \
+    "stale-inferred-sentinel-fails-at-once-when-warm" "$ss_rc" "$ss_elapsed"
+  printf '      load:\n'
+  sed 's/^/      | /' "$ss_cold_log"
+  printf '      warm:\n'
+  sed 's/^/      | /' "$ss_log"
+  fail=$((fail + 1))
+fi
+rm -f "$ss_cold_log" "$ss_log"
 
 # A design-time build that cannot run at all: a `global.json` pinning an SDK nobody has
 # installed. Testers measured 181.7 s and a message naming neither global.json, the SDK nor

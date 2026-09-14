@@ -395,6 +395,45 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   is the gate, and it matters in both directions: a generated document would read as *deleted*
   (`PathUri.ToPath` answers a confident `/BuildInfo.g.cs` for one) and a decompiled one would
   cost a stat per request for an answer no edit can change.
+- **A repository that does not compile is not a degraded mode, and the two edges of that are
+  both a second wide.** Measured 2026-09-13 over seven staged break shapes and ~60 queries
+  through live sessions — a half-written body, an unbalanced brace, a missing `using`, a
+  half-finished cross-project rename, a new file, two deletions and an eleven-step interleaved
+  loop: every query outside the break answered, every query at it was exit 1 rather than a
+  stale hit, and 100+ rendered context rows re-read off disk at the moment they printed had
+  zero text mismatches. `outline` reports the nesting the broken text parses to and `diag`
+  reports the errors; neither is a fallback. Nothing in the suite asserted any of it until
+  `broken-syntax-still-answers-elsewhere`, which breaks `fixture/Core/Party.cs` through the
+  shared session and asserts a `refs` in two *other* projects, the outline, a `CS1525` and the
+  repair. It is inside the shared-session region on purpose — four warm calls, ~2 s — and its
+  edit is restored by the same EXIT trap as the `Greeter.cs` rename, so `git diff fixture/`
+  is still the first thing to check after an interrupted run. Two edges came out of the same
+  measurement:
+  - **A session's inferred sentinels are the text as it was at attach, and a `.cs` edit does
+    not re-attach it.** Remove a not-yet-proved project's only candidate and *every* call in
+    that session fails — including calls about a different project — naming a type that is now
+    nowhere on disk, so the reader's first move, a grep for it, explains nothing. The fix is
+    the message and nothing else: `Readiness.Message` gets a line saying the sentinel was
+    inferred at attach and naming `cslq session stop`, computed by re-running
+    `Program.InferSentinels` **on the failure path only**, the `Diagnosis.Cause` precedent —
+    re-inferring on the request path is the directory walk #42 deliberately took off it, and
+    would be a design change rather than a bug fix. `LspClient.Stale` is the predicate and
+    `StaleSentinelTests` pins it. The leg is
+    `stale-inferred-sentinel-fails-at-once-when-warm`, and its **rename must not preserve the
+    prefix**: `workspace/symbol` prefix-matches, so `Beacon` → `BeaconRenamed` leaves the stale
+    candidate resolving and readiness green, and the leg would pass having staged nothing.
+    Measured on that shape, `Beacon` → `Zeta`: 1 404 ms warm against 21 831 ms cold, which is
+    why the elapsed bound is the real assertion.
+  - **A location whose file was deleted a second ago still renders, and used to render as a
+    bare header at exit 0.** Roslyn's file watcher and the next request race: 1 occurrence in 4
+    attempts, window under 1.5 s, `Core/Extra.cs:3:21` with no context rows under it and
+    nothing saying why. `Output.WriteLocationsAsync` marks the header `(no longer on disk)`
+    and sets a `missing` boolean on every `--json` row — a row key, so it is always present,
+    where the omit-rather-than-null rule in DESIGN.md governs *envelope* keys. The file check
+    is asked only when the read came back with no lines, so the happy path pays no `stat`; an
+    empty file and an undecodable one answer no lines too and are on disk, which is why it
+    cannot be a count of lines, and `Staleness.HasFile` keeps the generated and decompiled
+    URIs that legitimately have no file out of it.
 - **`cases.jsonl` order is load-bearing for the `diag` cases, invisibly.** `run.sh` scopes one
   daemon for the whole suite and derives one session name per root, and the client that holds
   the open documents is now the session rather than the process the row launched — so the

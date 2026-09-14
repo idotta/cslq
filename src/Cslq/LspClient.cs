@@ -521,7 +521,50 @@ internal sealed partial class LspClient : IAsyncDisposable
             [.. unprobed.Select(Name)],
             [.. linked.Select(Name)],
             cause,
-            StderrTail())));
+            StderrTail(),
+            StaleSubjects(pending),
+            Root)));
+    }
+
+    /// <summary>
+    /// Which of the sentinels that failed were inferred from source that has since changed,
+    /// named for the message. Re-inference on the failure path only — the run has already
+    /// spent its whole <c>--timeout</c> here, while on the request path it is the directory
+    /// walk a session exists not to repeat — and best effort: a tree that no longer infers at
+    /// all (a solution deleted mid-session, say) has its own failure to report elsewhere and
+    /// must not replace the readiness one with it.
+    /// </summary>
+    private IReadOnlyList<string> StaleSubjects(IReadOnlyList<Sentinel> pending)
+    {
+        try
+        {
+            var fresh = Program.InferSentinels(Root);
+            return [.. pending.Where(s => Stale(s, fresh)).Select(Subject)];
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Whether a held sentinel is one the disk no longer produces: its project is gone, or the
+    /// candidates its sources declare are not the ones being asked for. An explicit
+    /// <c>--sentinel</c> is never stale — it came from the command line rather than from a
+    /// scan, so no edit can invalidate it, and saying otherwise would send the reader to look
+    /// for a change in a name they typed themselves.
+    /// <para>
+    /// The candidate lists are compared in order, because that is the order
+    /// <c>ResolvesAsync</c> asks them in: a project whose first candidate moved to a second
+    /// file is asking for something different even though the set is unchanged.
+    /// </para>
+    /// </summary>
+    internal static bool Stale(Sentinel held, IReadOnlyList<Sentinel> fresh)
+    {
+        if (held.Explicit) return false;
+
+        var now = fresh.FirstOrDefault(f => ProofKey(f) == ProofKey(held));
+        return now is null || !now.Candidates.SequenceEqual(held.Candidates, StringComparer.Ordinal);
     }
 
     /// <summary>

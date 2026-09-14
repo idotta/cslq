@@ -62,6 +62,10 @@ The server restores as part of its design-time build — measured on a never-res
 ready in 7 s. What it cannot do is tell you when that restore *failed*: every project then
 loads empty, and `dotnet restore` is what names the package.
 
+Compile errors in your own source are not a problem and need no preparation: the workspace
+loads, every symbol outside the broken region still resolves, and `cslq diag` is how you read
+the errors. Only a failed *restore* or design-time build leaves projects empty.
+
 `--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
 that solution lists. A root with no solution at its top is an error, reported in about a second
 rather than after the timeout, and a solution one directory down does not count.

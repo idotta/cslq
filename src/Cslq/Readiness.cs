@@ -23,6 +23,16 @@ internal static class Readiness
     /// </summary>
     internal readonly record struct Unresolved(string Subject, IReadOnlyList<string> Candidates);
 
+    /// <param name="Stale">
+    /// The subjects whose candidate sentinel no longer matches what the disk says, rendered
+    /// the way <paramref name="Pending"/>'s are. A session infers its sentinels once per
+    /// attach and a <c>.cs</c> edit does not re-attach it, so an edit that removes a
+    /// not-yet-proved project's only candidate fails every later call in that session with a
+    /// message naming a type that no longer exists anywhere — the reader's first move, a grep
+    /// for it, then explains nothing. Computed on the failure path alone, where the run has
+    /// already spent its whole timeout, exactly as <see cref="Diagnosis.Cause"/> is: the
+    /// answer is a directory walk, and #42 took that off the request path deliberately.
+    /// </param>
     internal sealed record Failure(
         TimeSpan Timeout,
         bool Fired,
@@ -30,7 +40,9 @@ internal static class Readiness
         IReadOnlyList<string> Unprobed,
         IReadOnlyList<string> Linked,
         string? Cause = null,
-        string? StderrTail = null);
+        string? StderrTail = null,
+        IReadOnlyList<string>? Stale = null,
+        string? Root = null);
 
     /// <summary>
     /// Whether every project that could be probed came back empty. With the load finished,
@@ -52,6 +64,16 @@ internal static class Readiness
         foreach (var (subject, candidates) in f.Pending)
         {
             lines.Add($"  sentinel query {Quote(candidates)} returned no symbols for {subject}");
+        }
+
+        // Said after the sentinels it is about, because it explains a name the reader has just
+        // been handed and cannot find anywhere on disk.
+        if (f.Stale is { Count: > 0 } stale)
+        {
+            lines.Add(
+                $"  the sentinel for {string.Join(", ", stale)} was inferred when this session "
+                + "attached and the source has changed since, so the name above may no longer "
+                + $"exist; 'cslq session stop --root {f.Root}' re-infers it");
         }
 
         if (f.Unprobed.Count > 0)

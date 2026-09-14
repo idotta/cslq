@@ -125,6 +125,40 @@ public class ReadinessMessageTests
         Assert.DoesNotContain("for project explicit", message);
     }
 
+    /// <summary>
+    /// The stale-sentinel line, said after the sentinel it explains: the reader has just been
+    /// handed a name that is nowhere on disk, and the only thing that makes sense of it is
+    /// that the session inferred it before the edit. It names the lever the way the
+    /// still-loading headline names <c>--timeout</c>.
+    /// </summary>
+    [Fact]
+    public void A_stale_sentinel_says_the_session_inferred_it_before_the_edit()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(45),
+            Fired: true,
+            [Pending("Lone", "LoneBeacon")],
+            [],
+            [],
+            Stale: ["project Lone"],
+            Root: "/w"));
+
+        var lines = message.Split('\n');
+        Assert.Contains("returned no symbols for project Lone", lines[1]);
+        Assert.Contains("was inferred when this session attached", lines[2]);
+        Assert.Contains("cslq session stop --root /w", lines[2]);
+    }
+
+    /// <summary>Nothing is said when nothing changed, which is every ordinary failure.</summary>
+    [Fact]
+    public void An_unchanged_tree_says_nothing_about_staleness()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(45), Fired: true, [Pending("B", "Ghost")], [], [], Stale: [], Root: "/w"));
+
+        Assert.DoesNotContain("session stop", message);
+    }
+
     [Theory]
     [InlineData(0, 0, false)]
     [InlineData(1, 3, false)]
