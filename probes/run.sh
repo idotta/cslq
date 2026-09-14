@@ -1136,7 +1136,6 @@ case "${aot_rid:-unparsed}" in
       "$CSLQ" ready --root "$root_abs/fixture" --timeout 300 --no-daemon --no-session \
       > "$cc_log" 2>&1 &
     cc_pid=$!
-    set +m
     # The server it spawns is the signal that it is genuinely working; polled rather than slept
     # for, since the load costs seconds here and rather more on a cold runner.
     cc_up=0
@@ -1158,6 +1157,12 @@ case "${aot_rid:-unparsed}" in
       rc=0
       cc_elapsed=-1
     fi
+    # Only once the job has been reaped. Turning job control off while it is still running is
+    # what turned macos red on the first release run: bash reported `Hangup: 1` against the
+    # backgrounded call and the leg saw exit 129 at 0 s with no output -- the interrupt under
+    # test never happened. It is a race rather than a rule, since the same leg passed on macos
+    # the run before, so the toggle is kept away from the live job entirely.
+    set +m
     out=$(cat "$cc_log")
     ok=1
     [ "$cc_up" = 1 ] || ok=0
