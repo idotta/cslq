@@ -198,9 +198,11 @@ context-independent and the other two name no document, so there is nothing to c
 Under `--json`: `contexts` on the envelope is how many contexts the document has; `tfm` on the
 envelope is the one that answered, and is **absent** rather than null where no single context did
 — which is every union. `outline` and `diag` rows carry a per-row `tfm` that is null when every
-context asked has that row. Every location row carries `generated`, `metadata` and `external`
-booleans, so the label prefix never has to be parsed off `path`. `diag` rows carry no `source`:
-this server never sends one.
+context asked has that row. Every location row carries `generated`, `metadata`, `external` and
+`missing` booleans, so the label prefix never has to be parsed off `path`. `missing` is the
+`(no longer on disk)` of the text mode — a hit whose file has been deleted since Roslyn last saw
+it — and all four are always present rather than appearing only when true. `diag` rows carry no
+`source`: this server never sends one.
 
 ## Other options
 
@@ -211,7 +213,9 @@ raising it means `--no-daemon` or a daemon that has expired.
 `--no-session` loads the workspace in the calling process instead of asking the background
 session. It is what you want when you are measuring a cold load, or when a session would hold a
 root you are about to delete or rewrite; it is not a fix for a wrong answer, since a session
-re-reads every file that changed before it answers.
+re-reads every file that changed before it answers. The one piece of session state a file edit
+does *not* refresh is the sentinels inferred at attach, and `cslq session stop` rather than
+`--no-session` is the answer to that — see the stale-sentinel failure above.
 
 `--sentinel` does not speed a run up. By default `cslq` waits for every project under the root to
 load, one probe per project the root's solution lists; a root holding no solution, or two of
@@ -250,6 +254,18 @@ for.
    the solution loaded and compiled nothing, which is a failed design-time build, and the
    `cause:` line under it names what `cslq` found — an SDK a `global.json` pins but nobody has
    installed, or a restore that did not succeed. Fix that, not the query.
+   The 180 s default is generous for an ordinary solution and far too small for a very large
+   one: a 227-project tree measured 7 m 25 s to load cold, and until that finishes every command
+   needing a workspace answers with the same line. At that scale raise `--timeout` well past the
+   default on the *first* call; the session then answers the rest out of the workspace it holds.
+   A failure that arrives *fast* against a warm session means something else — the load already
+   finished and the sentinel will not answer — so do not raise the timeout for that one.
+   A third wording names a stale sentinel: *"the sentinel for project X was inferred when this
+   session attached and the source has changed since … `cslq session stop --root <root>`"*. It
+   names the root for you. A session infers its readiness probes once, at attach, and editing a
+   `.cs` does not re-attach it, so deleting or renaming a not-yet-proved project's only type
+   declaration fails **every** call in that session — including calls about other projects —
+   while naming a type that is now nowhere on disk. Do not grep for that name; run the `cslq session stop` the message prints, then re-run.
 7. **A non-Latin identifier may not be findable by name.** A CJK name was measured answering
    nothing to `refs` and `sym` while the same declaration answered correctly by `file:line:col`;
    accented Latin and ligatures were fine, and Cyrillic and Greek were never tried. The cause is
