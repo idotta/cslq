@@ -1122,10 +1122,21 @@ case "${aot_rid:-unparsed}" in
     # Interrupted mid-work rather than mid-teardown, and --no-daemon --no-session so the run
     # owns the server it launches rather than borrowing the gate's. The 300 s timeout is what
     # makes the elapsed bound below mean anything.
+    #
+    # `set -m` is load-bearing and its absence is silent. POSIX has a non-interactive shell
+    # with job control off set SIGINT to SIG_IGN for every background command, and .NET
+    # preserves an inherited ignore rather than overriding it -- so the leg's own launch
+    # disarmed the signal it then sent, and `ready` ran to completion at exit 0 while the leg
+    # reported a handler that had never fired. Measured under WSL against this binary:
+    # `SigIgn` carries 0x2 for a plain `&` and nothing under `set -m`, and the same call goes
+    # from exit 0 after 5 s to exit 130 in under one. Job control also puts the child in a
+    # process group of its own, which is the shape the Windows half asks CreateProcessW for.
+    set -m
     CSLQ_SESSION_PIPE_NAME="$cc_pipe" \
       "$CSLQ" ready --root "$root_abs/fixture" --timeout 300 --no-daemon --no-session \
       > "$cc_log" 2>&1 &
     cc_pid=$!
+    set +m
     # The server it spawns is the signal that it is genuinely working; polled rather than slept
     # for, since the load costs seconds here and rather more on a cold runner.
     cc_up=0
