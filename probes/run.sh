@@ -1291,7 +1291,12 @@ printf 'namespace B;
 
 public class Beacon { }
 ' > "$ss_tmp/B/Beacon.cs"
-dotnet restore "$ss_tmp/Two.slnx" --nologo -v q > /dev/null 2>&1
+# The status is the point, unlike the restore above: a restore that failed leaves every
+# project loading empty, every sentinel then returns no symbols, and a failed call is a fast
+# call -- so this leg would go green having staged nothing at all.
+ss_restore_log=$(mktemp)
+dotnet restore "$ss_tmp/Two.slnx" --nologo -v q > "$ss_restore_log" 2>&1
+ss_restore_rc=$?
 ss_abs=$( cd "$ss_tmp" && { pwd -W 2>/dev/null || pwd; } )
 
 ss_pipe="$SESSION_PREFIX-stale-sentinel"
@@ -1332,7 +1337,12 @@ for want in "returned no symbols for project" "was inferred when this session at
     *) ok=0 ;;
   esac
 done
-if [ "$ok" = 1 ]; then
+if [ "$ss_restore_rc" != 0 ]; then
+  printf 'FAIL  %s (dotnet restore on the staged tree exited %s, so nothing under it loads)\n' \
+    "stale-inferred-sentinel-fails-at-once-when-warm" "$ss_restore_rc"
+  sed 's/^/      | /' "$ss_restore_log"
+  fail=$((fail + 1))
+elif [ "$ok" = 1 ]; then
   printf 'PASS  %s (%ss)\n' "stale-inferred-sentinel-fails-at-once-when-warm" "$ss_elapsed"
   pass=$((pass + 1))
 else
@@ -1344,7 +1354,7 @@ else
   sed 's/^/      | /' "$ss_log"
   fail=$((fail + 1))
 fi
-rm -f "$ss_cold_log" "$ss_log"
+rm -f "$ss_cold_log" "$ss_log" "$ss_restore_log"
 
 # A design-time build that cannot run at all: a `global.json` pinning an SDK nobody has
 # installed. Testers measured 181.7 s and a message naming neither global.json, the SDK nor

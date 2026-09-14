@@ -239,10 +239,11 @@ for.
    **A compile error is not the explanation.** Measured 2026-09-13 over seven break shapes and
    ~60 queries through one session: a half-written body, an unbalanced brace, a missing `using`,
    a half-finished rename, a new file and two deletions each left every query outside the break
-   answering correctly, and every query at the break exit 1 rather than stale. The two windows
-   worth knowing are both about a second wide and both self-correct: a file you have just
-   written is not visible yet, and a file you have just deleted can still be named by a hit —
-   whose header then says `(no longer on disk)`.
+   answering correctly, and a symbol query at the identifier that no longer binds exit 1 `no
+   results` rather than a stale hit — while `outline` and `diag` still answer for that file.
+   The two windows worth knowing are both about a second wide and both self-correct: a file
+   you have just written is not visible yet, and a file you have just deleted can still be
+   named by a hit — whose header then says `(no longer on disk)`.
 6. **Read the readiness failure; it names what it found.** *"the workspace is still loading …
    Raise --timeout"* means exactly that — the load had not finished inside the deadline, and the
    only lever is a larger `--timeout`. *"every probed project answered empty"* is the other one:

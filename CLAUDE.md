@@ -399,15 +399,17 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   both a second wide.** Measured 2026-09-13 over seven staged break shapes and ~60 queries
   through live sessions — a half-written body, an unbalanced brace, a missing `using`, a
   half-finished cross-project rename, a new file, two deletions and an eleven-step interleaved
-  loop: every query outside the break answered, every query at it was exit 1 rather than a
-  stale hit, and 100+ rendered context rows re-read off disk at the moment they printed had
-  zero text mismatches. `outline` reports the nesting the broken text parses to and `diag`
-  reports the errors; neither is a fallback. Nothing in the suite asserted any of it until
-  `broken-syntax-still-answers-elsewhere`, which breaks `fixture/Core/Party.cs` through the
-  shared session and asserts a `refs` in two *other* projects, the outline, a `CS1525` and the
-  repair. It is inside the shared-session region on purpose — four warm calls, ~2 s — and its
-  edit is restored by the same EXIT trap as the `Greeter.cs` rename, so `git diff fixture/`
-  is still the first thing to check after an interrupted run. Two edges came out of the same
+  loop: every query outside the break answered, a symbol query at the identifier that no
+  longer binds was exit 1 rather than a stale hit, and 100+ rendered context rows re-read off
+  disk at the moment they printed had zero text mismatches. The broken file is not written
+  off — `outline` reports the nesting the broken text parses to, `diag` reports the errors,
+  and a symbol elsewhere on the same line still resolves; none of the three is a fallback.
+  Nothing in the suite asserted any of it until `broken-syntax-still-answers-elsewhere`, which
+  breaks `fixture/Core/Party.cs` through the shared session and asserts a `refs` in two *other*
+  projects, the outline, a `CS1525` and the repair. It is inside the shared-session region on
+  purpose — four warm calls, ~2 s — and its edit is restored by the same EXIT trap as the
+  `Greeter.cs` rename, so `git diff fixture/` is still the first thing to check after an
+  interrupted run. Two edges came out of the same
   measurement:
   - **A session's inferred sentinels are the text as it was at attach, and a `.cs` edit does
     not re-attach it.** Remove a not-yet-proved project's only candidate and *every* call in

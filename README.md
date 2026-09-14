@@ -173,12 +173,14 @@ A tree that does not **compile** is a different matter from one that does not re
 needs nothing from you. Roslyn loads a workspace with compile errors in it and answers from it:
 measured 2026-09-13 on the fixture, with a half-written method body, an unbalanced brace, a
 missing `using`, a half-finished cross-project rename and a deleted file staged in turn through
-one session, every query outside the break answered correctly and every query at the break was
-exit 1 rather than a stale hit — `outline` reports the nesting the broken text actually parses
-to, and `diag` reports the errors. Editing and querying interleave freely: a line-shifting edit
-moves the positions `cslq` reports on the next call, and a new `.cs` file becomes queryable in
-about a second without a re-attach. The failure that does leave every project empty is a
-design-time build that fails, which is the row further down.
+one session, every query outside the break answered correctly, and a symbol query at the
+identifier that no longer binds — `hover` on an `IShape` whose `using` had been deleted — was
+exit 1 `no results` rather than a stale hit. The broken file itself still answers: `outline`
+reports the nesting the broken text actually parses to, `diag` reports the errors, and a symbol
+elsewhere on the same line still resolves. Editing and querying interleave freely: a
+line-shifting edit moves the positions `cslq` reports on the next call, and a new `.cs` file
+becomes queryable in about a second without a re-attach. The failure that does leave every
+project empty is a design-time build that fails, which is the row further down.
 
 `--root` must be **the directory holding the `.sln` or `.slnx`** — `cslq` loads the projects
 that solution lists. A root with no solution at its top is an error, reported in about a second

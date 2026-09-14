@@ -1317,12 +1317,20 @@ public class OutputTests
     [Fact]
     public async Task A_location_whose_file_is_gone_says_so_in_the_header()
     {
-        var uri = PathUri.FromPath(Path.Combine(Path.GetTempPath(), "cslq-vanished", "Extra.cs"));
+        var directory = Directory.CreateTempSubdirectory("cslq-vanished");
+        try
+        {
+            var uri = PathUri.FromPath(Path.Combine(directory.FullName, "Extra.cs"));
 
-        var text = await CaptureAsync(() => Output.WriteLocationsAsync(
-            Path.Combine(Path.GetTempPath(), "cslq-vanished"), [Loc(uri, 3, 21)], 50, 1, json: false, NoLines));
+            var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+                directory.FullName, [Loc(uri, 3, 21)], 50, 1, json: false, NoLines));
 
-        Assert.Contains("Extra.cs:3:21  (no longer on disk)", text, StringComparison.Ordinal);
+            Assert.Contains("Extra.cs:3:21  (no longer on disk)", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     /// <summary>
@@ -1365,16 +1373,27 @@ public class OutputTests
     [Fact]
     public async Task The_json_row_carries_missing_on_every_row()
     {
-        var gone = PathUri.FromPath(Path.Combine(Path.GetTempPath(), "cslq-vanished", "Extra.cs"));
+        // A directory of this run's own, holding a file that is never created: the path has to
+        // be one nothing else can leave behind, or a stale fixture fails the test with no
+        // defect behind it.
+        var directory = Directory.CreateTempSubdirectory("cslq-vanished");
+        try
+        {
+            var gone = PathUri.FromPath(Path.Combine(directory.FullName, "Extra.cs"));
 
-        var json = JsonDocument.Parse(await CaptureAsync(() => Output.WriteLocationsAsync(
-            Root, [Loc(gone, 3, 21), Loc(Uri("App/Square.cs"), 2, 22)], 50, 0, json: true, Mixed(gone))))
-            .RootElement;
+            var json = JsonDocument.Parse(await CaptureAsync(() => Output.WriteLocationsAsync(
+                Root, [Loc(gone, 3, 21), Loc(Uri("App/Square.cs"), 2, 22)], 50, 0, json: true, Mixed(gone))))
+                .RootElement;
 
-        var rows = json.GetProperty("results").EnumerateArray().ToList();
-        Assert.Equal(2, rows.Count);
-        Assert.Single(rows, r => r.GetProperty("missing").GetBoolean());
-        Assert.All(rows, r => Assert.True(r.TryGetProperty("missing", out _)));
+            var rows = json.GetProperty("results").EnumerateArray().ToList();
+            Assert.Equal(2, rows.Count);
+            Assert.Single(rows, r => r.GetProperty("missing").GetBoolean());
+            Assert.All(rows, r => Assert.True(r.TryGetProperty("missing", out _)));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     /// <summary>A generated document has no file and must never be marked as having lost one.</summary>
