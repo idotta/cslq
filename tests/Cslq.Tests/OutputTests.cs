@@ -1309,6 +1309,117 @@ public class OutputTests
     }
 
     /// <summary>
+    /// Roslyn keeps answering for a document for about a second after the file is deleted, so
+    /// a hit can name a path that is not there — measured 2026-09-13, an <c>impl</c> one call
+    /// after <c>rm</c> printed the header at exit 0 with no context rows under it. The header
+    /// says so now; a bare header with nothing beneath it is the silent half of the defect.
+    /// </summary>
+    [Fact]
+    public async Task A_location_whose_file_is_gone_says_so_in_the_header()
+    {
+        var directory = Directory.CreateTempSubdirectory("cslq-vanished");
+        try
+        {
+            var uri = PathUri.FromPath(Path.Combine(directory.FullName, "Extra.cs"));
+
+            var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+                directory.FullName, [Loc(uri, 3, 21)], 50, 1, json: false, NoLines));
+
+            Assert.Contains("Extra.cs:3:21  (no longer on disk)", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// And a file that is on disk is never marked, however few lines came back: an empty file
+    /// and one whose bytes would not decode both answer no lines, which is why the check is a
+    /// file check and not a count.
+    /// </summary>
+    [Fact]
+    public async Task A_file_that_is_there_is_not_marked_when_it_has_no_lines()
+    {
+        var directory = Directory.CreateTempSubdirectory("cslq-empty-file");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "Empty.cs");
+            File.WriteAllText(path, string.Empty);
+
+            var text = await CaptureAsync(() => Output.WriteLocationsAsync(
+                directory.FullName,
+                [Loc(PathUri.FromPath(path), 1, 1)],
+                50,
+                1,
+                json: false,
+                NoLines));
+
+            Assert.Contains("Empty.cs:1:1", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("no longer on disk", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The <c>--json</c> half. A fourth boolean beside <c>generated</c>, <c>metadata</c> and
+    /// <c>external</c>, present on every row: DESIGN.md's omit-rather-than-null rule governs
+    /// envelope keys, and row keys stay stable across the rows of one answer. <c>text</c> is
+    /// null on such a row as well, but an empty line answers null too, so it cannot carry it.
+    /// </summary>
+    [Fact]
+    public async Task The_json_row_carries_missing_on_every_row()
+    {
+        // A directory of this run's own, holding a file that is never created: the path has to
+        // be one nothing else can leave behind, or a stale fixture fails the test with no
+        // defect behind it.
+        var directory = Directory.CreateTempSubdirectory("cslq-vanished");
+        try
+        {
+            var gone = PathUri.FromPath(Path.Combine(directory.FullName, "Extra.cs"));
+
+            var json = JsonDocument.Parse(await CaptureAsync(() => Output.WriteLocationsAsync(
+                Root, [Loc(gone, 3, 21), Loc(Uri("App/Square.cs"), 2, 22)], 50, 0, json: true, Mixed(gone))))
+                .RootElement;
+
+            var rows = json.GetProperty("results").EnumerateArray().ToList();
+            Assert.Equal(2, rows.Count);
+            Assert.Single(rows, r => r.GetProperty("missing").GetBoolean());
+            Assert.All(rows, r => Assert.True(r.TryGetProperty("missing", out _)));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A generated document has no file and must never be marked as having lost one.</summary>
+    [Fact]
+    public async Task A_generated_document_with_no_text_is_not_marked_missing()
+    {
+        var uri = GeneratedUri("8d1e6a04-06c5-4f6d-9f1d-8b0e2a7c1234");
+
+        var json = JsonDocument.Parse(await CaptureAsync(
+            () => Output.WriteLocationsAsync(Root, [Loc(uri, 5)], 50, 0, json: true, NoLines))).RootElement;
+
+        Assert.False(json.GetProperty("results")[0].GetProperty("missing").GetBoolean());
+    }
+
+    /// <summary>Documents that answer no text at all, which is what a deleted file reads as.</summary>
+    private static readonly Documents NoLines = new(
+        _ => Task.FromResult<string[]>([]),
+        _ => Task.FromResult<string?>(null),
+        _ => Task.FromResult<string?>(null));
+
+    private static Documents Mixed(string empty) => new(
+        u => Task.FromResult<string[]>(u == empty ? [] : ["line one", "line two"]),
+        _ => Task.FromResult<string?>(null),
+        _ => Task.FromResult<string?>(null));
+
+    /// <summary>
     /// The two shapes the replay oracle cannot reach, pinned whole rather than probed key by
     /// key: <c>cslq restore</c> really restores and prunes the shared packages folder, so no
     /// capture of it can be replayed, and <c>session stop --json</c> is not a command the gate

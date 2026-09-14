@@ -110,6 +110,7 @@ internal static class Output
             var payload = new List<LocationRow>(shown.Count);
             foreach (var hit in shown)
             {
+                var text = await documents.Lines(hit.Uri);
                 payload.Add(new LocationRow(
                     hit.Display,
                     hit.Range.Start.Line + 1,
@@ -119,7 +120,8 @@ internal static class Output
                     PathUri.IsGenerated(hit.Uri),
                     PathUri.IsDecompiled(hit.Uri),
                     PathUri.IsExternal(root, hit.Uri),
-                    At(await documents.Lines(hit.Uri), hit.Range.Start.Line)?.TrimEnd()));
+                    Vanished(hit.Uri, text),
+                    At(text, hit.Range.Start.Line)?.TrimEnd()));
             }
 
             Console.WriteLine(JsonSerializer.Serialize(
@@ -141,9 +143,11 @@ internal static class Output
             first = false;
 
             var line = hit.Range.Start.Line;
-            Console.WriteLine($"{hit.Display}:{line + 1}:{hit.Range.Start.Character + 1}");
-
             var lines = await documents.Lines(hit.Uri);
+            var gone = Vanished(hit.Uri, lines) ? "  (no longer on disk)" : string.Empty;
+            Console.WriteLine(
+                $"{hit.Display}:{line + 1}:{hit.Range.Start.Character + 1}{gone}");
+
             var width = (line + 1 + context).ToString().Length;
             for (var i = Math.Max(0, line - context); i <= Math.Min(lines.Length - 1, line + context); i++)
             {
@@ -162,6 +166,25 @@ internal static class Output
 
         WriteContextNote(note, empty: false);
     }
+
+    /// <summary>
+    /// Whether an ordinary file location points at a file that is not there any more. Roslyn's
+    /// file watcher and the next request race after a delete, and for about a second the
+    /// server still answers for the document: measured 2026-09-13 on the fixture, an
+    /// <c>impl</c> one call after <c>rm</c> printed <c>Core/Extra.cs:3:21</c> at exit 0 with
+    /// no context rows under it — a row pointing at a file that does not exist, with nothing
+    /// saying so.
+    /// <para>
+    /// Asked only when the read came back with nothing, so the happy path pays no
+    /// <c>stat</c>: a hit whose context rows rendered has proved its own file. A file that is
+    /// merely empty, or one whose bytes would not decode, answers no lines too and is on disk,
+    /// which is the whole reason this is a file check rather than a count of lines.
+    /// <see cref="Staleness.HasFile"/> is the gate for the generated and decompiled URIs that
+    /// legitimately have no file behind them.
+    /// </para>
+    /// </summary>
+    private static bool Vanished(string uri, string[] lines) =>
+        lines.Length == 0 && Staleness.HasFile(uri) && !File.Exists(PathUri.ToPath(uri));
 
     /// <summary>
     /// The <c>{ count, truncated, results }</c> envelope, plus the keys a context-bound answer
@@ -1087,7 +1110,18 @@ internal sealed record Envelope<T>(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Contexts,
     IReadOnlyList<T> Results);
 
-/// <summary>A place to go: <c>refs</c>, <c>def</c> and <c>impl</c>.</summary>
+/// <summary>
+/// A place to go: <c>refs</c>, <c>def</c> and <c>impl</c>.
+/// </summary>
+/// <param name="Missing">
+/// Whether the file the path names is not on disk, which a hit answered in the second after a
+/// delete is. A fourth boolean beside <c>Generated</c>, <c>Metadata</c> and <c>External</c>
+/// rather than a key present only when true: DESIGN.md's omit-rather-than-null rule is an
+/// envelope rule, and row keys stay stable across the rows of one answer — a flag that comes
+/// and goes makes every consumer test for presence before reading it. <c>Text</c> is null on
+/// such a row too, but null <c>Text</c> is also what an empty line and an undecodable file
+/// answer, so it cannot carry this.
+/// </param>
 internal sealed record LocationRow(
     string Path,
     int Line,
@@ -1097,6 +1131,7 @@ internal sealed record LocationRow(
     bool Generated,
     bool Metadata,
     bool External,
+    bool Missing,
     string? Text);
 
 /// <summary>One finding, with the contexts it is <em>only</em> in as <c>Tfm</c>.</summary>

@@ -22,7 +22,16 @@ Not installed is not a reason to fall back to grep — `dotnet tool install -g c
 
 **Start every session with `cslq ready`.** It gives the workspace one place to fail, so a load
 failure is not mistaken for an empty answer — and it now pays the load for you: a background
-session holds the workspace open, so `ready` is the slow call and everything after it is fast.
+session holds the workspace open, so `ready` is the slow call and everything after it is fast —
+so ask narrow questions freely rather than folding several into one broad query.
+
+**Compile errors do not stop it.** A repository you are mid-edit in is fully queryable: symbols
+elsewhere still resolve, `refs`/`def`/`hover` inside the broken file answer for everything that
+still binds and are exit-1 `no results` on the identifier that does not, and `diag` is how you
+read the errors. A file you just wrote becomes visible in about a second, so an exit-1
+`no results` on a type you know you created is worth one retry. What does leave `cslq` with
+nothing to say is a failed *design-time build* — an unresolvable `PackageReference`, a
+`global.json` pinning an SDK that is not installed — and `ready` names that one for you.
 
 ## Task → command
 
@@ -54,8 +63,7 @@ directory path or nothing; `project` takes a file path. Every path must lie unde
 ## Output
 
 `path:line:col` relative to the root, then the matched line marked `>` with one context line
-either side. `--json` gives `{ count, truncated, results }` on every command and every path,
-failures included as `{ "error": ... }`. In text mode stdout is the answer and nothing else.
+either side. `--json` gives `{ count, truncated, results }`; REFERENCE.md has the rest.
 
 | Code | Meaning |
 |---|---|
@@ -86,23 +94,14 @@ failures included as `{ "error": ... }`. In text mode stdout is the answer and n
 --errors-only    diag: drop warnings and info      --json        machine-readable
 --sentinel <sym> also require this to resolve      --no-daemon   private server
 --no-session     load in this process instead of the background session
---log-level L    Trace|Debug|Information|Warning|Error|Critical|None
 ```
 
-Options go anywhere in the command line. An unknown one is exit 2.
-
-`--tfm` is **not needed for a correct answer**: `hover`/`def` pick a context and say which,
-`refs`/`impl`/`outline`/`diag` union every context. Use it only to ask about a specific
-framework.
-
-The first call to a cold session pays the whole solution load and costs **more** than a one-shot
-would — a few seconds on a small root, ~30 s on 26 projects — and every call after it is ~150 ms.
-So spend the first call on `cslq ready` and then ask freely: narrow questions are now cheap, and
-folding several into one broad query buys nothing. `--no-session` pays the load on every call
-instead.
+Options go anywhere in the command line. An unknown one is exit 2. `--tfm` is not needed for a
+correct answer on a multi-targeted project; `--log-level` and the rest are in REFERENCE.md.
 
 ## REFERENCE.md
 
-Beside this file. Read it for: an empty answer you cannot explain, the full output and `--json`
-rules, `sym`'s matching behaviour, multi-targeted projects and `#if` branches, kinds, and the
-readiness limits that let a project's hits go missing.
+Beside this file. Read it for: an empty answer you cannot explain, what the session costs on the
+first call and saves after it, the full output and `--json` rules, `sym`'s matching behaviour,
+multi-targeted projects and `#if` branches, kinds, and the readiness limits that let a project's
+hits go missing.
