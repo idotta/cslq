@@ -1083,104 +1083,30 @@ fi
 # `e.Cancel` that is dropped -- so the runtime kills the process at 134 -- is invisible to every
 # other leg here and to every unit test.
 #
-# Two implementations, and the Windows one is the reason this is not four lines: from Git Bash
-# `kill -INT` terminates the native .NET process without raising a console control event, so the
-# handler never runs and the 130 that shows up is bash's own signal status. A leg written that
-# way passes on a build with the handler deleted, which is exactly the regression it exists to
-# catch. probes/ctrl-c.cs launches cslq in its own process group and sends CTRL_BREAK_EVENT
-# instead. Off Windows there is no such trap and a plain `kill -INT` raises a real SIGINT, so
-# the cheap path is the right one there.
-#
-# The split is on the SDK's RID like the block above it and not on `uname`, for the reason
-# recorded there.
+# It is not four lines, and the reason is the shell rather than cslq. From Git Bash `kill -INT`
+# terminates the native .NET process without raising a console control event, so the handler
+# never runs and the 130 that shows up is bash's own signal status -- a leg written that way
+# passes on a build with the handler deleted, which is the regression it exists to catch. The
+# obvious Unix shortcut is no better: a non-interactive shell sets SIGINT to SIG_IGN for every
+# background command and .NET preserves an inherited ignore, so the signal is a no-op; and
+# `set -m`, which clears that, puts the job in a background process group, where macos stopped
+# and hung it up intermittently (`Hangup: 1`, exit 129 at 0 s, no output). Both of those were
+# CI failures rather than theory, one per attempt. So probes/ctrl-c.cs owns the launch and the
+# signal on every platform and no shell is in the path: CreateProcessW plus CTRL_BREAK_EVENT on
+# Windows, `sh -c exec` plus a libc `kill` off it. There is no platform split here any more,
+# and the elapsed bound and the message check live in the app with the rest of it.
 #
 # Its own session pipe under $SESSION_PREFIX so the EXIT trap can still find anything left
 # behind, and after the `unset` above rather than inside the shared-session region: the call it
 # interrupts is a cold --no-daemon --no-session load and would idle that session out.
 log "ctrl+c"
-cc_pipe="$SESSION_PREFIX-ctrlc"
 cc_log=$(mktemp)
-# $aot_rid is parsed out of `dotnet --info` far above, and an empty one would fall through to
-# the `*)` branch below -- which on Windows is the MSYS path this leg exists because of, green
-# and proving nothing. The SDK has moved that output around twice already, so it is asserted
-# here rather than trusted.
-case "${aot_rid:-unparsed}" in
-  unparsed)
-    rc=-1
-    ok=0
-    out="the host RID did not parse out of dotnet --info"
-    ;;
-  win-*)
-    CSLQ_SESSION_PIPE_NAME="$cc_pipe" \
-      dotnet run probes/ctrl-c.cs -- "$CSLQ_WIN" "$root_abs/fixture" > "$cc_log" 2>&1
-    rc=$?
-    out=$(cat "$cc_log")
-    ok=1
-    [ "$rc" = 0 ] || ok=0
-    ;;
-  *)
-    # Interrupted mid-work rather than mid-teardown, and --no-daemon --no-session so the run
-    # owns the server it launches rather than borrowing the gate's. The 300 s timeout is what
-    # makes the elapsed bound below mean anything.
-    #
-    # `set -m` is load-bearing and its absence is silent. POSIX has a non-interactive shell
-    # with job control off set SIGINT to SIG_IGN for every background command, and .NET
-    # preserves an inherited ignore rather than overriding it -- so the leg's own launch
-    # disarmed the signal it then sent, and `ready` ran to completion at exit 0 while the leg
-    # reported a handler that had never fired. Measured under WSL against this binary:
-    # `SigIgn` carries 0x2 for a plain `&` and nothing under `set -m`, and the same call goes
-    # from exit 0 after 5 s to exit 130 in under one. Job control also puts the child in a
-    # process group of its own, which is the shape the Windows half asks CreateProcessW for.
-    set -m
-    CSLQ_SESSION_PIPE_NAME="$cc_pipe" \
-      "$CSLQ" ready --root "$root_abs/fixture" --timeout 300 --no-daemon --no-session \
-      > "$cc_log" 2>&1 &
-    cc_pid=$!
-    # The server it spawns is the signal that it is genuinely working; polled rather than slept
-    # for, since the load costs seconds here and rather more on a cold runner.
-    cc_up=0
-    cc_tries=0
-    while [ "$cc_tries" -lt 400 ]; do
-      kill -0 "$cc_pid" 2>/dev/null || break
-      if pgrep -P "$cc_pid" > /dev/null 2>&1; then cc_up=1; break; fi
-      cc_tries=$((cc_tries + 1))
-      sleep 0.05
-    done
-    if [ "$cc_up" = 1 ]; then
-      cc_start=$(date +%s)
-      kill -INT "$cc_pid"
-      wait "$cc_pid"
-      rc=$?
-      cc_elapsed=$(( $(date +%s) - cc_start ))
-    else
-      wait "$cc_pid" 2>/dev/null
-      rc=0
-      cc_elapsed=-1
-    fi
-    # Only once the job has been reaped. Turning job control off while it is still running is
-    # what turned macos red on the first release run: bash reported `Hangup: 1` against the
-    # backgrounded call and the leg saw exit 129 at 0 s with no output -- the interrupt under
-    # test never happened. It is a race rather than a rule, since the same leg passed on macos
-    # the run before, so the toggle is kept away from the live job entirely.
-    set +m
-    out=$(cat "$cc_log")
-    ok=1
-    [ "$cc_up" = 1 ] || ok=0
-    [ "$rc" = 130 ] || ok=0
-    # `wait` reports 128+SIGINT for a process the signal killed outright as well, so the exit
-    # code alone cannot tell the handler from its absence on this platform -- the message is
-    # what discriminates here, and a process that was killed prints none.
-    case "$out" in
-      *"cslq: interrupted."*) ;;
-      *) ok=0 ;;
-    esac
-    # `date` is seconds here -- no %N on BSD -- so the bound is coarse, but the failure it
-    # catches is a handler that only answers once the whole --timeout has run out, and that one
-    # is five minutes wide. Measured by hand at 62 ms on 2026-09-06.
-    [ "$cc_elapsed" -ge 0 ] && [ "$cc_elapsed" -lt 3 ] || ok=0
-    out="exit $rc after ${cc_elapsed}s, child seen: $cc_up: $out"
-    ;;
-esac
+CSLQ_SESSION_PIPE_NAME="$SESSION_PREFIX-ctrlc" \
+  dotnet run probes/ctrl-c.cs -- "$CSLQ_WIN" "$root_abs/fixture" > "$cc_log" 2>&1
+rc=$?
+out=$(cat "$cc_log")
+ok=1
+[ "$rc" = 0 ] || ok=0
 rm -f "$cc_log"
 if [ "$ok" = 1 ]; then
   printf 'PASS  %s\n' "ctrl-c-exits-130-at-once"
