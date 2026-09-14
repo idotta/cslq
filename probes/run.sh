@@ -988,6 +988,8 @@ fi
 # the gate; a pointer that lists only `any` reaches the framework-dependent fallback instead,
 # which is the same install path and the same manifest question at the cost of an ordinary
 # publish. probes/pack-smoke.sh is what proves the shipped shape, on each platform in CI.
+# So the pointer-to-RID-sub-package shape every user installs is deliberately not gated here,
+# which is what the `any` in this leg's name is saying; pack-smoke.sh is where it is gated.
 log "packaged tool install"
 install_tmp=$(mktemp -d)
 version=$(sed -n 's@.*<Version>\(.*\)</Version>.*@\1@p' src/Cslq/Cslq.csproj | head -1)
@@ -1035,10 +1037,10 @@ case "$out" in
   *) ok=0 ;;
 esac
 if [ "$ok" = 1 ]; then
-  printf 'PASS  %s\n' "installed-tool-resolves-its-own-pin"
+  printf 'PASS  %s\n' "installed-any-package-resolves-its-own-pin"
   pass=$((pass + 1))
 else
-  printf 'FAIL  %s (exit %s, wanted 0 and a ready workspace)\n' "installed-tool-resolves-its-own-pin" "$rc"
+  printf 'FAIL  %s (exit %s, wanted 0 and a ready workspace)\n' "installed-any-package-resolves-its-own-pin" "$rc"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
@@ -1072,6 +1074,105 @@ if [ "$rc" = 0 ]; then
   pass=$((pass + 1))
 else
   printf 'FAIL  %s (exit %s)\n' "captured-stdout-does-not-stall" "$rc"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  fail=$((fail + 1))
+fi
+
+# Ctrl+C, the last path in cslq that nothing but one hand measurement on 2026-09-06 had ever
+# covered. A handler that is removed, a catch folded into the generic CslqException one, or an
+# `e.Cancel` that is dropped -- so the runtime kills the process at 134 -- is invisible to every
+# other leg here and to every unit test.
+#
+# Two implementations, and the Windows one is the reason this is not four lines: from Git Bash
+# `kill -INT` terminates the native .NET process without raising a console control event, so the
+# handler never runs and the 130 that shows up is bash's own signal status. A leg written that
+# way passes on a build with the handler deleted, which is exactly the regression it exists to
+# catch. probes/ctrl-c.cs launches cslq in its own process group and sends CTRL_BREAK_EVENT
+# instead. Off Windows there is no such trap and a plain `kill -INT` raises a real SIGINT, so
+# the cheap path is the right one there.
+#
+# The split is on the SDK's RID like the block above it and not on `uname`, for the reason
+# recorded there.
+#
+# Its own session pipe under $SESSION_PREFIX so the EXIT trap can still find anything left
+# behind, and after the `unset` above rather than inside the shared-session region: the call it
+# interrupts is a cold --no-daemon --no-session load and would idle that session out.
+log "ctrl+c"
+cc_pipe="$SESSION_PREFIX-ctrlc"
+cc_log=$(mktemp)
+# $aot_rid is parsed out of `dotnet --info` far above, and an empty one would fall through to
+# the `*)` branch below -- which on Windows is the MSYS path this leg exists because of, green
+# and proving nothing. The SDK has moved that output around twice already, so it is asserted
+# here rather than trusted.
+case "${aot_rid:-unparsed}" in
+  unparsed)
+    rc=-1
+    ok=0
+    out="the host RID did not parse out of dotnet --info"
+    ;;
+  win-*)
+    CSLQ_SESSION_PIPE_NAME="$cc_pipe" \
+      dotnet run probes/ctrl-c.cs -- "$CSLQ_WIN" "$root_abs/fixture" > "$cc_log" 2>&1
+    rc=$?
+    out=$(cat "$cc_log")
+    ok=1
+    [ "$rc" = 0 ] || ok=0
+    ;;
+  *)
+    # Interrupted mid-work rather than mid-teardown, and --no-daemon --no-session so the run
+    # owns the server it launches rather than borrowing the gate's. The 300 s timeout is what
+    # makes the elapsed bound below mean anything.
+    CSLQ_SESSION_PIPE_NAME="$cc_pipe" \
+      "$CSLQ" ready --root "$root_abs/fixture" --timeout 300 --no-daemon --no-session \
+      > "$cc_log" 2>&1 &
+    cc_pid=$!
+    # The server it spawns is the signal that it is genuinely working; polled rather than slept
+    # for, since the load costs seconds here and rather more on a cold runner.
+    cc_up=0
+    cc_tries=0
+    while [ "$cc_tries" -lt 400 ]; do
+      kill -0 "$cc_pid" 2>/dev/null || break
+      if pgrep -P "$cc_pid" > /dev/null 2>&1; then cc_up=1; break; fi
+      cc_tries=$((cc_tries + 1))
+      sleep 0.05
+    done
+    if [ "$cc_up" = 1 ]; then
+      cc_start=$(date +%s)
+      kill -INT "$cc_pid"
+      wait "$cc_pid"
+      rc=$?
+      cc_elapsed=$(( $(date +%s) - cc_start ))
+    else
+      wait "$cc_pid" 2>/dev/null
+      rc=0
+      cc_elapsed=-1
+    fi
+    out=$(cat "$cc_log")
+    ok=1
+    [ "$cc_up" = 1 ] || ok=0
+    [ "$rc" = 130 ] || ok=0
+    # `wait` reports 128+SIGINT for a process the signal killed outright as well, so the exit
+    # code alone cannot tell the handler from its absence on this platform -- the message is
+    # what discriminates here, and a process that was killed prints none.
+    case "$out" in
+      *"cslq: interrupted."*) ;;
+      *) ok=0 ;;
+    esac
+    # `date` is seconds here -- no %N on BSD -- so the bound is coarse, but the failure it
+    # catches is a handler that only answers once the whole --timeout has run out, and that one
+    # is five minutes wide. Measured by hand at 62 ms on 2026-09-06.
+    [ "$cc_elapsed" -ge 0 ] && [ "$cc_elapsed" -lt 3 ] || ok=0
+    out="exit $rc after ${cc_elapsed}s, child seen: $cc_up: $out"
+    ;;
+esac
+rm -f "$cc_log"
+if [ "$ok" = 1 ]; then
+  printf 'PASS  %s\n' "ctrl-c-exits-130-at-once"
+  printf '%s\n' "$out" | sed 's/^/      | /'
+  pass=$((pass + 1))
+else
+  printf 'FAIL  %s (exit %s, wanted 130 and `cslq: interrupted.` within seconds)\n' \
+    "ctrl-c-exits-130-at-once" "$rc"
   printf '%s\n' "$out" | sed 's/^/      | /'
   fail=$((fail + 1))
 fi
