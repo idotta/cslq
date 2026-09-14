@@ -89,7 +89,8 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   fired **in this process**, the wait is bounded to a further 20 s (`LspClient.PostLoadGrace`)
   measured from when the notification *arrived* — `Endpoints.InitializedAt`, stamped in the
   handler, rather than the round that notices it, which ran 6.9 s late on OrchardCore because
-  a round asking one `workspace/symbol` per unproved project queues behind the load —
+  a round asking one `workspace/symbol` per unproved *candidate* (`ResolvesAsync` walks a
+  project's candidate list until one hits, so 22 projects asked 24) queues behind the load —
   and then fails — a project whose only type sits in an `#if false` branch is the shape it
   exists for, ordinary `.csproj` and all, so no skip rule sees it. That notification ends
   *this client's own* reload on every attach, cold and warm alike (see the daemon bullet), so
@@ -118,17 +119,25 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   per-project keys rather than a ready flag.** `LspClient._proved` holds one key per sentinel
   that has answered — `LspClient.ProofKey`, the project's own directory, or the candidates for
   the probe an explicit `--sentinel` adds, since that one's directory is the root — and
-  `LspClient.Unproved` is what the round is narrowed to. It has to be a set: `Program.Sentinels`
-  recomputes the list from disk on every request, so a project added after the session started
-  appears in a later call and must still be probed, which is exactly what a flag would skip at
-  exit 0. Nothing negative is ever cached; a sentinel that has not resolved is re-asked every
-  call with the same deadline and grace, and the whole failure path is untouched. Without it a
+  `LspClient.Unproved` is what the round is narrowed to. It has to be a set because projects
+  prove *progressively* — 8 of 12 resolved before `workspace/projectInitializationComplete` on
+  CommunityToolkit and the rest over the 6-8 s after it — so one flag is either set while
+  projects are still unproved or never set at all. Do not justify it by `Program.Sentinels`
+  recomputing the list from disk per request: that is the one-shot path. A session infers once
+  (`Session.State.Inferred`) and holds the set for the attach, and a project added afterwards
+  becomes visible only through the re-attach that clears the inference and the client together.
+  Nothing negative is ever cached; a sentinel that has not resolved is re-asked every call with
+  the same deadline and grace, and the whole failure path is untouched. Without it a
   warm session re-proved every project on every request, which *was* the request: measured
   2026-09-13 on OrchardCore (214 projects), a warm `outline` of one file spent 7.6-18.6 s of its
   7.7-19.5 s inside `WaitReadyAsync` and went to ~60 ms total with the proof kept; on
-  CleanArchitecture (12 projects) it saves the ~7 ms it costs there. The 214-project number is
-  the only one that matters and the fixture cannot show it — four projects put the saving inside
-  the noise — so **no probe case guards this**; `ReadyProofTests` pins the predicate instead,
+  CleanArchitecture (12 projects) it saves the ~7 ms it costs there. What the saving scales with
+  is the per-request cost of one `workspace/symbol` against the tree's symbol index times the
+  number of candidates probed, not the project count: measured 2026-09-13 with the cache disabled
+  inside the HEAD binary, a warm `ready` on a 22-project single-TFM tree issues 24 probes and
+  costs 1177 ms against 168 ms with it, while the same switch costs +33 ms on CleanArchitecture
+  and +10 ms on the fixture, whose three projects put it inside the noise — so **no probe case
+  guards this**; `ReadyProofTests` pins the predicate instead,
   and a timing leg here would be a coin flip that passes on the breakage it exists to catch.
 - **The readiness failure text is assembled in `Readiness.Message`, one item per line, and
   what it says about the notification is a sentence rather than its name.** On a 26-project
@@ -642,6 +651,15 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
     mystery — the suite crawling case by case with no leg red — to a 52-second diagnosis
     naming the syscall. Anything platform-divergent below the LSP layer earns the same
     treatment: prove the primitive first, cheaply, and fail loudly.
+- **Name the binary by path. Typing `cslq` measures the installed tool, not your build.** A whole
+  round of warm-latency numbers — 825 ms for a `ready` that costs 170 — was the 0.3.0 on `PATH`,
+  the commit *before* the per-attach proof cache, and reading them as HEAD's sent the next session
+  hunting a bottleneck that had already been fixed. Measured 2026-09-13 on one 22-project tree,
+  same shell, same daemon: 168 ms from `src/Cslq/bin/Release/net10.0/cslq.exe` against 1102 ms
+  from the installed binary. `--version` cannot tell them apart — both print `0.3.0` — and
+  `Session.PipeName` hashes that version rather than the binary, so two builds reporting one
+  version also need a `CSLQ_SESSION_PIPE_NAME` each or the comparison is one binary against
+  itself.
 - **A named mutex has thread affinity, and `await` is what breaks it.** `Mutex.ReleaseMutex`
   has to run on the thread that took it, and a continuation resumes wherever the pool puts it —
   so the release threw `ApplicationException` out of the `finally`, and a session that had
