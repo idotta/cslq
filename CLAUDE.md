@@ -739,6 +739,32 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   assertion**: a session that died and was silently replaced answers the next query perfectly
   well, just slowly, so latency alone reads as noise. Exactly one `cslq session ... pid` line in
   the log means the process that answered is the one the leg before it started.
+- **And no single *bind* may end it either, which is one call further out than the catch above.**
+  `Bind` is reached from three places outside that guard — the first bind, the successor bound
+  before the handoff, and `RebindAsync`, whose call sits *inside* a `catch` and so escapes the
+  loop too. `PipeOptions.CurrentUserOnly` writes a DACL for the creator's SID, so a pipe whose
+  first instance was created under a different token denies every later `CreateNamedPipe` with
+  `UnauthorizedAccessException` for as long as that instance lives — a user in a sandboxed
+  process hit exactly that on 2026-09-15 and their log carried nothing but repeated
+  `stopped: UnauthorizedAccessException`, each one a session that died and a next call that paid
+  the whole load again. `Session.BindAsync` retries for five seconds, clamped to the keepalive,
+  then **ends the session cleanly rather than retrying on**: a session stuck retrying never
+  reaches `WaitForConnectionAsync`, so it never arms its keepalive and would hold a Roslyn server
+  and grow a log for as long as the machine was up, where a dead session frees both. The races
+  this is really for resolve in milliseconds. The *first* bind stays fatal — nothing is held yet
+  and the client is already falling back. No probe leg pins any of it: staging the denial needs a
+  pipe instance created under another token, which nothing in the suite can do honestly, so the
+  retry, the give-up and the two log lines are unit-tested instead.
+- **A connection lost during `initialize` is retried once, and only with a daemon in play.**
+  The shared daemon can die or idle out under a handshake — the same 2026-09-15 report, whose
+  very next invocation worked — and StreamJsonRpc reports nothing but a lost connection, so
+  `LspClient.StartAsync` re-attaches once against a fresh thin client. `ServerLostException` is
+  what makes that one failure separable from every other `CslqException` a start can throw, and
+  the guard also excludes the not-restored message, which arrives as the same type and is
+  answered by the restore rather than by a second doomed launch. A second loss keeps today's
+  message, stderr tail and all, and names `--no-daemon` after it. Under `--no-daemon` the server
+  is one we launched ourselves and a loss there is a real failure of that process, so it is not
+  retried. No leg: one that killed a daemon mid-handshake would race it and pass either way.
 - **A generated document's cached context lines have no file to stamp, so they are cleared on
   every request.** `LspClient._lines` is keyed against the same `Staleness.Stamp` the open
   document is, which is what makes a session render an edited file correctly — but a generated
@@ -758,6 +784,20 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   `session status` printed no pid for every session it found running. `Session.Pid` opens the
   file by hand with `FileShare.ReadWrite | FileShare.Delete`. `run.sh`'s EXIT trap reads the same
   line the same way, which is how it kills every session a gate run started.
+- **`FileMode.Append` is not an atomic append, and two sessions can share one log.** .NET seeks
+  to the end at open and then writes at a position it tracks itself, so two processes appending
+  to one file overwrite each other's regions — which is what a field log's line missing its
+  beginning was (`e9dc8db5e for C:\dev\jsonb-store at ...`, 2026-09-15). Measured that day on
+  Windows, four processes appending 2 000 lines each: 4 314 and 4 000 of the 8 000 survived, two
+  of them torn; through `AppendLog`, 8 000 of 8 000 in three runs. It is the start line that
+  makes this matter — the only record of a session's pid, which `Session.Pid` parses and
+  `run.sh`'s EXIT trap kills by, so a torn one leaks a session and its Roslyn server past the end
+  of a gate run. `AppendLog` buffers until a newline and writes each complete line with one
+  append-only call: `FILE_APPEND_DATA` with no `FILE_WRITE_DATA` on Windows, `O_APPEND` on Unix.
+  A `FileStream` is not the answer on either side — it writes at its own offset through `pwrite`,
+  which ignores `O_APPEND` everywhere but Linux. The unit that must be atomic is a *line* rather
+  than a buffer flush, because the same writer is `Console.SetOut`'s target inside a session, and
+  the `TextWriter.Synchronized` over it stays: that is the in-process half and it is still needed.
 - **`probes/run.sh` must scope its own daemon.** It exports
   `ROSLYN_LANGUAGE_SERVER_DAEMON_PIPE_NAME=cslq-probe-$$` and a 60 s keepalive. Without it the
   gate inherits whatever daemon the developer's session left running — a stale workspace can
@@ -926,7 +966,14 @@ This repo is .NET 10 / C# 14: a CLI and a thin LSP client, no UI, no web host, n
   comes free with `net10.0` and `LangVersion` is deliberately unset. `fixture/Gen` is the one
   exception: analyzers must target netstandard2.0, whose default is C# 7.3, so it pins
   `<LangVersion>latest</LangVersion>` explicitly.
-- **`[LibraryImport]`, not `[DllImport]`**, if native interop ever appears.
+- **`[LibraryImport]`, not `[DllImport]`**, if native interop ever appears — and **never declare
+  a variadic libc function with its variadic arguments**. Apple's arm64 ABI passes varargs on the
+  stack while a `[LibraryImport]` declaration passes them in registers, so `open(path, flags,
+  mode)` reads its mode off whatever the stack happened to hold, silently, on `osx-arm64` — a RID
+  we ship. `Native.OpenAppend` creates the file through an ordinary `FileStream` and then calls
+  `open(path, O_WRONLY|O_APPEND)` with two arguments; a variadic function called with no variadic
+  argument is safe everywhere. `AppendLogTests` asserts the created log's `File.GetUnixFileMode`
+  on Unix, which is what goes red on CI's ubuntu and macos legs if this comes back.
 - **Fix root causes and delete what is dead.** Don't preserve a shape for backwards
   compatibility — nothing depends on `cslq`'s internals yet. Simplify rather than layering.
 - **Never push to a remote, and never commit unless asked.** `bump.yml` is the only thing that

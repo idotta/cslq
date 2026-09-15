@@ -62,13 +62,22 @@ internal sealed partial class LspClient : IAsyncDisposable
     /// tool never restored — restores it once and retries. Deliberately not a preflight
     /// check: `dotnet tool restore` costs a second even when everything is already there,
     /// and every run would pay it to save the first one.
+    /// <para>
+    /// A connection lost during <c>initialize</c> is retried once too, and only with a daemon
+    /// in play: the shared daemon may have died or idled out under this handshake, in which
+    /// case a fresh thin client attaches to a new one and answers — the user this was written
+    /// for got their answer from the very next invocation. Under <c>--no-daemon</c> the server
+    /// is one we launched for ourselves, so a lost connection there is a real failure of that
+    /// process and retrying it would only cost a second launch. A retry that fails too keeps
+    /// today's message, stderr tail included, plus the line naming the flag.
+    /// </para>
     /// </summary>
     public static async Task<LspClient> StartAsync(string root, string logLevel, bool daemon, CancellationToken ct)
     {
         var manifestRoot = ServerArgs.ToolManifestRoot();
         try
         {
-            return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+            return await StartOrRetryAsync(root, manifestRoot, logLevel, daemon, ct);
         }
         catch (CslqException ex) when (NotRestored(ex.Message))
         {
@@ -77,9 +86,71 @@ internal sealed partial class LspClient : IAsyncDisposable
                 "This is a one-time ~300 MB download.");
             var pruned = await RestoreAsync(manifestRoot, ct);
             foreach (var line in Output.PruneLines(pruned)) Console.Error.WriteLine("cslq: " + line);
-            return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+            return await StartOrRetryAsync(root, manifestRoot, logLevel, daemon, ct);
         }
     }
+
+    /// <summary>
+    /// One start, and one more if the connection was lost. Both of <see cref="StartAsync"/>'s
+    /// attempts come through here, so the start after a restore gets the retry too — the
+    /// daemon is as able to die under that handshake as under the first.
+    /// <para>
+    /// An unrestored tool reaches us as a lost connection as well — the thin client prints the
+    /// <c>dotnet tool restore</c> line and exits, so the message carries it — and that one is
+    /// not retried: it is the caller's restore that fixes it, and a second doomed launch would
+    /// only delay it.
+    /// </para>
+    /// </summary>
+    private static async Task<LspClient> StartOrRetryAsync(
+        string root, string manifestRoot, string logLevel, bool daemon, CancellationToken ct)
+    {
+        try
+        {
+            return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+        }
+        catch (ServerLostException ex) when (daemon && !NotRestored(ex.Message))
+        {
+            try
+            {
+                return await StartCoreAsync(root, manifestRoot, logLevel, daemon, ct);
+            }
+            catch (ServerLostException again)
+            {
+                throw new CslqException(LostTwice(again.Message));
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a second lost connection says. The first message is kept whole — it is the only
+    /// thing carrying the server's stderr — and the flag is named after it, because two
+    /// daemons in a row dying under the handshake is the shape a private server answers.
+    /// </summary>
+    internal static string LostTwice(string message) =>
+        message + " Retried once against a fresh connection and it was lost again; " +
+        "--no-daemon runs a server of this invocation's own.";
+
+    /// <summary>
+    /// What a failed <c>initialize</c> throws, and with it whether
+    /// <see cref="StartOrRetryAsync"/> will try again. Only a start that really lost its server
+    /// is retryable: a protocol-level fault — a remote invocation error, a payload that would
+    /// not deserialise — is answered the same way by a second launch, and it used to be
+    /// swept into the retry by a catch-all, under a message claiming a connection had closed.
+    /// <para>
+    /// The discriminator is the process rather than the exception type alone. Narrowing to
+    /// <c>ConnectionLostException</c> by itself would make this feature disappear silently the
+    /// day StreamJsonRpc reports a dropped connection as an <c>IOException</c> or an
+    /// <c>ObjectDisposedException</c> instead — and a retry that stopped happening looks
+    /// exactly like one that never did. A server that is gone is the thing the sentence
+    /// actually claims, the caller has already waited a second for it to exit, and no
+    /// wording in a library can move it.
+    /// </para>
+    /// </summary>
+    internal static CslqException InitializeFailure(Exception ex, bool serverExited, string tail) =>
+        ex is ConnectionLostException || serverExited
+            ? new ServerLostException(
+                $"the language server closed the connection during initialize: {ex.Message}{tail}")
+            : new CslqException($"initialize failed: {ex.Message}{tail}");
 
     /// <summary>
     /// The `dotnet tool run` message naming the fix. The prose around it is localised — this
@@ -335,9 +406,9 @@ internal sealed partial class LspClient : IAsyncDisposable
             // only thing that turns "connection lost" into a diagnosis.
             await Task.WhenAny(proc.WaitForExitAsync(ct), Task.Delay(1000, ct));
             var tail = client.StderrTail();
+            var exited = proc.HasExited;
             await client.DisposeAsync();
-            throw new CslqException(
-                $"the language server closed the connection during initialize: {ex.Message}{tail}");
+            throw InitializeFailure(ex, exited, tail);
         }
 
         return client;
