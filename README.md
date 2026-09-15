@@ -11,13 +11,17 @@ Two constraints drive the design:
 1. **Official tooling only.** The C#-specific component in the query path is Microsoft-published.
 2. **Always current.** A weekly cron bumps the pin and a probe suite gates the bump.
 
-Status: **all five milestones done; `0.3.1` is a patch on `0.3.0`**, which added the background
-session on top of `0.2.0` and the eight fix batches behind it (PRs #21-#28: readiness per
-project, symbol targeting, multi-targeted contexts, and one rule for non-answers and usage
-errors). `0.3.1` makes a warm session's calls — successes and readiness failures alike — answer
-in milliseconds rather than seconds, adds a `missing` flag to `--json` location rows for a hit
-whose file has been deleted, and names `cslq session stop` when a session's inferred sentinel
-has gone stale. Eleven commands —
+Status: **all five milestones done; `0.3.2` is a patch on `0.3.1`**, itself a patch on `0.3.0`,
+which added the background session on top of `0.2.0` and the eight fix batches behind it
+(PRs #21-#28: readiness per project, symbol targeting, multi-targeted contexts, and one rule for
+non-answers and usage errors). `0.3.1` makes a warm session's calls — successes and readiness
+failures alike — answer in milliseconds rather than seconds, adds a `missing` flag to `--json`
+location rows for a hit whose file has been deleted, and names `cslq session stop` when a
+session's inferred sentinel has gone stale. `0.3.2` answers a field report: a session now
+survives a bind failure instead of dying and leaving the next call to load the workspace again,
+its log is written one atomic line at a time so the pid a cleanup reads is never torn, and a
+start whose server is gone — the shared daemon idling out under the handshake — is retried once
+rather than failing the call. Eleven commands —
 `ready`, `refs`, `def`, `impl`, `hover`, `sym`, `outline`, `diag`, `project`, `restore` and
 `session` — over a cross-project fixture with source-generated, non-ASCII, metadata and
 deliberate-error cases; a session holding the loaded workspace open between calls, so a warm
