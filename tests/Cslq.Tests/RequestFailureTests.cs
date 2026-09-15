@@ -85,4 +85,40 @@ public class RequestFailureTests
             new RemoteInvocationException("internal error", -32603, new object())));
         Assert.False(LspClient.ContextsUnsupported(new IOException("the pipe is being closed")));
     }
+
+    /// <summary>
+    /// Only a start that really lost its server is retried, and the type it throws is the
+    /// whole of that decision: <c>StartOrRetryAsync</c> catches <c>ServerLostException</c> and
+    /// nothing else. A protocol-level fault answered with a second doomed launch, under a
+    /// message claiming a connection closed, is what the catch-all under <c>initialize</c>
+    /// used to produce.
+    /// </summary>
+    [Fact]
+    public void A_lost_connection_is_retryable_and_a_protocol_fault_is_not()
+    {
+        Assert.IsType<ServerLostException>(
+            LspClient.InitializeFailure(new ConnectionLostException(), serverExited: false, ""));
+
+        var fault = LspClient.InitializeFailure(
+            new RemoteInvocationException("bad payload", -32603, new object()), serverExited: false, "");
+        Assert.IsType<CslqException>(fault, exactMatch: true);
+        Assert.StartsWith("initialize failed: bad payload", fault.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("closed the connection", fault.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A server that is gone is the thing the retry is written for, whatever the library called
+    /// the exception: narrowing on <c>ConnectionLostException</c> alone would lose the retry
+    /// silently the day StreamJsonRpc reports a dropped connection as something else.
+    /// </summary>
+    [Fact]
+    public void An_exited_server_is_retryable_whatever_it_threw()
+    {
+        var lost = LspClient.InitializeFailure(
+            new IOException("the pipe is being closed"), serverExited: true, "\n--- server stderr ---\nboom");
+
+        Assert.IsType<ServerLostException>(lost);
+        Assert.Contains("closed the connection during initialize", lost.Message, StringComparison.Ordinal);
+        Assert.EndsWith("boom", lost.Message, StringComparison.Ordinal);
+    }
 }

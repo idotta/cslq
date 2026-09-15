@@ -80,6 +80,13 @@ internal static partial class Native
         return fd;
     }
 
+    /// <summary>
+    /// <c>O_APPEND</c> makes one <c>write</c> atomic, not this loop, so a short write would in
+    /// principle let another session's line land inside ours. Accepted rather than locked
+    /// around: a sub-100-byte write to a regular file is short only under a signal or a
+    /// resource limit, and the alternative is cross-process locking on both platforms for
+    /// every line.
+    /// </summary>
     internal static void AppendAll(int fd, byte[] bytes)
     {
         var written = 0;

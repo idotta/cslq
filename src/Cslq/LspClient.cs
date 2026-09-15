@@ -131,6 +131,28 @@ internal sealed partial class LspClient : IAsyncDisposable
         "--no-daemon runs a server of this invocation's own.";
 
     /// <summary>
+    /// What a failed <c>initialize</c> throws, and with it whether
+    /// <see cref="StartOrRetryAsync"/> will try again. Only a start that really lost its server
+    /// is retryable: a protocol-level fault — a remote invocation error, a payload that would
+    /// not deserialise — is answered the same way by a second launch, and it used to be
+    /// swept into the retry by a catch-all, under a message claiming a connection had closed.
+    /// <para>
+    /// The discriminator is the process rather than the exception type alone. Narrowing to
+    /// <c>ConnectionLostException</c> by itself would make this feature disappear silently the
+    /// day StreamJsonRpc reports a dropped connection as an <c>IOException</c> or an
+    /// <c>ObjectDisposedException</c> instead — and a retry that stopped happening looks
+    /// exactly like one that never did. A server that is gone is the thing the sentence
+    /// actually claims, the caller has already waited a second for it to exit, and no
+    /// wording in a library can move it.
+    /// </para>
+    /// </summary>
+    internal static CslqException InitializeFailure(Exception ex, bool serverExited, string tail) =>
+        ex is ConnectionLostException || serverExited
+            ? new ServerLostException(
+                $"the language server closed the connection during initialize: {ex.Message}{tail}")
+            : new CslqException($"initialize failed: {ex.Message}{tail}");
+
+    /// <summary>
     /// The `dotnet tool run` message naming the fix. The prose around it is localised — this
     /// machine answers in Portuguese without <c>DOTNET_CLI_UI_LANGUAGE</c> — but the quoted
     /// command inside it is not, so match on that alone.
@@ -384,9 +406,9 @@ internal sealed partial class LspClient : IAsyncDisposable
             // only thing that turns "connection lost" into a diagnosis.
             await Task.WhenAny(proc.WaitForExitAsync(ct), Task.Delay(1000, ct));
             var tail = client.StderrTail();
+            var exited = proc.HasExited;
             await client.DisposeAsync();
-            throw new ServerLostException(
-                $"the language server closed the connection during initialize: {ex.Message}{tail}");
+            throw InitializeFailure(ex, exited, tail);
         }
 
         return client;
