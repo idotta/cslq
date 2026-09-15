@@ -104,7 +104,16 @@ else
     // this app, so nothing has ignored its SIGINT the way a run.sh background job's was.
     var started = Process.Start(new ProcessStartInfo("/bin/sh")
     {
-        ArgumentList = { "-c", $"exec {command} > '{logPath}' 2>&1 < /dev/null" },
+        // Every interpolated value is a path from the checkout or the temp directory, so
+        // none of them is constrained to exclude a quote, a `$` or a backtick -- all of which
+        // are live inside the double quotes CreateProcessW's `command` uses. Single-quoted for
+        // `sh` instead, which makes the whole lot literal.
+        ArgumentList =
+        {
+            "-c",
+            $"exec {Quote(cslq)} ready --root {Quote(root)} --timeout 300 --no-daemon "
+            + $"--no-session > {Quote(logPath)} 2>&1 < /dev/null",
+        },
         UseShellExecute = false,
     });
     if (started is null)
@@ -149,7 +158,7 @@ if (!signalled)
 {
     Console.Error.WriteLine($"could not signal {child.Id}: {Marshal.GetLastWin32Error()}");
     Close(handle);
-    child.Kill(entireProcessTree: true);
+    Abandon(child);
     return 1;
 }
 
@@ -158,7 +167,7 @@ interrupted.Stop();
 if (!exited)
 {
     Console.Error.WriteLine("the call never exited after the interrupt");
-    child.Kill(entireProcessTree: true);
+    Abandon(child);
     return 1;
 }
 
@@ -215,6 +224,26 @@ static int Exit(Process child, nint handle) =>
     OperatingSystem.IsWindows()
         ? (Win32.GetExitCodeProcess(handle, out var code) ? unchecked((int)code) : -1)
         : child.ExitCode;
+
+// Kill is asynchronous, and this child is the one thing run.sh's cleanup cannot reach: it
+// kills sessions by pid out of their logs, and this call is --no-session. Returning without
+// waiting leaves a cslq and its server tree behind for the rest of the suite.
+static void Abandon(Process child)
+{
+    try
+    {
+        child.Kill(entireProcessTree: true);
+        child.WaitForExit(10_000);
+    }
+    catch (InvalidOperationException)
+    {
+        // It exited between the check and the kill, which is the outcome wanted anyway.
+    }
+}
+
+// Single quotes make everything literal to `sh`; an apostrophe in the value is the one thing
+// they cannot carry, so it is closed, escaped and reopened.
+static string Quote(string value) => $"'{value.Replace("'", @"'\''", StringComparison.Ordinal)}'";
 
 static void Close(nint handle)
 {
