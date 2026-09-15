@@ -746,14 +746,14 @@ internal static partial class Session
     internal static async Task<int> ServeAsync(Serve serve, CancellationToken ct)
     {
         // Synchronized because the accept loop and every in-flight request write it from
-        // threads of their own, and StreamWriter is not thread-safe. It is not cosmetic: the
+        // threads of their own, and a TextWriter is not thread-safe. That covers this process
+        // alone, which is why the writer under it is AppendLog: a failing bind respawns
+        // sessions on one pipe, so two of them share this file, and a FileStream opened
+        // FileMode.Append writes at a position it tracks itself. It is not cosmetic: the
         // start line below is the only place a session's pid is recorded, Session.Pid parses
         // it and probes/run.sh's EXIT trap kills by it, so two interleaved writes leak a
         // session and its Roslyn server past the end of a gate run.
-        var log = TextWriter.Synchronized(new StreamWriter(
-            new FileStream(LogPath(serve.Pipe), FileMode.Append, FileAccess.Write, FileShare.ReadWrite),
-            Utf8)
-        { AutoFlush = true });
+        var log = TextWriter.Synchronized(new AppendLog(LogPath(serve.Pipe)));
         // Console is redirected too, for anything printed outside a request -- the LSP
         // client's own warnings, most of all -- but the session's own lines go to the writer
         // directly: inside a request Console is a StringWriter belonging to that request's
@@ -807,7 +807,19 @@ internal static partial class Session
         // last instance to be disposed unlinks that path. An instance that is always alive
         // is what keeps the count off zero: every disposal below creates its successor
         // first, so the path a client is connecting to is never the one just unlinked.
+        //
+        // This first bind is the one place a failure is still fatal, and deliberately: a
+        // session that never listened has answered nothing and holds nothing, the client is
+        // already falling back, and the name may well be one this token can never bind --
+        // PipeOptions.CurrentUserOnly writes a DACL for the creator's SID, so a pipe whose
+        // first instance was created under a different token denies every later
+        // CreateNamedPipe with UnauthorizedAccessException for as long as that instance
+        // lives, so retrying here would only spend the bind window below before exiting
+        // anyway. Every bind after it is a different case: by then this session is the thing
+        // holding the workspace, and a failure it can outlast is worth outlasting.
         var pipe = Bind(serve);
+        using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(ct, stopped);
+        var bindWindow = BindWindow(keepalive);
         try
         {
             while (!ct.IsCancellationRequested && !stopped.IsCancellationRequested)
@@ -845,7 +857,10 @@ internal static partial class Session
                     // load again for no visible reason.
                     if (Volatile.Read(ref state.InFlight) != 0)
                     {
-                        pipe = await RebindAsync(serve, pipe);
+                        var rebound = await RebindAsync(serve, pipe, state, bindWindow, shutdown.Token);
+                        if (rebound is null) return 0;
+
+                        pipe = rebound;
                         continue;
                     }
 
@@ -853,7 +868,10 @@ internal static partial class Session
                     // the keepalive: the next iteration arms what is left of it.
                     if (keepalive != Timeout.InfiniteTimeSpan && state.Remaining(keepalive) > TimeSpan.Zero)
                     {
-                        pipe = await RebindAsync(serve, pipe);
+                        var rebound = await RebindAsync(serve, pipe, state, bindWindow, shutdown.Token);
+                        if (rebound is null) return 0;
+
+                        pipe = rebound;
                         continue;
                     }
 
@@ -870,9 +888,12 @@ internal static partial class Session
                     // fell back, and the next call paid the whole load again: 4.5 s and three
                     // processes for one query. The delay is a spin guard, not a wait: an accept
                     // that fails instantly and forever would otherwise be a busy loop.
-                    pipe = await RebindAsync(serve, pipe);
                     state.Log.WriteLine($"cslq session: accept failed: {ex.GetType().Name}: {ex.Message}");
-                    await Task.Delay(25, ct);
+                    await Task.Delay(SpinGuard, ct);
+                    var rebound = await RebindAsync(serve, pipe, state, bindWindow, shutdown.Token);
+                    if (rebound is null) return 0;
+
+                    pipe = rebound;
                     continue;
                 }
 
@@ -887,8 +908,18 @@ internal static partial class Session
                 // instance, which unlinked the path, and the next client connected into the
                 // backlog of a socket nobody was listening on any more — "connected but never
                 // answered", one ping in three in probes/pipe-smoke.cs.
+                //
+                // A successor that cannot be bound is therefore not handed off around: the
+                // accepted connection is still holding the path, so the retry runs with a
+                // client waiting rather than with the path unlinked under it. If the window
+                // runs out, `pipe` is still that accepted connection and the `finally` below
+                // disposes it unserved -- the client sees the hangup and falls back, which is
+                // the same answer it would have got from a session that died.
                 var accepted = pipe;
-                pipe = Bind(serve);
+                var successor = await BindAsync(() => Bind(serve), state.Log, bindWindow, shutdown.Token);
+                if (successor is null) return 0;
+
+                pipe = successor;
                 Interlocked.Increment(ref state.InFlight);
                 _ = ServeOneAsync(accepted, state, gate, ct);
             }
@@ -909,13 +940,109 @@ internal static partial class Session
     /// Replaces a listening instance, successor first: see <see cref="AcceptAsync"/> for why
     /// the order matters. An instance whose <c>WaitForConnectionAsync</c> was cancelled or
     /// failed is not reused — on Windows it may hold a pending connect — so every such path
-    /// comes through here.
+    /// comes through here. Null when the bind could not be had inside its window, or when
+    /// the session is going down: either way the loop ends and the old instance is still the
+    /// caller's to dispose.
     /// </summary>
-    private static async Task<NamedPipeServerStream> RebindAsync(Serve serve, NamedPipeServerStream old)
+    private static async Task<NamedPipeServerStream?> RebindAsync(
+        Serve serve, NamedPipeServerStream old, State state, TimeSpan window, CancellationToken ct)
     {
-        var next = Bind(serve);
+        var next = await BindAsync(() => Bind(serve), state.Log, window, ct);
+        if (next is null) return null;
+
         await old.DisposeAsync();
         return next;
+    }
+
+    /// <summary>
+    /// The spin guard on a failure that repeats: an accept or a bind that fails instantly and
+    /// forever would otherwise be a busy loop. It is not a wait -- nothing is expected to
+    /// change in 25 ms -- it is what keeps a broken session cheap.
+    /// </summary>
+    private static readonly TimeSpan SpinGuard = TimeSpan.FromMilliseconds(25);
+
+    /// <summary>
+    /// How long a bind is retried for. A <em>transient</em> bind failure must not end the
+    /// accept loop -- that is the whole of what this is for, and the races it covers, a client
+    /// hanging up into the instance we are replacing above all, resolve in milliseconds. A
+    /// bind that is still failing five seconds later is not one of those: the name is held by
+    /// an instance created under another token, and <c>CurrentUserOnly</c>'s DACL will deny us
+    /// for as long as that instance lives. Retrying that forever would be worse than the death
+    /// it replaced -- a session that cannot reach <c>WaitForConnectionAsync</c> never arms its
+    /// keepalive, so it would hold a Roslyn server and write log lines for as long as the
+    /// machine was up, where a dead session frees both. Clamped to the keepalive when there is
+    /// a shorter one, so the retry can never outlive the idle window that would have ended the
+    /// session anyway; the probe suite's 60 s and the 900 s default are both above it.
+    /// </summary>
+    private static readonly TimeSpan BindRetryWindow = TimeSpan.FromSeconds(5);
+
+    private static TimeSpan BindWindow(TimeSpan keepalive) =>
+        keepalive == Timeout.InfiniteTimeSpan || keepalive > BindRetryWindow
+            ? BindRetryWindow
+            : keepalive;
+
+    /// <summary>
+    /// Binds, and retries a failure for <paramref name="window"/>: no single bind may end the
+    /// accept loop, for the same reason no single accept may (see <see cref="AcceptAsync"/>).
+    /// A pipe whose first instance was created under a different token denies ours with
+    /// <c>UnauthorizedAccessException</c>, and that used to escape the loop -- the session
+    /// logged <c>stopped:</c> and died, the client fell back, and the next call paid the whole
+    /// workspace load again, which is exactly the defect <c>session-survives-hangups</c>
+    /// exists to prevent, one call further out.
+    /// <para>
+    /// Null when the window ran out or the session is going down, and the caller then ends the
+    /// loop: a name this process cannot have is answered by exiting cleanly, which frees the
+    /// workspace and the Roslyn server under it and leaves the next client to start a session
+    /// of its own. Three log lines at most -- the first failure, and the giving up or the
+    /// recovery -- because this log is also the only record of the session's pid and a line a
+    /// second would bury it.
+    /// </para>
+    /// </summary>
+    internal static async Task<NamedPipeServerStream?> BindAsync(
+        Func<NamedPipeServerStream> bind, TextWriter log, TimeSpan window, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + window;
+        var attempts = 0;
+        Exception? first = null;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var pipe = bind();
+                if (first is not null)
+                    log.WriteLine($"cslq session: bound after {attempts} failed attempts.");
+                return pipe;
+            }
+            catch (Exception ex)
+            {
+                attempts++;
+                if (first is null)
+                {
+                    first = ex;
+                    log.WriteLine($"cslq session: bind failed: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                log.WriteLine(
+                    $"cslq session: could not bind in {window}, {attempts} attempts; stopping. " +
+                    $"First failure: {first!.GetType().Name}: {first.Message}");
+                return null;
+            }
+
+            try
+            {
+                await Task.Delay(SpinGuard, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     private static async Task ServeOneAsync(

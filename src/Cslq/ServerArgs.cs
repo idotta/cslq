@@ -82,6 +82,16 @@ internal static class ServerArgs
 internal class CslqException(string message) : Exception(message);
 
 /// <summary>
+/// The server closed the connection before it answered <c>initialize</c>. Its own type
+/// because <see cref="LspClient.StartAsync"/> retries exactly this once and nothing else: a
+/// shared daemon that died or idled out mid-handshake is self-healing — the failing user's
+/// very next invocation worked — while every other <see cref="CslqException"/> from a start
+/// describes something a second attempt would hit again. Carries the message already
+/// assembled, stderr tail and all, so the retry's failure reads exactly as today's did.
+/// </summary>
+internal sealed class ServerLostException(string message) : CslqException(message);
+
+/// <summary>
 /// The invocation itself could not be understood — an unknown command or option, an option
 /// with no value or a value outside the set it names, an argument the command does not take.
 /// Exit 2 rather than 1, and the usage block follows the message on stderr: the caller has to
