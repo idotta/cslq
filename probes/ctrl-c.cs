@@ -13,11 +13,24 @@
 // CancelKeyPress for ConsoleSpecialKey.ControlBreak as well, which is what the 2026-09-06
 // measurement confirmed this build answers.
 //
-// Windows only, deliberately: off it a plain `kill -INT` raises a real SIGINT and .NET's
-// handler fires for it, so probes/run.sh takes the cheap path there instead of porting this.
+// Off Windows a plain SIGINT is all it takes -- but not one sent by the shell. `kill -INT`
+// from a probes/run.sh background job went wrong twice, in two different ways, and both were
+// the shell rather than cslq: a non-interactive shell sets SIGINT to SIG_IGN for every `&`
+// command and .NET preserves an inherited ignore, so the signal was a no-op and `ready` ran to
+// completion at exit 0; and `set -m`, which clears that, puts the job in a background process
+// group, where macos stopped and then hung it up -- `Hangup: 1`, exit 129 at 0 s, no output,
+// intermittently. So this app owns both platforms and no shell is involved in either: the
+// child is started here and signalled here.
 //
-// Process.Start cannot ask for a process group, so the launch is CreateProcessW by hand. A
-// file-based app rather than a project, like probes/hold-mutex.cs.
+// Process.Start cannot ask for a process group, so the Windows launch is CreateProcessW by
+// hand. Unix goes through `sh -c exec`, which is not a shell in the sense above -- it is a
+// foreground child of this app, so nothing has ignored its SIGINT, and `exec` means the pid
+// we hold is cslq's own rather than a wrapper's. It buys the same file redirection the
+// Windows path sets up through STARTUPINFO. A file rather than a pipe on both, because what
+// outlives an interrupted call can be a server tree, and handing one of those a pipe this app
+// then reads to EOF is the trap probes/stdout-capture.cs is about.
+//
+// A file-based app rather than a project, like probes/hold-mutex.cs.
 //
 // [LibraryImport] generates unsafe code, which a file-based app does not allow by default:
 // without this the build fails with SYSLIB1062 before anything here runs.
@@ -29,12 +42,6 @@ using System.Runtime.InteropServices;
 if (args.Length != 2)
 {
     Console.Error.WriteLine("usage: dotnet run probes/ctrl-c.cs -- <path to cslq> <absolute root>");
-    return 2;
-}
-
-if (!OperatingSystem.IsWindows())
-{
-    Console.Error.WriteLine("probes/ctrl-c.cs is the Windows path; run.sh sends a real SIGINT elsewhere");
     return 2;
 }
 
@@ -50,33 +57,74 @@ var root = args[1];
 var command = $"\"{cslq}\" ready --root \"{root}\" --timeout 300 --no-daemon --no-session";
 
 var logPath = Path.GetTempFileName();
-using var log = new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-using var nul = new FileStream("NUL", FileMode.Open, FileAccess.Read);
-// CreateProcess is called with bInheritHandles, and a handle named in STARTUPINFO reaches the
-// child only if it is inheritable. A file rather than a pipe on purpose: what outlives this
-// call is a server tree, and handing one of those a pipe is the trap probes/stdout-capture.cs
-// is about.
-Inherit(log.SafeFileHandle.DangerousGetHandle());
-Inherit(nul.SafeFileHandle.DangerousGetHandle());
 
-var si = new Win32.StartupInfo
+Process child;
+// Set on Windows only: the handle CreateProcessW hands back, which is what can still be asked
+// for an exit code once the process is gone. The Unix child is one this app started, so
+// Process reports its exit code itself.
+nint handle = 0;
+FileStream? log = null;
+FileStream? nul = null;
+
+if (OperatingSystem.IsWindows())
 {
-    Size = Marshal.SizeOf<Win32.StartupInfo>(),
-    Flags = Win32.STARTF_USESTDHANDLES,
-    StdInput = nul.SafeFileHandle.DangerousGetHandle(),
-    StdOutput = log.SafeFileHandle.DangerousGetHandle(),
-    StdError = log.SafeFileHandle.DangerousGetHandle(),
-};
-var line = (command + "\0").ToCharArray();
-if (!Win32.CreateProcess(
-        null, ref line[0], 0, 0, true, Win32.CREATE_NEW_PROCESS_GROUP, 0, null, ref si, out var pi))
+    log = new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+    nul = new FileStream("NUL", FileMode.Open, FileAccess.Read);
+    // CreateProcess is called with bInheritHandles, and a handle named in STARTUPINFO reaches the
+    // child only if it is inheritable. A file rather than a pipe on purpose: what outlives this
+    // call is a server tree, and handing one of those a pipe is the trap probes/stdout-capture.cs
+    // is about.
+    Inherit(log.SafeFileHandle.DangerousGetHandle());
+    Inherit(nul.SafeFileHandle.DangerousGetHandle());
+
+    var si = new Win32.StartupInfo
+    {
+        Size = Marshal.SizeOf<Win32.StartupInfo>(),
+        Flags = Win32.STARTF_USESTDHANDLES,
+        StdInput = nul.SafeFileHandle.DangerousGetHandle(),
+        StdOutput = log.SafeFileHandle.DangerousGetHandle(),
+        StdError = log.SafeFileHandle.DangerousGetHandle(),
+    };
+    var line = (command + "\0").ToCharArray();
+    if (!Win32.CreateProcess(
+            null, ref line[0], 0, 0, true, Win32.CREATE_NEW_PROCESS_GROUP, 0, null, ref si, out var pi))
+    {
+        Console.Error.WriteLine($"CreateProcessW failed: {Marshal.GetLastWin32Error()} for {command}");
+        return 1;
+    }
+
+    Win32.CloseHandle(pi.Thread);
+    handle = pi.Process;
+    child = Process.GetProcessById(pi.ProcessId);
+}
+else
 {
-    Console.Error.WriteLine($"CreateProcessW failed: {Marshal.GetLastWin32Error()} for {command}");
-    return 1;
+    // `exec` is what makes the pid we hold cslq's own: without it it is the shell's, and the
+    // signal would reach a wrapper that has already gone. This `sh` is a foreground child of
+    // this app, so nothing has ignored its SIGINT the way a run.sh background job's was.
+    var started = Process.Start(new ProcessStartInfo("/bin/sh")
+    {
+        // Every interpolated value is a path from the checkout or the temp directory, so
+        // none of them is constrained to exclude a quote, a `$` or a backtick -- all of which
+        // are live inside the double quotes CreateProcessW's `command` uses. Single-quoted for
+        // `sh` instead, which makes the whole lot literal.
+        ArgumentList =
+        {
+            "-c",
+            $"exec {Quote(cslq)} ready --root {Quote(root)} --timeout 300 --no-daemon "
+            + $"--no-session > {Quote(logPath)} 2>&1 < /dev/null",
+        },
+        UseShellExecute = false,
+    });
+    if (started is null)
+    {
+        Console.Error.WriteLine($"could not start {command}");
+        return 1;
+    }
+
+    child = started;
 }
 
-Win32.CloseHandle(pi.Thread);
-using var child = Process.GetProcessById(pi.ProcessId);
 
 // Sent once the call is demonstrably working rather than after a fixed sleep: consumed CPU is
 // the cheap signal that says so, and it costs no process-tree walk. A call that has already
@@ -93,19 +141,24 @@ if (child.HasExited)
 {
     Console.Error.WriteLine(string.Create(
         CultureInfo.InvariantCulture,
-        $"the call exited on its own after {waited.Elapsed.TotalSeconds:F1}s (exit {Exit(pi.Process)}) "
+        $"the call exited on its own after {waited.Elapsed.TotalSeconds:F1}s (exit {Exit(child, handle)}) "
         + $"before it could be interrupted: {Read(logPath)}"));
-    Win32.CloseHandle(pi.Process);
+    Close(handle);
     return 1;
 }
 
 var busy = child.TotalProcessorTime;
 var interrupted = Stopwatch.StartNew();
-if (!Win32.GenerateConsoleCtrlEvent(Win32.CTRL_BREAK_EVENT, (uint)pi.ProcessId))
+// CTRL_BREAK rather than CTRL_C because the new process group disables CTRL+C for the child;
+// off Windows the same thing is a plain SIGINT, sent by this app rather than by a shell.
+var signalled = OperatingSystem.IsWindows()
+    ? Win32.GenerateConsoleCtrlEvent(Win32.CTRL_BREAK_EVENT, (uint)child.Id)
+    : Posix.Kill(child.Id, Posix.SIGINT) == 0;
+if (!signalled)
 {
-    Console.Error.WriteLine($"GenerateConsoleCtrlEvent failed: {Marshal.GetLastWin32Error()}");
-    Win32.CloseHandle(pi.Process);
-    child.Kill(entireProcessTree: true);
+    Console.Error.WriteLine($"could not signal {child.Id}: {Marshal.GetLastWin32Error()}");
+    Close(handle);
+    Abandon(child);
     return 1;
 }
 
@@ -113,18 +166,17 @@ var exited = child.WaitForExit(60_000);
 interrupted.Stop();
 if (!exited)
 {
-    Console.Error.WriteLine("the call never exited after CTRL_BREAK_EVENT");
-    child.Kill(entireProcessTree: true);
+    Console.Error.WriteLine("the call never exited after the interrupt");
+    Abandon(child);
     return 1;
 }
 
 var output = Read(logPath);
-// GetExitCodeProcess rather than Process.ExitCode: this Process object attached to a pid it
-// did not start, and .NET refuses to report an exit code for one of those.
-var exit = Exit(pi.Process);
+var exit = Exit(child, handle);
 var elapsed = interrupted.Elapsed.TotalSeconds;
-Win32.CloseHandle(pi.Process);
-log.Dispose();
+Close(handle);
+log?.Dispose();
+nul?.Dispose();
 try
 {
     File.Delete(logPath);
@@ -137,7 +189,7 @@ catch (IOException)
 
 Console.WriteLine(string.Create(
     CultureInfo.InvariantCulture,
-    $"CTRL_BREAK_EVENT after {waited.Elapsed.TotalSeconds:F1}s and {busy.TotalMilliseconds:F0}ms of CPU: "
+    $"interrupted after {waited.Elapsed.TotalSeconds:F1}s and {busy.TotalMilliseconds:F0}ms of CPU: "
     + $"exit {exit} in {elapsed * 1000:F0}ms: {output}"));
 
 var ok = exit == 130;
@@ -164,8 +216,39 @@ Console.Error.WriteLine(string.Create(
     $"wanted exit 130 with `cslq: interrupted.` under 2s; got exit {exit} in {elapsed:F3}s: {output}"));
 return 1;
 
-static int Exit(nint process) =>
-    Win32.GetExitCodeProcess(process, out var code) ? unchecked((int)code) : -1;
+// On Windows this Process object attached to a pid it did not start, and .NET refuses to report
+// an exit code for one of those -- hence GetExitCodeProcess against the handle CreateProcessW
+// returned. The Unix child was started here, so Process answers for it, reporting 128+signal for
+// one a signal killed.
+static int Exit(Process child, nint handle) =>
+    OperatingSystem.IsWindows()
+        ? (Win32.GetExitCodeProcess(handle, out var code) ? unchecked((int)code) : -1)
+        : child.ExitCode;
+
+// Kill is asynchronous, and this child is the one thing run.sh's cleanup cannot reach: it
+// kills sessions by pid out of their logs, and this call is --no-session. Returning without
+// waiting leaves a cslq and its server tree behind for the rest of the suite.
+static void Abandon(Process child)
+{
+    try
+    {
+        child.Kill(entireProcessTree: true);
+        child.WaitForExit(10_000);
+    }
+    catch (InvalidOperationException)
+    {
+        // It exited between the check and the kill, which is the outcome wanted anyway.
+    }
+}
+
+// Single quotes make everything literal to `sh`; an apostrophe in the value is the one thing
+// they cannot carry, so it is closed, escaped and reopened.
+static string Quote(string value) => $"'{value.Replace("'", @"'\''", StringComparison.Ordinal)}'";
+
+static void Close(nint handle)
+{
+    if (OperatingSystem.IsWindows() && handle != 0) Win32.CloseHandle(handle);
+}
 
 static void Inherit(nint handle) =>
     Win32.SetHandleInformation(handle, Win32.HANDLE_FLAG_INHERIT, Win32.HANDLE_FLAG_INHERIT);
@@ -175,6 +258,14 @@ static string Read(string path)
     using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
     using var reader = new StreamReader(stream);
     return reader.ReadToEnd().Trim().ReplaceLineEndings(" ");
+}
+
+internal static partial class Posix
+{
+    internal const int SIGINT = 2;
+
+    [LibraryImport("libc", EntryPoint = "kill", SetLastError = true)]
+    internal static partial int Kill(int pid, int signal);
 }
 
 internal static partial class Win32

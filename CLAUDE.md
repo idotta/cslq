@@ -492,15 +492,22 @@ anything works: the unit tests alone prove nothing about the server's behaviour.
   with `CREATE_NEW_PROCESS_GROUP`, which `Process.Start` cannot ask for, so the launch is a
   hand-rolled `CreateProcessW`; the event has to be `CTRL_BREAK_EVENT`, because that flag
   disables CTRL+C for the child, and .NET raises `CancelKeyPress` for `ControlBreak` too. Off
-  Windows a plain `kill -INT` is a real SIGINT and `run.sh` does that instead — but there `wait`
-  reports 130 for a process the signal merely killed as well, so the exit code alone cannot see
-  the handler's absence and the `cslq: interrupted.` match is what discriminates. **The elapsed
+  Windows the same app sends a plain SIGINT through libc against a child it started with
+  `sh -c exec` — and **no shell is in the signal path on either platform, deliberately**. Two CI
+  failures bought that: a non-interactive shell sets SIGINT to `SIG_IGN` for every background
+  command and .NET preserves an inherited ignore, so `kill -INT` on a `&` job was a no-op and
+  `ready` ran to completion at exit 0; `set -m` clears that but puts the job in a background
+  process group, where macOS stopped and then hung it up — `Hangup: 1`, exit 129 at 0 s, no
+  output, intermittently, and green on the run before. Do not reintroduce a shell here. On Unix
+  `Process.ExitCode` reports 130 for a process the signal merely killed as well, so the exit
+  code alone cannot see the handler's absence and the `cslq: interrupted.` match is what
+  discriminates. **The elapsed
   bound, not the message, is what catches a handler that only answers once the whole `--timeout`
   has run out**: that build prints exactly the right line, five minutes late. Measured 2026-09-14
-  on Windows, exit 130 in 19-39 ms; with the handler deleted, exit `-1073741510` and no output at
-  all — the negative control was run rather than assumed. The platform split reads the SDK's RID
-  and is asserted rather than trusted, since an unparsed one would take the Windows run down the
-  MSYS path silently. The orphan-server half of the 2026-09-06 measurement is deliberately **not**
+  on Windows, exit 130 in 21-39 ms, and on Linux 81-85 ms; with the handler deleted, Windows exits
+  `-1073741510` with no output and Linux exits 130 with none — the negative control was run on
+  both rather than assumed, and the Linux half is what proves the message check is load-bearing
+  there. `run.sh` no longer branches on platform at all. The orphan-server half of the 2026-09-06 measurement is deliberately **not**
   in the leg: the server is a `dotnet` process indistinguishable by name from the daemon and the
   sessions the gate runs alongside, so the check would either go red on a healthy machine or never
   be able to go red. A `[LibraryImport]` in a file-based app needs
