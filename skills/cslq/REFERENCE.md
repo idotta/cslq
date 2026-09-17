@@ -282,6 +282,51 @@ for.
    after the bad bytes, which is a wrong answer rather than a wrong-looking one. Re-save the file
    as UTF-8.
 
+## Running under an agent sandbox
+
+Some agent harnesses run their shell inside a sandbox, and the common Windows shape — a
+**restricted token** — denies named pipes. Creating one succeeds; *opening* one fails with
+`UnauthorizedAccessException`, because a bind is a write into the object namespace while an open
+runs a DACL check that a deny-only SID can never pass.
+
+`cslq` needs pipes three times over: its own background session, Roslyn's language-server daemon,
+and MSBuild's node communication during the design-time build. So every mode fails, and each
+message points somewhere else:
+
+- `session unavailable; this run loaded the workspace itself` is about `cslq`'s *own* pipe. An
+  `UnauthorizedAccessException` under `DaemonClient.ConnectAsync` in the server stderr beneath it
+  is Roslyn's *daemon* — an independent mechanism, not a consequence of the first line.
+- `every probed project answered empty … check that 'dotnet build' succeeds in this root` is the
+  design-time build failing because MSBuild could not reach its nodes. The advice does not apply
+  here: a plain `dotnet build` fails the same way, and measured on one such tree it exited 1 after
+  4.2 s reporting **0 errors and 0 warnings** — an infrastructure failure wearing a compiler's
+  clothes.
+- `--no-daemon` does not help, and neither does any other flag. The failure is not the daemon; it
+  is every pipe.
+
+Four lines confirm it, and the asymmetry is the signature — bind succeeds, connect does not:
+
+```powershell
+$s = [System.IO.Pipes.NamedPipeServerStream]::new('cslq-probe'); 'bind ok'
+$null = $s.WaitForConnectionAsync()
+try { $c = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'cslq-probe'); $c.Connect(3000); 'connect ok' }
+catch { "connect FAILED: $($_.Exception.GetType().Name)" }
+```
+
+The `try`/`catch` is load-bearing: without it PowerShell treats the exception as non-terminating,
+continues, and prints `connect ok` under a sandbox that just denied the connect.
+
+The only fix is to run `cslq` outside the sandbox — an escalated command, or a shell the harness
+does not sandbox. **Do not report these symptoms as `cslq` defects.** They are identical on a
+healthy repository, which is also how to tell: run the same command against a tree you know is
+fine, and if that fails too it is the sandbox, not the code.
+
+Two side effects. On Windows each attempt kills the Roslyn client with an unhandled exception,
+which pops a Just-In-Time Debugger dialog on the user's screen wherever JIT debugging is
+registered — so do not retry in a loop. And never capture `cslq`'s stdout into a variable or
+`$(...)`: it spawns background processes that inherit the pipe, and the capture then blocks for
+the whole keepalive. Redirect to a file and read the file.
+
 ## Limits that are `cslq`'s, not the user's
 
 `cslq ready` covers every project it can infer a readiness probe for. Two shapes fall outside
