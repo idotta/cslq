@@ -1262,7 +1262,10 @@ ec_tmp=""
 ok=1
 [ "$rc" = 1 ] || ok=0
 [ "$ec_elapsed" -lt 90 ] || ok=0
-for want in "did not become ready" "Ghost" "for project B" "projectInitializationComplete fired"; do
+# The grace, not --timeout, is what ends this wait -- which is what the elapsed bound above
+# measures -- so the headline has to name the grace and say that --timeout is not the lever.
+# It used to quote the whole --timeout here: "within 150s" after 22s of waiting.
+for want in "did not become ready" "Ghost" "for project B" "projectInitializationComplete" "not the lever"; do
   case "$out" in
     *"$want"*) ;;
     *) ok=0 ;;
@@ -1281,8 +1284,15 @@ fi
 ok=1
 [ "$ecw_rc" = 1 ] || ok=0
 [ "$ecw_elapsed" -lt 5 ] || ok=0
+# Warm, the notification arrived minutes ago, so the grace is spent and the headline says so
+# -- naming the notification and the lever that is not --timeout, which is the whole point of a
+# call that fails in 0s of a 150s budget.
 case "$ecw_out" in
-  *"projectInitializationComplete fired"*) ;;
+  *"projectInitializationComplete"*) ;;
+  *) ok=0 ;;
+esac
+case "$ecw_out" in
+  *"not the lever"*) ;;
   *) ok=0 ;;
 esac
 if [ "$ok" = 1 ]; then

@@ -168,6 +168,86 @@ public class ReadinessMessageTests
         Assert.Equal(expected, Readiness.EveryProjectEmpty(pending, probed));
     }
 
+    /// <summary>
+    /// The wait ends at projectInitializationComplete + the grace, so a 60s --timeout reported
+    /// "within 60s" after 22s of waiting and sent every reader to the one lever that cannot
+    /// help. The headline has to say which bound stopped it and how long was actually spent.
+    /// </summary>
+    [Fact]
+    public void A_wait_the_grace_ended_reports_the_grace_and_not_the_timeout()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(60),
+            Fired: true,
+            [Pending("Core", "Greeter")],
+            [],
+            [],
+            Grace: new Readiness.GraceBound(TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(22))));
+
+        var headline = message.Split('\n')[0];
+
+        Assert.Contains("did not become ready 20s after projectInitializationComplete", headline);
+        Assert.Contains("22s into the 60s it was given", headline);
+        Assert.Contains("raising --timeout is not the lever", headline);
+        Assert.DoesNotContain("within 60s", headline);
+    }
+
+    /// <summary>
+    /// The other branch is unchanged: --timeout really did end the wait, so it is what the
+    /// headline names and the grace is not mentioned at all.
+    /// </summary>
+    [Fact]
+    public void A_wait_the_timeout_ended_still_names_the_timeout()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(45), Fired: true, [Pending("B", "Ghost")], [], []));
+
+        Assert.Contains("Workspace did not become ready within 45s", message);
+        Assert.DoesNotContain("not the lever", message);
+    }
+
+    /// <summary>
+    /// A grace-bound failure can also be the every-project-empty one, and both clauses have to
+    /// survive: the cause is what says why, the grace is what says which lever.
+    /// </summary>
+    [Fact]
+    public void A_cause_and_a_grace_bound_are_both_in_the_headline()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(60),
+            Fired: true,
+            [Pending("Lib", "LibType")],
+            [],
+            [],
+            Cause: "the .NET SDK cannot run in this root",
+            Grace: new Readiness.GraceBound(TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(21))));
+
+        var headline = message.Split('\n')[0];
+
+        Assert.Contains("20s after projectInitializationComplete", headline);
+        Assert.Contains("every probed project answered empty", headline);
+    }
+
+    /// <summary>
+    /// The server's log rides above its stderr: window/logMessage is where the design-time
+    /// build failure is reported, and stderr is the process noise under it.
+    /// </summary>
+    [Fact]
+    public void The_server_log_sits_between_the_items_and_the_stderr_tail()
+    {
+        var message = Readiness.Message(new Readiness.Failure(
+            TimeSpan.FromSeconds(45),
+            Fired: true,
+            [Pending("B", "Ghost")],
+            [],
+            [],
+            StderrTail: "\n--- server stderr ---\nboom",
+            LogTail: "\n--- server log ---\nerror: MSB4166"));
+
+        Assert.EndsWith("\n--- server stderr ---\nboom", message);
+        Assert.Contains("\n--- server log ---\nerror: MSB4166\n--- server stderr ---", message);
+    }
+
     private static Readiness.Unresolved Pending(string project, params string[] candidates) =>
         new($"project {project}", candidates);
 }

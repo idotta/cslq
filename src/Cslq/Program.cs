@@ -278,7 +278,7 @@ internal static partial class Program
         if (opts.Session && Solutions(opts.Root).Count == 1)
         {
             if (await Session.TryRunAsync(argv, opts, cts.Token) is { } exit) return exit;
-            Console.Error.WriteLine(Session.FallbackNotice);
+            Console.Error.WriteLine(Session.Notice);
         }
 
         // Before discovery rather than after it, so a solution listing nothing but non-C#

@@ -37,6 +37,23 @@ internal static partial class Session
     internal const string FallbackNotice =
         "cslq: session unavailable; this run loaded the workspace itself";
 
+    /// <summary>
+    /// The same line for the one cause that is worth naming where it is noticed. Opening a pipe
+    /// was refused, which is a restricted token rather than a missing session, and the reader
+    /// needs to know it now: the run that follows uses pipes twice more — Roslyn's daemon and
+    /// MSBuild's nodes — and will fail for the same reason wearing a compiler's clothes.
+    /// </summary>
+    internal const string DeniedNotice =
+        "cslq: opening a named pipe was denied (restricted token / agent sandbox), so no "
+        + "session was used; Roslyn's daemon and MSBuild's design-time build need pipes too, "
+        + "and will fail the same way — run cslq outside the sandbox";
+
+    /// <summary>The notice for a run that asked for a session and did not get one.</summary>
+    internal static string Notice => NoticeFor(PipesDenied);
+
+    /// <summary>The choice alone, so it is pinned without a sandbox to run under.</summary>
+    internal static string NoticeFor(bool denied) => denied ? DeniedNotice : FallbackNotice;
+
     /// <summary>The internal flag that turns a <c>cslq</c> into the session process.</summary>
     internal const string ServeFlag = "--serve";
 
@@ -220,6 +237,9 @@ internal static partial class Session
             {
                 Reached.Answered => sent.Exit,
                 Reached.Declined => null,
+                // Nothing to start: the pipe is not missing, it is forbidden, and a session we
+                // spawned would bind one this process still could not open.
+                Reached.Denied => null,
                 _ => await StartAndSendAsync(pipe, opts, request, ct),
             };
         }
@@ -248,12 +268,53 @@ internal static partial class Session
     /// attempt gets the same answer and another session cannot be started on a pipe that one
     /// already holds. <c>Retry</c> is the transport, and on Unix it is a real if narrow
     /// state; see <see cref="SendAsync"/>.
+    /// <para>
+    /// <c>Denied</c> is the one transport failure that is not "in a moment": a restricted
+    /// token — the common Windows agent sandbox — lets a bind through and fails every
+    /// <em>open</em> with <c>UnauthorizedAccessException</c>, because a bind writes into the
+    /// object namespace while an open runs a DACL check a deny-only SID can never pass. Folded
+    /// into <c>Retry</c> it cost the whole ladder: the mutex wait, the retry window, a spawned
+    /// session and then <see cref="SpawnWindow"/> of 25ms attempts against a process that
+    /// never exits, ~42s of it, before a fallback that then blamed the build. It is final on
+    /// the first attempt instead, and <see cref="PipesDenied"/> carries the fact to the
+    /// messages that would otherwise misname it.
+    /// </para>
     /// </summary>
     private enum Reached
     {
         Answered,
         Declined,
         Retry,
+        Denied,
+    }
+
+    /// <summary>
+    /// Whether opening a named pipe was refused outright in this process. Set by the only code
+    /// that can know it — a connect that came back <c>UnauthorizedAccessException</c> — and
+    /// read on the failure paths that would otherwise name the wrong cause: the fallback notice
+    /// and <see cref="Diagnosis.Cause"/>, which under a sandbox tells the reader to check a
+    /// <c>dotnet build</c> that fails for the same reason and says nothing about it.
+    /// <para>
+    /// A run given <c>--no-session</c> never attempts a pipe of its own and so never sets this;
+    /// its message is unchanged. Sessions are on by default, which is the case worth covering.
+    /// </para>
+    /// </summary>
+    internal static bool PipesDenied => Volatile.Read(ref _pipesDenied) != 0;
+
+    private static int _pipesDenied;
+
+    /// <summary>
+    /// Whether a failed connect is a refusal rather than a "not yet". One predicate for both
+    /// connect sites, and its own member so the classification is pinned without a sandbox to
+    /// run under: an <c>IOException</c> here is the Unix re-bind window and must stay retryable,
+    /// which is the mutation this exists to catch.
+    /// </summary>
+    internal static bool IsDenial(Exception ex) => ex is UnauthorizedAccessException;
+
+    private static Sent Denied()
+    {
+        Volatile.Write(ref _pipesDenied, 1);
+        return new Sent(Reached.Denied, 0);
     }
 
     private readonly record struct Sent(Reached Reached, int Exit);
@@ -311,6 +372,10 @@ internal static partial class Session
         try
         {
             await client.ConnectAsync(FastConnectMs, ct);
+        }
+        catch (Exception ex) when (IsDenial(ex))
+        {
+            return Denied();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -402,7 +467,7 @@ internal static partial class Session
         // reporting the other.
         var sent = await SendAsync(pipe, request, RetryWindow, null, null, ct);
         if (sent.Reached == Reached.Answered) return sent.Exit;
-        if (sent.Reached == Reached.Declined) return null;
+        if (sent.Reached is Reached.Declined or Reached.Denied) return null;
 
         // The spawned session binds its pipe before it loads anything, so the first attempt
         // that connects is also the one that carries the query. There is no separate liveness
@@ -610,6 +675,13 @@ internal static partial class Session
             rpc.StartListening();
             await rpc.InvokeWithCancellationAsync(method, null, ct);
             return true;
+        }
+        catch (Exception ex) when (IsDenial(ex))
+        {
+            // `status` and `stop` still answer "not found", which is all they can say — but the
+            // fact is recorded, so a query later in the same process names the sandbox.
+            Denied();
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -351,6 +351,35 @@ public class SessionTests
         public Task Boom() => throw new InvalidOperationException("the roslyn client fell over");
     }
 
+    /// <summary>
+    /// A restricted token -- the common Windows agent sandbox -- lets a bind through and fails
+    /// every open with UnauthorizedAccessException. Folded into the retryable transport states
+    /// it cost the mutex wait, the retry window, a spawned session and the whole spawn window
+    /// against a process that never exits, before a fallback that then blamed the build. An
+    /// IOException in the same place is the Unix re-bind window and must stay retryable.
+    /// </summary>
+    [Fact]
+    public void Only_a_refused_open_is_a_denial()
+    {
+        Assert.True(Session.IsDenial(new UnauthorizedAccessException()));
+        Assert.False(Session.IsDenial(new IOException("the socket path is between two binds")));
+        Assert.False(Session.IsDenial(new TimeoutException()));
+        Assert.False(Session.IsDenial(new InvalidOperationException()));
+    }
+
+    /// <summary>
+    /// And it is named where it is noticed, because the run that follows uses pipes twice more
+    /// and fails the same way -- with the daemon's and MSBuild's messages each pointing
+    /// somewhere else.
+    /// </summary>
+    [Fact]
+    public void A_denial_is_a_different_notice_from_a_missing_session()
+    {
+        Assert.Equal(Session.FallbackNotice, Session.NoticeFor(denied: false));
+        Assert.Contains("restricted token / agent sandbox", Session.NoticeFor(denied: true));
+        Assert.Contains("outside the sandbox", Session.NoticeFor(denied: true));
+    }
+
     private static Program.Options Options(string logLevel, bool daemon) => new(
         "hover", "Greet", Path.GetFullPath(Root), null, 50, 1, TimeSpan.FromSeconds(180),
         logLevel, false, false, daemon, true, null);

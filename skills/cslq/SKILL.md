@@ -33,11 +33,12 @@ read the errors. A file you just wrote becomes visible in about a second, so an 
 nothing to say is a failed *design-time build* — an unresolvable `PackageReference`, a
 `global.json` pinning an SDK that is not installed — and `ready` names that one for you.
 
-**A sandbox that denies named pipes breaks `cslq` outright, and every message blames your build.**
-Its session, Roslyn's daemon and MSBuild's design-time build all need pipes, so a restricted token
-gives `session unavailable`, then `every probed project answered empty`, then advice to run
-`dotnet build` — which fails the same way. `--no-daemon` does not help. Run `cslq` outside the
-sandbox; REFERENCE.md has the four-line check and the rest.
+**A sandbox that denies named pipes breaks `cslq` outright.** Its session, Roslyn's daemon and
+MSBuild's design-time build all need pipes, so a restricted token fails every mode. `cslq` names
+it — `opening a named pipe was denied (restricted token / agent sandbox)` — on both the session
+notice and the `ready` cause, so take that line at its word rather than chasing the build.
+`--no-daemon` does not help. Run `cslq` outside the sandbox; REFERENCE.md has the four-line check
+and the rest.
 
 ## Task → command
 

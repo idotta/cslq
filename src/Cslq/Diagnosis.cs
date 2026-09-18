@@ -25,11 +25,29 @@ internal static class Diagnosis
 
     /// <summary>
     /// The sentence for the failure message, or null when nothing was found to say. Pure, so
-    /// the interpretation is testable without an SDK that is not installed: the two inputs are
-    /// what the probes below measured.
+    /// the interpretation is testable without an SDK that is not installed: the inputs are what
+    /// the probes below measured.
     /// </summary>
-    internal static string? Cause(Sdk? sdk, IReadOnlyList<string> unrestored)
+    /// <param name="pipesDenied">
+    /// Whether opening a named pipe was refused in this process — see
+    /// <see cref="Session.PipesDenied"/>. First, because it subsumes both of the others: MSBuild
+    /// reaches its worker nodes over pipes, so a restricted token fails the design-time build
+    /// for every project, and the fallthrough's advice is then advice to run a
+    /// <c>dotnet build</c> that fails the same way. Measured on one such tree it exited 1 after
+    /// 4.2s reporting 0 errors and 0 warnings — an infrastructure failure wearing a compiler's
+    /// clothes, which is exactly what sends a reader to look for a compiler error.
+    /// </param>
+    internal static string? Cause(Sdk? sdk, IReadOnlyList<string> unrestored, bool pipesDenied = false)
     {
+        if (pipesDenied)
+        {
+            return "opening a named pipe was denied in this process (restricted token / agent "
+                + "sandbox), and MSBuild reaches its worker nodes over pipes — so the "
+                + "design-time build fails for every project and the workspace loads empty. "
+                + "'dotnet build' fails here too, and reports no error of its own. Run cslq "
+                + "outside the sandbox.";
+        }
+
         if (sdk is { ExitCode: not 0 } bad)
         {
             // The SDK's own text is what names global.json and the version it wanted, and it
