@@ -23,6 +23,15 @@ internal static class Readiness
     /// </summary>
     internal readonly record struct Unresolved(string Subject, IReadOnlyList<string> Candidates);
 
+    /// <summary>
+    /// The post-load grace, when it — and not <c>--timeout</c> — is what ended the wait, with
+    /// how long the run had actually spent by then. Present only on that branch, because it is
+    /// the only one where the headline's <c>--timeout</c> was a lie: the wait stops at
+    /// <c>projectInitializationComplete + grace</c>, so a 60s <c>--timeout</c> reported "within
+    /// 60s" after 22s and sent every reader to the one lever that cannot help.
+    /// </summary>
+    internal readonly record struct GraceBound(TimeSpan Grace, TimeSpan Waited);
+
     /// <param name="Stale">
     /// The subjects whose candidate sentinel no longer matches what the disk says, rendered
     /// the way <paramref name="Pending"/>'s are. A session infers its sentinels once per
@@ -42,7 +51,9 @@ internal static class Readiness
         string? Cause = null,
         string? StderrTail = null,
         IReadOnlyList<string>? Stale = null,
-        string? Root = null);
+        string? Root = null,
+        GraceBound? Grace = null,
+        string? LogTail = null);
 
     /// <summary>
     /// Whether every project that could be probed came back empty. With the load finished,
@@ -86,30 +97,53 @@ internal static class Readiness
             lines.Add($"  not probed, having no sources of their own: {string.Join(", ", f.Linked)}");
         }
 
-        return string.Join('\n', lines) + f.StderrTail;
+        // The server's own log before its stderr: window/logMessage is where a design-time
+        // build failure is actually reported, and stderr is the process-level noise under it.
+        return string.Join('\n', lines) + f.LogTail + f.StderrTail;
     }
 
     private static string Headline(Failure f)
     {
-        var within = $"Workspace did not become ready within {f.Timeout.TotalSeconds:0}s";
-
         if (!f.Fired)
         {
             // A short --timeout used to be reported as "projectInitializationComplete
             // never fired", which reads as a fault and is the ordinary state of every attach
             // until the reload ends. What the caller needs is the deadline, not the protocol.
-            return $"{within}: the workspace is still loading — projectInitializationComplete "
-                + "has not fired, so the solution load this run asked for has not finished. "
-                + "Raise --timeout.";
+            // Reaching here means the wait ran to the deadline: nothing has fired, so there is
+            // no grace to bound from and --timeout really is the lever.
+            return $"Workspace did not become ready within {Secs(f.Timeout)}: the workspace is "
+                + "still loading — projectInitializationComplete has not fired, so the solution "
+                + "load this run asked for has not finished. Raise --timeout.";
+        }
+
+        var notes = new List<string>();
+        string lead;
+
+        if (f.Grace is { } grace)
+        {
+            lead = $"Workspace did not become ready {Secs(grace.Grace)} after "
+                + "projectInitializationComplete";
+            notes.Add($"the wait ended there rather than at --timeout, {Secs(grace.Waited)} into "
+                + $"the {Secs(f.Timeout)} it was given, so raising --timeout is not the lever");
+        }
+        else
+        {
+            lead = $"Workspace did not become ready within {Secs(f.Timeout)}";
+            notes.Add("projectInitializationComplete fired");
         }
 
         // A cause is only ever computed in the every-project-empty state, so it is also what
         // says the headline may claim it — see LspClient.WaitReadyAsync's call.
-        return f.Cause is not null
-            ? $"{within} (projectInitializationComplete fired, and every probed project "
-                + "answered empty — the shape of a design-time build that failed):"
-            : $"{within} (projectInitializationComplete fired):";
+        if (f.Cause is not null)
+        {
+            notes.Add("every probed project answered empty — the shape of a design-time build "
+                + "that failed");
+        }
+
+        return $"{lead} ({string.Join("; ", notes)}):";
     }
+
+    private static string Secs(TimeSpan span) => $"{span.TotalSeconds:0}s";
 
     private static string Quote(IReadOnlyList<string> candidates) =>
         $"'{string.Join("' / '", candidates)}'";

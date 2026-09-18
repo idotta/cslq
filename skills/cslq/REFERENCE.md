@@ -290,19 +290,22 @@ Some agent harnesses run their shell inside a sandbox, and the common Windows sh
 runs a DACL check that a deny-only SID can never pass.
 
 `cslq` needs pipes three times over: its own background session, Roslyn's language-server daemon,
-and MSBuild's node communication during the design-time build. So every mode fails, and each
-message points somewhere else:
+and MSBuild's node communication during the design-time build. So every mode fails.
 
-- `session unavailable; this run loaded the workspace itself` is about `cslq`'s *own* pipe. An
-  `UnauthorizedAccessException` under `DaemonClient.ConnectAsync` in the server stderr beneath it
-  is Roslyn's *daemon* — an independent mechanism, not a consequence of the first line.
-- `every probed project answered empty … check that 'dotnet build' succeeds in this root` is the
-  design-time build failing because MSBuild could not reach its nodes. The advice does not apply
-  here: a plain `dotnet build` fails the same way, and measured on one such tree it exited 1 after
-  4.2 s reporting **0 errors and 0 warnings** — an infrastructure failure wearing a compiler's
-  clothes.
-- `--no-daemon` does not help, and neither does any other flag. The failure is not the daemon; it
-  is every pipe.
+`cslq` recognises the refusal on its own pipe and says so, on both messages:
+
+- `opening a named pipe was denied (restricted token / agent sandbox) … run cslq outside the
+  sandbox` replaces the old `session unavailable; this run loaded the workspace itself`, and it
+  is said the moment the connect is refused rather than after ~42 s of retrying a wall it could
+  not identify. An `UnauthorizedAccessException` under `DaemonClient.ConnectAsync` in the server
+  stderr beneath it is Roslyn's *daemon* — an independent mechanism, not a consequence.
+- `cause: opening a named pipe was denied … MSBuild reaches its worker nodes over pipes` replaces
+  the old `check that 'dotnet build' succeeds in this root`, whose advice never applied: a plain
+  `dotnet build` fails the same way, and measured on one such tree it exited 1 after 4.2 s
+  reporting **0 errors and 0 warnings** — an infrastructure failure wearing a compiler's clothes.
+- Both depend on `cslq` having attempted a pipe of its own, so `--no-session` still gets the old
+  wording. `--no-daemon` does not help either, and neither does any other flag: the failure is not
+  the daemon, it is every pipe.
 
 Four lines confirm it, and the asymmetry is the signature — bind succeeds, connect does not:
 

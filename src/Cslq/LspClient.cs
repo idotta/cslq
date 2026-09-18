@@ -546,10 +546,15 @@ internal sealed partial class LspClient : IAsyncDisposable
     public async Task WaitReadyAsync(
         IReadOnlyList<Sentinel> sentinels, TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        var started = DateTime.UtcNow;
+        var deadline = started + timeout;
         var pending = Unproved(sentinels, _proved);
         var unprobed = sentinels.Where(s => s.Candidates.Count == 0 && !s.Skipped).ToList();
         var linked = sentinels.Where(s => s.Skipped).ToList();
+
+        // Hoisted out of the loop because the failure message has to say which of the two
+        // bounds ended the wait, and only the round that broke knows.
+        var bound = deadline;
 
         while (true)
         {
@@ -564,7 +569,7 @@ internal sealed partial class LspClient : IAsyncDisposable
             pending = [.. pending.Where((_, i) => !resolved[i])];
             if (pending.Count == 0) return;
             var loaded = _endpoints.InitializedAt;
-            var bound = loaded is null || deadline < loaded.Value + PostLoadGrace
+            bound = loaded is null || deadline < loaded.Value + PostLoadGrace
                 ? deadline
                 : loaded.Value + PostLoadGrace;
             if (DateTime.UtcNow >= bound) break;
@@ -576,11 +581,32 @@ internal sealed partial class LspClient : IAsyncDisposable
         // The whole load finished and not one project answered: that is what a failed
         // design-time build looks like from here, and it is the only state worth a `dotnet`
         // launch to explain. Anything less is an ordinary unresolvable candidate.
-        var cause = fired && Readiness.EveryProjectEmpty(pending.Count, probed)
+        var denied = Session.PipesDenied;
+        var empty = fired && Readiness.EveryProjectEmpty(pending.Count, probed);
+        // A denial answers the cause on its own, so the launch is skipped: it is the one thing
+        // on the failure path that costs a process, and it would run under the very token that
+        // produced the denial.
+        var sdk = empty && !denied ? await SdkAsync(ct) : null;
+        var cause = empty
             ? Diagnosis.Cause(
-                await SdkAsync(ct),
-                Diagnosis.Unrestored(Root, sentinels.Where(s => !s.Explicit).Select(s => s.Directory)))
+                sdk,
+                Diagnosis.Unrestored(Root, sentinels.Where(s => !s.Explicit).Select(s => s.Directory)),
+                denied)
             : null;
+
+        // Only when the grace is what stopped us. Reported as measured rather than as
+        // configured: `bound` is the deadline whenever the grace did not apply, so the
+        // comparison is the branch itself rather than a second reading of the same rule.
+        var grace = bound < deadline
+            ? new Readiness.GraceBound(PostLoadGrace, DateTime.UtcNow - started)
+            : (Readiness.GraceBound?)null;
+
+        // With the cause, and only with it. The log is the evidence for the design-time build
+        // reading; nothing else needs it. An ordinary unresolvable candidate is one project of
+        // twenty, the server has said nothing about it, and the tail is then the load's own
+        // startup warnings — measured on the exhausted-candidate leg, "we are unable to use LSP
+        // file watching" — pushed in front of the line the reader wants.
+        var log = cause is null ? null : _endpoints.LogTail();
 
         throw new CslqException(Readiness.Message(new Readiness.Failure(
             timeout,
@@ -594,7 +620,9 @@ internal sealed partial class LspClient : IAsyncDisposable
             cause,
             StderrTail(),
             StaleSubjects(pending),
-            Root)));
+            Root,
+            grace,
+            log)));
     }
 
     /// <summary>
@@ -1547,6 +1575,18 @@ internal sealed partial class LspClient : IAsyncDisposable
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private long _initializedAtTicks;
 
+        private readonly Queue<string> _log = new();
+
+        /// <summary>
+        /// How many <c>window/logMessage</c> lines are kept, and how wide each may be. Small on
+        /// both axes because this rides on a failure message a reader has to get through: the
+        /// server logs a line per project on a load, and the ones that matter — MSBuild's — are
+        /// the last ones before the wait gave up.
+        /// </summary>
+        private const int LogKept = 8;
+
+        private const int LogWidth = 300;
+
         /// <summary>
         /// Completes when <c>projectInitializationComplete</c> arrives, for a caller that wants
         /// to await it against a live wire — which is what <c>LspWireTests</c> does. Readiness
@@ -1605,8 +1645,80 @@ internal sealed partial class LspClient : IAsyncDisposable
         [JsonRpcMethod("workspace/diagnostic/refresh", UseSingleObjectParameterDeserialization = true)]
         public object? OnDiagnosticRefresh(JsonElement _) => null;
 
+        /// <summary>
+        /// The one place the server says why a design-time build failed. MSBuild reports it to
+        /// Roslyn, Roslyn logs it here, and nothing of it reaches a response — so a readiness
+        /// failure could only ever say "every project answered empty" and guess at the rest.
+        /// Discarding the payload was that guess made permanent.
+        /// <para>
+        /// Errors and warnings alone. <c>Info</c> and <c>Log</c> are the load's running
+        /// commentary, one line per project and more, and keeping them would push the two lines
+        /// worth reading out of a bounded tail.
+        /// </para>
+        /// <para>
+        /// Read by hand off the <c>JsonElement</c> rather than through a typed parameter: the
+        /// payload is a notification, so a shape that fails to bind takes the notification with
+        /// it, and a server that sends a <c>type</c> this does not recognise should cost a
+        /// skipped log line and not a dropped one.
+        /// </para>
+        /// </summary>
         [JsonRpcMethod("window/logMessage", UseSingleObjectParameterDeserialization = true)]
-        public void OnLogMessage(JsonElement _) { }
+        public void OnLogMessage(JsonElement p)
+        {
+            if (!p.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.Number
+                || !type.TryGetInt32(out var level)
+                || level is < 1 or > 2)
+            {
+                return;
+            }
+
+            if (!p.TryGetProperty("message", out var message)
+                || message.ValueKind != JsonValueKind.String
+                || message.GetString() is not { Length: > 0 } text)
+            {
+                return;
+            }
+
+            Keep((level == 1 ? "error: " : "warning: ") + Flatten(text));
+        }
+
+        /// <summary>
+        /// The kept log messages, rendered the way <see cref="LspClient.StderrTail"/> renders
+        /// the server's stderr, or empty when nothing was kept — which is the ordinary case and
+        /// must add nothing to the message.
+        /// </summary>
+        internal string LogTail()
+        {
+            lock (_log)
+            {
+                return _log.Count == 0
+                    ? string.Empty
+                    : "\n--- server log ---\n" + string.Join('\n', _log);
+            }
+        }
+
+        private void Keep(string line)
+        {
+            lock (_log)
+            {
+                // A failing design-time build repeats itself per project, and the repeat says
+                // nothing the first one did not.
+                if (_log.Count > 0 && _log.Last() == line) return;
+                _log.Enqueue(line);
+                if (_log.Count > LogKept) _log.Dequeue();
+            }
+        }
+
+        /// <summary>
+        /// One line, bounded. The server's log messages carry embedded newlines — a stack trace
+        /// behind a one-line summary — and the failure message is read a line at a time.
+        /// </summary>
+        private static string Flatten(string text)
+        {
+            var line = text.ReplaceLineEndings(" ").Trim();
+            return line.Length > LogWidth ? line[..LogWidth] + "…" : line;
+        }
 
         [JsonRpcMethod("window/showMessage", UseSingleObjectParameterDeserialization = true)]
         public void OnShowMessage(JsonElement _) { }

@@ -99,6 +99,44 @@ public class DiagnosisTests
         Assert.DoesNotContain("dotnet --version", cause);
     }
 
+    /// <summary>
+    /// A restricted token subsumes both of the others: MSBuild reaches its worker nodes over
+    /// pipes, so the design-time build fails for every project, and the fallthrough's advice is
+    /// advice to run a `dotnet build` that fails the same way and reports no error of its own.
+    /// </summary>
+    [Fact]
+    public void A_denied_pipe_is_the_cause_and_says_so_in_the_readers_terms()
+    {
+        var cause = Diagnosis.Cause(null, [], pipesDenied: true);
+
+        Assert.Contains("restricted token / agent sandbox", cause);
+        Assert.Contains("MSBuild", cause);
+        Assert.DoesNotContain("every project compiled to nothing", cause);
+    }
+
+    /// <summary>
+    /// And it wins over both, because both would send the reader somewhere the sandbox already
+    /// explains -- an SDK that "cannot run" here runs fine outside it.
+    /// </summary>
+    [Fact]
+    public void A_denied_pipe_outranks_an_sdk_failure_and_a_missing_restore()
+    {
+        var cause = Diagnosis.Cause(new Diagnosis.Sdk(155, "boom"), ["Lib"], pipesDenied: true);
+
+        Assert.Contains("restricted token / agent sandbox", cause);
+        Assert.DoesNotContain("dotnet restore", cause);
+        Assert.DoesNotContain("dotnet --version", cause);
+    }
+
+    /// <summary>Nothing changes for the ordinary run, which is every run off a sandbox.</summary>
+    [Fact]
+    public void An_ordinary_run_is_diagnosed_exactly_as_before()
+    {
+        Assert.Equal(
+            Diagnosis.Cause(new Diagnosis.Sdk(0, "10.0.301"), ["Lib"]),
+            Diagnosis.Cause(new Diagnosis.Sdk(0, "10.0.301"), ["Lib"], pipesDenied: false));
+    }
+
     [Fact]
     public void Unrestored_names_the_projects_with_no_assets_file_and_skips_the_rest()
     {
