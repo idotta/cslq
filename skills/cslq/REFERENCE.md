@@ -324,6 +324,35 @@ does not sandbox. **Do not report these symptoms as `cslq` defects.** They are i
 healthy repository, which is also how to tell: run the same command against a tree you know is
 fine, and if that fails too it is the sandbox, not the code.
 
+### Codex on Windows: direct terminal execution
+
+When this sandbox restriction is known and the host allows escalation, call `exec_command`
+directly with arguments like these, replacing the root with the actual solution directory:
+
+```json
+{
+  "cmd": "cslq ready",
+  "workdir": "C:\\path\\to\\repo",
+  "sandbox_permissions": "require_escalated",
+  "justification": "May I run cslq outside the sandbox so its session and MSBuild can use named pipes?",
+  "prefix_rule": ["cslq"]
+}
+```
+
+Use the same execution settings for subsequent queries. The host still controls approval;
+a requested prefix does not guarantee approval or transfer permission to another agent.
+If the call returns a running session ID, collect it with `write_stdin` rather than launching
+another `ready`. Invoke `cslq ready` directly, without capturing its output in a PowerShell
+variable. Keep the default session and daemon enabled.
+
+`cslq session status` from a later tool call checks that the background session survived;
+a narrow `hover` or `refs` query then checks that it answers. This works through the agent's
+terminal tool without a dedicated Herdr pane, another terminal tab, or a manually started
+server. A `CreateProcessAsUserW` failure before PowerShell starts is a launcher failure, not
+evidence that cslq attempted a pipe connection; use the host's approved launcher recovery.
+If escalation is unavailable or denied, report that limitation rather than using another
+pane to bypass it.
+
 Two side effects. On Windows each attempt kills the Roslyn client with an unhandled exception,
 which pops a Just-In-Time Debugger dialog on the user's screen wherever JIT debugging is
 registered — so do not retry in a loop. And never capture `cslq`'s stdout into a variable or

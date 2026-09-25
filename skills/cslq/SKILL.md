@@ -37,8 +37,13 @@ nothing to say is a failed *design-time build* — an unresolvable `PackageRefer
 MSBuild's design-time build all need pipes, so a restricted token fails every mode. `cslq` names
 it — `opening a named pipe was denied (restricted token / agent sandbox)` — on both the session
 notice and the `ready` cause, so take that line at its word rather than chasing the build.
-`--no-daemon` does not help. Run `cslq` outside the sandbox; REFERENCE.md has the four-line check
-and the rest.
+`--no-daemon` does not help. Run `cslq` outside the sandbox through the host's approved
+execution mechanism. In Codex on Windows, where escalation is available, use `exec_command`
+with `sandbox_permissions: "require_escalated"` and request the reusable `prefix_rule: ["cslq"]`
+for `ready` and subsequent queries. Once this restriction is known, use that route from the
+first call. Keep the default background session enabled; no separate Herdr pane or Windows
+Terminal tab is needed. If escalation is unavailable or denied, report the blocker instead of
+routing around it through another pane. REFERENCE.md has the tool example and pipe check.
 
 ## Task → command
 
