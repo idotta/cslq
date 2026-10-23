@@ -104,7 +104,7 @@ jobs:
       - id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: nupkg-${{ matrix.rid }}
           path: artifacts/cslq.${{ matrix.rid }}.${{ steps.v.outputs.version }}.nupkg
@@ -114,14 +114,14 @@ jobs:
       # and only one copy may be pushed, so they come from this leg alone. One upload each:
       # if-no-files-found is evaluated against the whole search rather than per path, so a
       # single upload listing both would pass with one of them missing.
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: matrix.os == 'ubuntu-latest'
         with:
           name: nupkg-pointer
           path: artifacts/cslq.${{ steps.v.outputs.version }}.nupkg
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: matrix.os == 'ubuntu-latest'
         with:
           name: nupkg-any
@@ -147,7 +147,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: nupkg-*
